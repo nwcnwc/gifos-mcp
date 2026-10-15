@@ -109,7 +109,7 @@ export function createServer({ cfg, meetings, bot }) {
     description: 'Posts text (an agenda, a link, a summary) into the meeting chat as the bot. Screen sharing is not available: the bot has no screen or camera.',
     inputSchema: {
       meeting_id: meetingId,
-      text: z.string().min(1).max(4000).describe('What to post into the meeting chat.'),
+      text: z.string().min(1).max(2000).describe('What to post into the meeting chat (up to 2000 characters).'),
     },
   }, guarded(async ({ meeting_id, text }) => {
     const m = needLive(meeting_id);

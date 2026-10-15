@@ -1,13 +1,10 @@
-// Drives the GifOS Meeting Bot store app in headless Chromium.
+// Drives the GifOS Meeting Bot store app in headless Chromium, through the
+// app's local control API (window.MeetingBot, contract version 1; see
+// CONTROL.md in gifos-apps-source/meeting-bot).
 //
-// Two browser profiles under GIFOS_MCP_HOME:
-//   profile-bot      GifOS desktop with Meeting Bot (and an STT provider app)
-//                    installed from the GifOS app store, running in RUN mode.
-//   profile-control  The same Meeting Bot app in CONTROL mode, with the same
-//                    name and password. This server talks to the bot through
-//                    it, using the app's own protocol (structured chat in the
-//                    secret admin meeting), exactly like a person would from
-//                    another device.
+// One browser profile under GIFOS_MCP_HOME/profile-bot: a GifOS desktop with
+// Meeting Bot and a speech-to-text provider app installed from the GifOS app
+// store. Meeting Bot runs in RUN mode in one tab.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -17,45 +14,6 @@ import { log } from './log.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// Runs inside the CONTROL app's sandboxed frame. It only uses what the app
-// itself has: the gifos.meet API and the app's BotProto codec.
-const CONTROLLER_SHIM = `(() => {
-  if (window.__gifosMcp) return true;
-  var replies = {}, xfers = {}, beat = null;
-  gifos.meet.onChat(function (ev) {
-    var m = BotProto.decode(String((ev && ev.text) || ''));
-    if (!m || m.role !== 'bot') return;
-    if (m.op === 'beat') beat = { at: Date.now(), instance: m.instance || '', meetings: m.meetings || [] };
-    if (m.ref) replies[m.ref] = m;
-  });
-  gifos.meet.onXfer(function (ev) {
-    if (!ev || !ev.id) return;
-    var text = '';
-    try { text = new TextDecoder().decode(new Uint8Array(ev.bytes || new ArrayBuffer(0))); } catch (e) {}
-    xfers[ev.id] = { name: ev.name || '', mime: ev.mime || '', text: text };
-  });
-  function adminId() {
-    return gifos.meet.list().then(function (l) {
-      var c = (l || []).filter(function (s) { return s.control; })[0];
-      if (!c) throw new Error('The control window is not in the admin meeting.');
-      return c.meetingId;
-    });
-  }
-  window.__gifosMcp = {
-    send: function (msg) {
-      var id = 'mcp' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-      return adminId().then(function (aid) {
-        var body = Object.assign({ v: 1, role: 'controller', instance: 'gifos-mcp' }, msg, { id: id });
-        return gifos.meet.sendChat(aid, BotProto.encode(body));
-      }).then(function () { return id; });
-    },
-    reply: function (id) { return replies[id] || null; },
-    xfer: function (id) { var x = xfers[id] || null; if (x) delete xfers[id]; return x; },
-    beat: function () { return beat ? { age: Date.now() - beat.at, instance: beat.instance, meetings: beat.meetings } : null; }
-  };
-  return true;
-})()`;
 
 // A short silent WAV for the bot's fake microphone, so the bot never opens
 // the real microphone of the machine it runs on.
@@ -77,12 +35,11 @@ export class MeetingBotDriver {
     this.error = '';
     this.starting = null;
     this.bot = null;      // { ctx, desk, app, frame, fileId }
-    this.ctrl = null;     // { ctx, desk, app, frame, fileId }
     this.sttFileId = '';
   }
 
   ensureStarted() {
-    if (this.state === 'ready' && this.ctrl && !this.ctrl.app.isClosed() && this.bot && !this.bot.app.isClosed()) return Promise.resolve();
+    if (this.state === 'ready' && this.bot && this.bot.app && !this.bot.app.isClosed()) return Promise.resolve();
     if (!this.starting) {
       this.starting = this.start().then(() => { this.starting = null; }, async (e) => {
         this.starting = null;
@@ -228,26 +185,9 @@ export class MeetingBotDriver {
       await sheet.waitFor({ state: 'hidden', timeout: 8000 }).catch(() => {});
     }
     const frame = await (await app.$('#appmount iframe')).contentFrame();
-    await frame.waitForSelector('#start', { timeout: this.cfg.timeoutMs });
+    await frame.waitForFunction(() => window.MeetingBot && window.MeetingBot.version >= 1, null, { timeout: this.cfg.timeoutMs })
+      .catch(() => { throw new Error('This Meeting Bot has no local control API (window.MeetingBot v1). Update Meeting Bot from the GifOS store.'); });
     return { app, frame };
-  }
-
-  async startMode(frame, mode) {
-    await frame.check(mode === 'run' ? '#mode-run' : '#mode-control');
-    await frame.fill('#bot-name', this.creds.name);
-    await frame.fill('#bot-pass', this.creds.password);
-    if (mode === 'run') await frame.fill('#rules', '');
-    await frame.click('#start');
-    const want = mode === 'run' ? 'Running' : 'Controlling';
-    const t0 = Date.now();
-    while (Date.now() - t0 < this.cfg.timeoutMs) {
-      const phase = (await frame.textContent('#phase')) || '';
-      if (phase === want) return;
-      const warn = await frame.$eval('#warn', (el) => (el.classList.contains('show') ? el.textContent : '')).catch(() => '');
-      if (warn && phase !== 'Checking whether this bot is already running…') throw new Error('Meeting Bot (' + mode + '): ' + warn);
-      await sleep(500);
-    }
-    throw new Error('Meeting Bot did not reach ' + want + ' in time.');
   }
 
   async shot(page, name) {
@@ -266,9 +206,9 @@ export class MeetingBotDriver {
     if (!audio) { audio = path.join(this.cfg.home, 'silence.wav'); if (!fs.existsSync(audio)) silenceWav(audio); }
 
     log('starting the bot browser for ' + this.cfg.gifosUrl);
-    const botCtx = await this.launch('profile-bot', audio);
-    this.bot = { ctx: botCtx };
-    const desk = await this.desktop(botCtx);
+    const ctx = await this.launch('profile-bot', audio);
+    this.bot = { ctx };
+    const desk = await this.desktop(ctx);
     this.bot.desk = desk;
     if (this.cfg.sttApp) {
       this.sttFileId = await this.installFromStore(desk, this.cfg.sttApp);
@@ -276,102 +216,65 @@ export class MeetingBotDriver {
     }
     this.bot.fileId = await this.installFromStore(desk, 'meeting-bot');
     await this.shot(desk, 'bot-desktop.png');
-    Object.assign(this.bot, await this.openApp(botCtx, this.bot.fileId));
+    Object.assign(this.bot, await this.openApp(ctx, this.bot.fileId));
     await this.startRun();
     await this.shot(this.bot.app, 'bot-running.png');
-
-    log('starting the control browser');
-    const ctrlCtx = await this.launch('profile-control', audio);
-    this.ctrl = { ctx: ctrlCtx };
-    const cdesk = await this.desktop(ctrlCtx);
-    this.ctrl.desk = cdesk;
-    this.ctrl.fileId = await this.installFromStore(cdesk, 'meeting-bot');
-    Object.assign(this.ctrl, await this.openApp(ctrlCtx, this.ctrl.fileId));
-    await this.startMode(this.ctrl.frame, 'control');
-    await this.ctrl.frame.evaluate(CONTROLLER_SHIM);
-    await this.waitForBeat(this.cfg.timeoutMs);
-    await this.shot(this.ctrl.app, 'control.png');
     this.state = 'ready';
-    log('ready: Meeting Bot is running and answering');
+    log('ready: Meeting Bot "' + this.creds.name + '" is running');
   }
 
-  // The bot announces itself every 3 s. A recent copy of a stopped bot (a
-  // restart within seconds) can still be in the admin meeting: wait it out
-  // once, then report it.
+  // RUN first listens ~5 s for a bot with the same name and password. A copy
+  // of this server stopped seconds ago can still look alive: wait it out once.
   async startRun() {
-    try {
-      await this.startMode(this.bot.frame, 'run');
-    } catch (e) {
-      if (!/already running/.test(String(e.message))) throw e;
+    const run = () => this.bot.frame.evaluate((c) => window.MeetingBot.start({ mode: 'run', name: c.name, password: c.password })
+      .then((s) => ({ ok: true, s }), (e) => ({ ok: false, error: String((e && e.message) || e) })), this.creds);
+    let r = await run();
+    if (!r.ok && /already running/.test(r.error)) {
       log('another bot with these credentials looks alive; waiting 20 s and trying once more');
       await sleep(20000);
-      await this.startMode(this.bot.frame, 'run');
+      r = await run();
     }
-  }
-
-  async waitForBeat(ms) {
+    if (!r.ok) throw new Error('Meeting Bot did not start: ' + r.error);
     const t0 = Date.now();
-    while (Date.now() - t0 < ms) {
-      const b = await this.ctrl.frame.evaluate(() => window.__gifosMcp.beat());
-      if (b && b.age < 10000) return b;
-      await sleep(500);
+    while (Date.now() - t0 < this.cfg.timeoutMs) {
+      const st = await this.bot.frame.evaluate(() => window.MeetingBot.status());
+      if (st.phase === 'run' && st.connected) return st;
+      await sleep(300);
     }
-    throw new Error('The control window never heard the bot in the admin meeting.');
+    throw new Error('Meeting Bot started but never joined its admin meeting.');
   }
 
-  async command(msg, { timeoutMs } = {}) {
+  // Calls window.MeetingBot.<method>(...args) in the app frame. A rejection
+  // comes back as an Error with the app's own message.
+  async call(method, ...args) {
     await this.ensureStarted();
-    const f = this.ctrl.frame;
-    const id = await f.evaluate((m) => window.__gifosMcp.send(m), msg);
-    const limit = timeoutMs || this.cfg.timeoutMs;
-    const t0 = Date.now();
-    while (Date.now() - t0 < limit) {
-      const r = await f.evaluate((id) => window.__gifosMcp.reply(id), id);
-      if (r) {
-        if (r.op === 'err') throw new Error('Meeting Bot: ' + (r.text || 'error'));
-        return r;
-      }
-      await sleep(250);
-    }
-    throw new Error('Meeting Bot did not answer "' + msg.op + '" in ' + Math.round(limit / 1000) + ' s.');
+    const r = await this.bot.frame.evaluate(({ method, args }) => window.MeetingBot[method](...args)
+      .then((v) => ({ ok: true, v }), (e) => ({ ok: false, error: String((e && e.message) || e) })), { method, args });
+    if (!r.ok) throw new Error('Meeting Bot: ' + r.error);
+    return r.v;
   }
 
   async join(link, password) {
-    const r = await this.command({ op: 'join', link, password: password || '' });
-    const m = /joined (\S+)/.exec(r.text || '');
-    if (!m) throw new Error('Meeting Bot answered the join without a session id: ' + (r.text || ''));
+    const r = await this.call('join', link, password || '');
     await this.shot(this.bot.app, 'bot-joined.png');
-    return m[1];
+    return r.id;
   }
 
-  async leave(sessionId) { await this.command({ op: 'leave', meetingId: sessionId }); }
-  async transcribe(sessionId, on) { await this.command({ op: 'transcribe', meetingId: sessionId, on: !!on }); }
-  async say(sessionId, text) { await this.command({ op: 'say', meetingId: sessionId, text: String(text) }); }
-
-  async list() {
-    const r = await this.command({ op: 'list' });
-    return r.items || [];
-  }
-
-  async transcript(sessionId) {
-    const r = await this.command({ op: 'transcript', meetingId: sessionId });
-    const t0 = Date.now();
-    while (Date.now() - t0 < 30000) {
-      const x = await this.ctrl.frame.evaluate((id) => window.__gifosMcp.xfer(id), r.xferId);
-      if (x) return x.text;
-      await sleep(250);
-    }
-    throw new Error('The transcript download did not arrive.');
-  }
+  async leave(sessionId) { await this.call('end', sessionId); }
+  async transcribe(sessionId, on) { await this.call('transcribe', sessionId, !!on); }
+  async say(sessionId, text) { await this.call('say', sessionId, String(text)); }
+  async list() { return this.call('list'); }
+  async transcript(sessionId) { return (await this.call('transcript', sessionId)).text || ''; }
 
   async info() {
     const out = { state: this.state, bot_name: this.creds.name, stt_ready: !!this.sttFileId };
     if (this.error) out.error = this.error;
     if (this.state === 'ready') {
       try {
-        const b = await this.ctrl.frame.evaluate(() => window.__gifosMcp.beat());
-        out.last_heartbeat_ms = b ? b.age : null;
-        out.bot_sessions = b ? b.meetings.map((m) => ({ session_id: m.id, transcribing: !!m.cc })) : [];
+        const st = await this.bot.frame.evaluate(() => window.MeetingBot.status());
+        out.connected = !!st.connected;
+        if (st.warning) out.warning = st.warning;
+        out.bot_sessions = (st.meetings || []).map((m) => ({ session_id: m.id, transcribing: !!m.cc, people: m.people || [] }));
       } catch (e) { out.error = String(e.message || e); }
       // GIFOS_MCP_DEBUG=1: what each meeting page says about its captions.
       if (this.cfg.debug) {
@@ -388,10 +291,7 @@ export class MeetingBotDriver {
   }
 
   async close() {
-    for (const side of [this.ctrl, this.bot]) {
-      if (side && side.ctx) await side.ctx.close().catch(() => {});
-    }
-    this.ctrl = null;
+    if (this.bot && this.bot.ctx) await this.bot.ctx.close().catch(() => {});
     this.bot = null;
     this.state = 'stopped';
   }

@@ -15,19 +15,22 @@ on your computer. No GifOS account or API key is involved.
 ## How it works
 
 ```
-Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium
-                                         ├─ GifOS desktop: Meeting Bot in RUN mode
-                                         │    (plus a speech-to-text provider app, offline Whisper)
-                                         └─ GifOS desktop: Meeting Bot in CONTROL mode
-                                              └─ talks to the bot over its secret admin meeting
+Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium (one profile in ~/.gifos-mcp)
+                                         └─ GifOS desktop
+                                              ├─ Meeting Bot, running as the bot (RUN mode)
+                                              │    driven through its local control API, window.MeetingBot v1
+                                              └─ Offline Captions (Whisper), the speech-to-text provider
 ```
 
 - `create_meeting` only mints a meeting link. Nothing joins yet.
 - `start_meeting` or `join_meeting` sends the bot into the meeting. Everyone in the meeting sees it as a tile
   labelled **🤖 bot** with a **📝 transcribing** chip. The bot has no camera and never sends audio.
-- Speech is turned into text on your computer by the Offline Captions (Whisper) app from the GifOS store.
-- `get_transcript` downloads the transcript from the bot over the admin meeting, the same way the Meeting Bot's
-  own CONTROL screen does.
+- Speech is turned into text on your computer by the Offline Captions (Whisper) app from the GifOS store. The bot
+  writes down each participant who is unmuted, credited by name. It never writes down its own machine's
+  microphone.
+- `get_transcript` reads the transcript straight from the bot. Meeting Bot's
+  [control contract](https://github.com/nwcnwc/gifos-apps-source/blob/meet-bot/meeting-bot/CONTROL.md) (version 1)
+  is the only interface this server relies on.
 
 **Grok Bot does the timing and the invites.** A Grok Bot routine calls `start_meeting` at meeting time. Invites
 go out through your own email or calendar connector in Grok Bot, and you approve each send. This server never
@@ -87,7 +90,7 @@ Add a local (stdio) MCP server in Grok Bot's MCP / connector settings. The confi
 From a clone, use `"command": "node"` and `"args": ["/path/to/gifos-mcp/bin/gifos-mcp.js"]`.
 
 The server warms up in the background as soon as Grok Bot starts it, so the first `start_meeting` doesn't wait
-for the browser. A cold start takes about 20 seconds.
+for the browser. A cold start takes about 10 seconds, plus downloads on the very first run.
 
 If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It listens on `127.0.0.1` only. Set
 `GIFOS_MCP_HTTP_TOKEN` to require `Authorization: Bearer <token>`.
@@ -100,7 +103,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_RELAY` | GifOS default | A custom relay (`wss://…`) for self-hosted GifOS. It is added to meeting links. |
 | `GIFOS_BOT_NAME`, `GIFOS_BOT_PASSWORD` | generated | The Meeting Bot name and password. They derive the bot's secret admin meeting. The name is what participants see. If unset, a strong pair is generated once and kept in `GIFOS_MCP_HOME/bot.json` (mode 0600). |
 | `GIFOS_STT_APP` | `offline-stt-whisper` | The store app that turns speech into text. `none` turns transcription off. |
-| `GIFOS_MCP_HOME` | `~/.gifos-mcp` | Browser profiles, the bot credential, and `meetings.json`. |
+| `GIFOS_MCP_HOME` | `~/.gifos-mcp` | The browser profile, the bot credential, and `meetings.json`. |
 | `GIFOS_HEADLESS` | `1` | `0` shows the browser windows, which helps when debugging. |
 | `GIFOS_CHROME` | Playwright's Chromium | Path to another Chromium or Chrome binary. |
 | `GIFOS_TIMEOUT_MS` | `120000` | How long to wait for GifOS steps such as joining. |
@@ -118,7 +121,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `join_meeting` | `link`, `password?`, `topic?` | The bot joins someone else's GifOS meeting (`…/run.html#v=…` or `…/meet/…`). Returns a `meeting_id`. |
 | `mute` | `meeting_id` | The bot stops transcribing, and the transcribing chip goes away. The bot never sends audio, so this is the only mute it has. |
 | `unmute` | `meeting_id` | The bot transcribes again. |
-| `share_content` | `meeting_id`, `text` | Posts text or a link into the meeting chat as the bot. There is no screen sharing, because the bot has no screen. |
+| `share_content` | `meeting_id`, `text` | Posts text or a link (up to 2000 characters) into the meeting chat as the bot. There is no screen sharing, because the bot has no screen. |
 | `get_transcript` | `meeting_id` | Plain text, one `speaker: words` line per caption. Works while the meeting is live and after `end_meeting`. |
 | `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Everyone else can stay, because GifOS meetings have no owner who can close them. |
 | `list_meetings` | none | Every meeting this server created or joined, with its state (`scheduled`, `live` or `ended`). |
@@ -147,9 +150,10 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
   peers find each other.
 - **Consent is visible.** The bot is labelled 🤖 bot and shows 📝 transcribing whenever it listens. `mute`
   removes the chip.
-- **The bot never uses your microphone or camera.** Its browser is fed a silent fake microphone, and it joins
-  with no camera.
-- **Only one secret.** The bot name and password derive the admin meeting that controls the bot. Keep
+- **The bot never uses your microphone or camera.** It joins with no camera, Meeting Bot never transcribes its
+  own machine's microphone, and its browser is fed a silent fake microphone anyway.
+- **Only one secret.** The bot name and password derive Meeting Bot's secret admin meeting, which can command
+  the bot from another device (Meeting Bot's CONTROL mode). Keep
   `GIFOS_MCP_HOME/bot.json` private (it is mode 0600), or pass the pair through environment variables. Anyone
   with the pair can command the bot.
 - **Meeting links are capabilities.** Anyone with a link can join that meeting, so share links only with the
@@ -167,11 +171,12 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 |---|---|
 | `The GifOS store at … has no "meeting-bot" app` | That GifOS is older than 0.9.23. Set `GIFOS_URL` to a 0.9.23 or newer site. |
 | `The store refused to install meeting-bot: Needs a newer GifOS` | Same cause: the site's build is older than the one Meeting Bot needs. |
-| `Meeting Bot (run): A bot with this name and password is already running…` | Another `gifos-mcp` (or a Meeting Bot window) uses the same name and password. Stop it, or give this one its own `GIFOS_MCP_HOME` or `GIFOS_BOT_NAME`/`GIFOS_BOT_PASSWORD`. |
+| `Meeting Bot did not start: A bot with this name and password is already running…` | Another `gifos-mcp` (or a Meeting Bot window) uses the same name and password. Stop it, or give this one its own `GIFOS_MCP_HOME` or `GIFOS_BOT_NAME`/`GIFOS_BOT_PASSWORD`. |
 | `get_transcript` stays at `(no transcript lines yet)` | Somebody has to speak with their mic on. The first transcription downloads the Whisper model (about 77 MB), which takes a minute. Run with `GIFOS_MCP_DEBUG=1` and call `status` to see each meeting's caption state. |
+| `This Meeting Bot has no local control API` | The store's Meeting Bot is older than the control contract v1. Update it from the store (the server presses Update when the store offers it). |
 | `Chromium for Playwright is missing` | Run `npx playwright install chromium`. On Linux you may also need `npx playwright install-deps chromium`. |
 | The routine's `start_meeting` failed | The server wasn't running, or the machine was asleep. Keep it on an always-on machine. |
-| Tool calls time out in the client | The first call after launch can take about 20 seconds while the browser starts. Leave `GIFOS_MCP_LAZY` unset so it warms up at launch. |
+| Tool calls time out in the client | The first call after launch can take about 10 seconds while the browser starts. Leave `GIFOS_MCP_LAZY` unset so it warms up at launch. |
 | Anything else | `GIFOS_HEADLESS=0` shows the browser windows. `GIFOS_MCP_SHOTS=/tmp/shots` saves screenshots of each step. |
 
 ## Testing instructions for marketplace reviewers
@@ -211,7 +216,8 @@ E2E_SPEECH_WAV=/path/to/someone-speaking.wav \
 npm run test:e2e
 ```
 
-It serves the GifOS checkout on `127.0.0.1:19510`, adds Meeting Bot to that site's store, and spawns
+It serves the GifOS checkout on `127.0.0.1:19510`, adds Meeting Bot to that site's store (from
+`MEETING_BOT_SRC`; leave it unset when the checkout already lists `apps/meeting-bot`), and spawns
 `gifos-mcp` over stdio. Then it runs `create_meeting` → `start_meeting`. A second headless browser joins as
 "Alice" and plays the WAV. The test checks that `get_transcript` returns Alice's words, then runs
 `share_content`, `mute`/`unmute`, `list_meetings` and `end_meeting`. Screenshots go to `.e2e/proof/`.

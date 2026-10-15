@@ -3,7 +3,8 @@
 //   GIFOS_APP_DIR=../gifos-app MEETING_BOT_SRC=../gifos-apps-source/meeting-bot \
 //   E2E_SPEECH_WAV=/path/to/speech.wav npm run test:e2e
 //
-// 1. Serves GIFOS_APP_DIR on 127.0.0.1:19510 with Meeting Bot added to its store.
+// 1. Serves GIFOS_APP_DIR on 127.0.0.1:19510; Meeting Bot comes from its store
+//    listing, or is packed from MEETING_BOT_SRC and added to that store.
 // 2. Starts a relay (RELAY_SCRIPT, on 19511) or uses E2E_RELAY.
 // 3. Spawns bin/gifos-mcp.js over stdio and drives it with an MCP client:
 //    create_meeting -> start_meeting -> a second headless browser joins as
@@ -82,7 +83,9 @@ async function waitPort(port, ms) {
 
 async function main() {
   need(SITE_DIR && fs.existsSync(path.join(SITE_DIR, 'run.html')), 'set GIFOS_APP_DIR to a gifos-app checkout (release/0.9.23 or later)');
-  need(BOT_SRC && fs.existsSync(path.join(BOT_SRC, 'manifest.json')), 'set MEETING_BOT_SRC to the meeting-bot source folder (gifos-apps-source)');
+  const listed = fs.existsSync(path.join(SITE_DIR, 'apps', 'meeting-bot', 'app.json'));
+  need(listed || (BOT_SRC && fs.existsSync(path.join(BOT_SRC, 'manifest.json'))),
+    'this GifOS store has no meeting-bot listing: set MEETING_BOT_SRC to the meeting-bot source folder (gifos-apps-source)');
   need(STT === 'whisper' || STT === 'synthetic', 'E2E_STT is whisper or synthetic');
   need(STT !== 'whisper' || (SPEECH && fs.existsSync(SPEECH)), 'whisper mode needs E2E_SPEECH_WAV, a WAV file of someone speaking');
   fs.mkdirSync(PROOF, { recursive: true });
@@ -93,8 +96,12 @@ async function main() {
 
   // ---- local GifOS with Meeting Bot in its store ----
   const logo = fs.readFileSync(path.join(REPO, 'assets', 'logo-512.png'));
-  const bot = await packApp(BOT_SRC, SITE_DIR, ['manifest.json', 'index.html', 'app.js', 'protocol.js', 'help.md', 'listing.json']);
-  const extra = [{ slug: 'meeting-bot', ...bot, cover: logo }];
+  // Meeting Bot from MEETING_BOT_SRC when given, else the site's own store listing.
+  const extra = [];
+  if (BOT_SRC) {
+    const bot = await packApp(BOT_SRC, SITE_DIR, ['manifest.json', 'index.html', 'app.js', 'protocol.js', 'help.md', 'CONTROL.md', 'listing.json']);
+    extra.push({ slug: 'meeting-bot', ...bot, cover: logo });
+  }
   if (STT === 'synthetic') {
     const dir = path.join(work, 'stt-synthetic');
     fs.mkdirSync(dir);
@@ -102,7 +109,9 @@ async function main() {
     extra.push({ slug: 'stt-synthetic', ...(await packApp(dir, SITE_DIR, ['manifest.json', 'index.html'])), cover: logo });
   }
   const site = await startSite({ siteDir: SITE_DIR, port: SITE_PORT, extraApps: extra });
-  check('local GifOS store lists meeting-bot', true, 'meeting-bot ' + bot.manifest.version + ', ' + bot.bytes.length + ' bytes');
+  const listing = JSON.parse(await (await fetch(BASE + '/apps/meeting-bot/app.json')).text());
+  check('local GifOS store lists meeting-bot', listing.appId === 'meeting-bot',
+    (BOT_SRC ? 'packed from MEETING_BOT_SRC' : 'the site\'s own listing') + ', version ' + listing.version + ', ' + listing.bytes + ' bytes, sha256 ' + String(listing.sha256).slice(0, 12));
 
   let relayProc = null;
   let relay = process.env.E2E_RELAY || '';

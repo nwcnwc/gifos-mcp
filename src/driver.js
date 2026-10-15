@@ -176,14 +176,33 @@ export class MeetingBotDriver {
     }
     await desk.waitForURL(/index\.html/, { timeout: this.cfg.timeoutMs });
     await desk.waitForSelector('.icon', { timeout: this.cfg.timeoutMs });
+    // The store writes the file, then the desktop places its icon (a provider
+    // app into Providers). Leaving the page earlier loses the icon.
     let fid = '';
     const t0 = Date.now();
-    while (!fid && Date.now() - t0 < 30000) { fid = await this.installedFileId(desk, slug); if (!fid) await sleep(300); }
-    if (!fid) throw new Error('Installing ' + slug + ' did not finish.');
-    return fid;
+    while (Date.now() - t0 < 30000) {
+      fid = await this.installedFileId(desk, slug);
+      if (fid && await this.placedParent(desk, fid) !== undefined) return fid;
+      await sleep(300);
+    }
+    throw new Error('Installing ' + slug + ' did not finish.');
+  }
+
+  // The parent folder of the app's icon: null for the Home Screen, undefined
+  // when no icon exists.
+  placedParent(desk, fileId) {
+    return desk.evaluate(async (fileId) => {
+      const it = (await GifOS.store.allItems()).find((i) => i.fileId === fileId);
+      return it ? (it.parent || null) : undefined;
+    }, fileId);
   }
 
   async useAsSpeechToText(desk, fileId, appId) {
+    // GifOS only lets a provider answer from the Providers folder.
+    if (await this.placedParent(desk, fileId) !== 'sys_providers') {
+      throw new Error('The ' + appId + ' app is installed but not in the Providers folder of the bot desktop. Remove ' +
+        this.cfg.home + '/profile-bot and restart to reinstall it.');
+    }
     await desk.evaluate(({ fileId, appId }) => {
       const cfg = JSON.parse(localStorage.getItem('gifos_ai_config') || '{}') || {};
       if (cfg.stt && cfg.stt.app === fileId) return;
@@ -195,6 +214,7 @@ export class MeetingBotDriver {
   async openApp(ctx, fileId) {
     const app = await ctx.newPage();
     app.on('pageerror', (e) => log('[app] ' + e.message));
+    if (this.cfg.debug) app.on('console', (m) => log('[console] ' + m.text().slice(0, 300)));
     await app.goto(this.cfg.gifosUrl + '/run.html#id=' + encodeURIComponent(fileId), { waitUntil: 'domcontentloaded', timeout: this.cfg.timeoutMs });
     await app.waitForSelector('#appmount iframe', { timeout: this.cfg.timeoutMs });
     // First launch asks for the app's abilities. Meeting Bot needs Meet and Remote.
@@ -353,6 +373,16 @@ export class MeetingBotDriver {
         out.last_heartbeat_ms = b ? b.age : null;
         out.bot_sessions = b ? b.meetings.map((m) => ({ session_id: m.id, transcribing: !!m.cc })) : [];
       } catch (e) { out.error = String(e.message || e); }
+      // GIFOS_MCP_DEBUG=1: what each meeting page says about its captions.
+      if (this.cfg.debug) {
+        out.debug_sessions = await this.bot.app.evaluate(() => Array.from(document.querySelectorAll('iframe[data-gifos-meet]')).map((f) => {
+          try {
+            const g = f.contentWindow.__gifosVideo;
+            return { id: f.getAttribute('data-gifos-meet'), captions: g && g.whisperForTest ? g.whisperForTest() : null,
+              status: (f.contentDocument.querySelector('#status') || {}).textContent || '' };
+          } catch (e) { return { id: f.getAttribute('data-gifos-meet'), error: String(e) }; }
+        })).catch((e) => String(e));
+      }
     }
     return out;
   }

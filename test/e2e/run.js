@@ -26,7 +26,7 @@ const BOT_SRC = process.env.MEETING_BOT_SRC ? path.resolve(process.env.MEETING_B
 const SITE_PORT = Number(process.env.E2E_SITE_PORT || 19510);
 const RELAY_PORT = Number(process.env.E2E_RELAY_PORT || 19511);
 const STT = process.env.E2E_STT || 'whisper';            // whisper | synthetic
-const SPEECH = process.env.E2E_SPEECH_WAV || '';
+const SPEECH = process.env.E2E_SPEECH_WAV ? path.resolve(process.env.E2E_SPEECH_WAV) : ''; // Chromium needs an absolute path
 const EXPECT = new RegExp(process.env.E2E_EXPECT || (STT === 'synthetic' ? 'synthetic speech' : '[A-Za-z]{3,}'), 'i');
 const PROOF = path.resolve(process.env.E2E_PROOF_DIR || path.join(REPO, '.e2e', 'proof'));
 const BASE = 'http://127.0.0.1:' + SITE_PORT;
@@ -183,6 +183,7 @@ async function main() {
       if (/^Alice: /m.test(transcript) && EXPECT.test(transcript)) break;
       await sleep(5000);
     }
+    if (!EXPECT.test(transcript)) say('status at transcript timeout: ' + text(await client.callTool({ name: 'status', arguments: {} }, undefined, CALL)));
     say('transcript so far:\n' + transcript.split('\n').slice(0, 12).map((l) => '    | ' + l).join('\n'));
     check('get_transcript returns Alice\'s words', /^Alice: /m.test(transcript) && EXPECT.test(transcript), 'expect ' + EXPECT);
 

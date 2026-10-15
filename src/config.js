@@ -26,11 +26,12 @@ export function loadConfig(env = process.env) {
     sttApp: stt === 'none' ? '' : stt,
     headless: env.GIFOS_HEADLESS !== '0',
     chrome: String(env.GIFOS_CHROME || '').trim(),
-    botAudio: String(env.GIFOS_BOT_AUDIO || '').trim(),
+    botAudio: env.GIFOS_BOT_AUDIO ? path.resolve(String(env.GIFOS_BOT_AUDIO).trim()) : '', // Chromium needs an absolute path
     shotsDir: String(env.GIFOS_MCP_SHOTS || '').trim(),
     timeoutMs: Number(env.GIFOS_TIMEOUT_MS) > 0 ? Number(env.GIFOS_TIMEOUT_MS) : 120000,
     autoInstallBrowser: env.GIFOS_MCP_NO_INSTALL !== '1',
     prewarm: env.GIFOS_MCP_LAZY !== '1',
+    debug: env.GIFOS_MCP_DEBUG === '1',
   };
 }
 

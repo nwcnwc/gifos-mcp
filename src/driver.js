@@ -13,6 +13,7 @@ import { chromium } from 'playwright';
 import { log } from './log.js';
 import { AdminRoom } from './admin/room.js';
 import { providerRegistration } from './providers/registry.js';
+import { mouthInitScript } from './providers/mouth.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -42,6 +43,9 @@ export class MeetingBotDriver {
     this.sttFileId = '';
     this.providers = providerRegistration();
     this.switches = { respond_to_command: true, conversation_voice: 'none' };
+    this.earTimer = null;
+    this.playGen = 0;
+    this.onLine = null;
   }
 
   ensureStarted() {
@@ -93,6 +97,7 @@ export class MeetingBotDriver {
     const init = { gifos_meet_bar: '0', gifos_name: this.creds.name };
     if (this.cfg.relay) init.gifos_relay = this.cfg.relay;
     await ctx.addInitScript({ content: 'try{var o=' + JSON.stringify(init) + ';for(var k in o)localStorage.setItem(k,o[k]);}catch(e){}' });
+    await ctx.addInitScript({ content: mouthInitScript() });
     return ctx;
   }
 
@@ -226,6 +231,7 @@ export class MeetingBotDriver {
     await this.startRun();
     await this.openControl();
     await this.announceProviders();
+    await this.armEars();
     await this.shot(this.bot.app, 'bot-running.png');
     this.state = 'ready';
     log('ready: Meeting Bot "' + this.creds.name + '" is running, controlled from its admin room');
@@ -414,7 +420,103 @@ export class MeetingBotDriver {
     return out;
   }
 
+  // The RUN page hears caption lines. They are kept only for meetings whose
+  // tile is transcribing. The admin meeting is not one of those lines.
+  async armEars() {
+    if (!this.bot || !this.bot.frame) return;
+    await this.bot.frame.evaluate(() => {
+      if (!window.gifos || !gifos.meet || typeof gifos.meet.onTranscriptLine !== 'function') return;
+      if (window.__gifosEar) return;
+      window.__gifosEar = true;
+      window.__gifosHeard = [];
+      gifos.meet.onTranscriptLine((ev) => {
+        const line = ev && ev.line;
+        if (!line || !ev.meetingId) return;
+        window.__gifosHeard.push({
+          meetingId: String(ev.meetingId),
+          speaker: String(line.by || ''),
+          text: String(line.text || ''),
+          at: line.at || Date.now(),
+        });
+      });
+    });
+    if (this.earTimer) clearInterval(this.earTimer);
+    this.earTimer = setInterval(() => {
+      this.drainEars().catch((e) => log('ears: ' + (e && e.message || e)));
+    }, 500);
+    if (this.earTimer.unref) this.earTimer.unref();
+  }
+
+  async drainEars() {
+    if (!this.bot || !this.bot.frame || typeof this.onLine !== 'function') return;
+    const pack = await this.bot.frame.evaluate(() => {
+      let cc = [];
+      try {
+        const st = window.MeetingBot && window.MeetingBot.status ? window.MeetingBot.status() : null;
+        cc = ((st && st.meetings) || []).filter((m) => m && m.cc).map((m) => m.id);
+      } catch (e) { cc = []; }
+      const xs = window.__gifosHeard || [];
+      window.__gifosHeard = [];
+      return { cc, xs };
+    });
+    const open = new Set(pack.cc || []);
+    for (const line of pack.xs || []) {
+      if (!line || !line.text || !open.has(line.meetingId)) continue;
+      Promise.resolve(this.onLine(line)).catch((e) => log('converse: ' + (e && e.message || e)));
+    }
+  }
+
+  async workFrames() {
+    if (!this.bot || !this.bot.app) return [];
+    const ids = await this.bot.app.evaluate(() => {
+      const host = window.GifOS && window.GifOS.meetHost;
+      const list = host && host.list ? host.list() : [];
+      return list.filter((s) => s && !s.control).map((s) => s.meetingId);
+    });
+    const frames = [];
+    for (const id of ids || []) {
+      const el = await this.bot.app.$('iframe[data-gifos-meet="' + id + '"]');
+      if (!el) continue;
+      const frame = await el.contentFrame();
+      if (frame) frames.push(frame);
+    }
+    return frames;
+  }
+
+  // Plays one encoded clip (wav or anything decodeAudioData accepts) into
+  // every work meeting. Returns false when the bot is not in one.
+  async playEncoded(bytes) {
+    if (!bytes || !bytes.length) return false;
+    const frames = await this.workFrames().catch(() => []);
+    if (!frames.length) return false;
+    this.playGen += 1;
+    const gen = this.playGen;
+    const b64 = Buffer.from(bytes).toString('base64');
+    let ok = false;
+    for (const frame of frames) {
+      const played = await frame.evaluate((audio) => {
+        if (typeof window.__gifosPlayEncoded !== 'function') return false;
+        return window.__gifosPlayEncoded(audio);
+      }, b64).catch(() => false);
+      if (played) ok = true;
+    }
+    if (this.playGen === gen) await this.quiet().catch(() => {});
+    return ok;
+  }
+
+  async quiet() {
+    this.playGen += 1;
+    const frames = await this.workFrames().catch(() => []);
+    for (const frame of frames) {
+      await frame.evaluate(() => {
+        if (typeof window.__gifosQuiet === 'function') window.__gifosQuiet();
+      }).catch(() => {});
+    }
+  }
+
   async close() {
+    if (this.earTimer) clearInterval(this.earTimer);
+    this.earTimer = null;
     if (this.bot && this.bot.ctx) await this.bot.ctx.close().catch(() => {});
     this.bot = null;
     this.control = null;

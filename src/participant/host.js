@@ -245,7 +245,7 @@ export class ParticipantHost {
           this.quietMs.set(id, quiet);
           if (quiet > 800) this.speakingNow.delete(speaker);
         }
-        this.enqueuePcm(id, slot.name || speaker, i16);
+        this.enqueuePcm(id, slot.name || speaker, i16, slot.lane || '');
         this.poke();
         return this.stopRequested ? { stop: true } : undefined;
       }
@@ -290,6 +290,7 @@ export class ParticipantHost {
       if (this.heard.length > 400) this.heard.splice(0, this.heard.length - 400);
       this.lastSpeechEnd = Math.max(this.lastSpeechEnd, utter.tEnd);
       this.appendLine({ kind: 'speech', speaker, text, ts: utter.tEnd, lane });
+      this.noteHeard(speaker, text, lane);
       log('stt ' + speaker + ' ' + (out.ms || 0) + 'ms ' + text.length + ' chars');
     } finally {
       this.pending = Math.max(0, this.pending - 1);
@@ -297,13 +298,20 @@ export class ParticipantHost {
     }
   }
 
-  enqueuePcm(streamId, speaker, i16) {
+  noteHeard(speaker, text, lane) {
+    if (!this.converse || typeof this.converse.onHeard !== 'function') return;
+    Promise.resolve(this.converse.onHeard({
+      speaker, text, lane: lane || '', names: [this.displayName, 'bot'],
+    })).catch((e) => log('converse: ' + (e && e.message || e)));
+  }
+
+  enqueuePcm(streamId, speaker, i16, lane) {
     const prev = this.sttQueues.get(streamId) || Promise.resolve();
     this.pending++;
     const run = prev.then(async () => {
       if (!this.voice) return;
       const events = await this.voice.pushPcm(streamId, speaker, i16);
-      for (const ev of events || []) this.applyStt(speaker, ev);
+      for (const ev of events || []) this.applyStt(speaker, ev, lane);
     }).catch((e) => log('stt failed: ' + (e && e.message || e))).finally(() => {
       this.pending = Math.max(0, this.pending - 1);
       this.poke();
@@ -311,7 +319,7 @@ export class ParticipantHost {
     this.sttQueues.set(streamId, run.then(() => {}, () => {}));
   }
 
-  applyStt(speaker, ev) {
+  applyStt(speaker, ev, lane) {
     if (!ev || !ev.final) return;
     const text = String(ev.text || '').trim();
     if (!text || isHallucination(text) || isSelfName(speaker, this.displayName)) {
@@ -321,10 +329,12 @@ export class ParticipantHost {
     const tStart = Number(ev.t_start) || Date.now();
     const tEnd = Math.max(tStart, Number(ev.t_end) || Date.now());
     const entry = { id: 'u' + (this.nextId++), speaker, text, t_start: tStart, t_end: tEnd };
+    if (lane) entry.lane = lane;
     this.heard.push(entry);
     if (this.heard.length > 400) this.heard.splice(0, this.heard.length - 400);
     this.lastSpeechEnd = Math.max(this.lastSpeechEnd, tEnd);
-    this.appendLine({ kind: 'speech', speaker, text, ts: tEnd });
+    this.appendLine({ kind: 'speech', speaker, text, ts: tEnd, lane });
+    this.noteHeard(speaker, text, lane);
     log('stt ' + speaker + ' ' + text.length + ' chars');
   }
 

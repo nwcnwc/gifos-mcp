@@ -102,7 +102,51 @@ Overlap is the point of many meetings. Two orders whose windows overlap are both
 - **At schedule time.** `schedule_meeting` and `import_schedule` store the order and return `capacity: { cap, seated_at_start, over_by }`. `over_by` is how many orders, including this one, exceed the cap at this order's start. The default is to store and warn. `reject_if_over_capacity: true` refuses the write instead. The caller decides. This process does not drop some other meeting to make room.
 - **Same room.** Two orders with the same room and an overlapping window are one session. The second write is a duplicate, matched on room and `external_id`. It updates the existing order or returns the existing `schedule_id`. It does not open a second iframe.
 - **At join time.** If the cap is full, the order waits as `waiting_for_capacity`. It does not kick a meeting that is still inside its window. When a seat frees and `now` is still before `end`, it joins. If `end` arrives first, the occurrence is `missed` with reason `capacity`.
-- **What the owner sees.** `list_schedule` can include `conflicts`: each instant where more orders overlap than the cap, with the `schedule_id`s involved. Overlap under the cap is not a conflict. A caller who wants every overlap passes `flag_overlaps: true`.
+- **What the owner sees.** `list_schedule` can include `conflicts`: each instant where more orders overlap than the cap, with the `schedule_id`s involved. Overlap under the cap is not a conflict. A caller who wants every overlap passes `flag_overlaps: true`. The human is not expected to poll that list. The alerts below are what Grok Bot pushes.
+
+### Capacity alerts
+
+The Grok Bot human is told when the meeting bot is at capacity, and earlier, when the schedule already shows a clash. This process raises the facts. Grok Bot pushes them to the human. This process does not page anyone.
+
+Three events, on the same stream as every other event (`tail_events` and `gifos://events`). Each one is also the body of `capacity_status`, so a client that connects late can still warn.
+
+| type | When |
+|---|---|
+| `capacity.near` | Seated count has reached `GIFOS_CAPACITY_NEAR` (a seated count set below the cap), or a future instant inside the schedule horizon would. One room of headroom is still left. |
+| `capacity.reached` | Seated count has reached the cap, a join is waiting or refused, or a future instant inside the horizon would seat more orders than the cap. This is the warning that a meeting will wait or be missed unless the human frees a seat or moves an order. |
+| `capacity.cleared` | Live seats are back under the near threshold, and no instant inside the horizon is still near or over the cap. |
+
+`when` on the payload is `live` or `scheduled`. A live crossing and a future clash are both raised. They are not folded into one silence. A future clash uses `at` for the instant the overlap starts, which is before that meeting's join time, so the warning lands before the occurrence can be missed. A clash that is still outside the horizon is raised when it enters the horizon, still ahead of the join.
+
+The same level is not repeated on every clock tick. A new event is raised when the level changes, or when the set of affected or waiting ids changes. After a restart, if the condition still holds, one event is raised again so a client that was down still hears it.
+
+Every alert names the rooms and the queue. `affected` is who is seated or who is planned to be seated at `at`. `waiting` is who cannot get in: phase `waiting_for_capacity`, a refused manual join, or an order that would be the one over the cap at that future instant. No passwords, no keys.
+
+```json
+{
+  "seq": 1402,
+  "ts": "2026-10-16T15:50:00.000Z",
+  "type": "capacity.reached",
+  "data": {
+    "when": "scheduled",
+    "at": "2026-10-16T16:00:00.000Z",
+    "cap": 2,
+    "near": 1,
+    "seated": 2,
+    "affected": [
+      { "schedule_id": "sch_weekly_notes", "meeting_id": "m_ab12cd34ef", "topic": "Notes", "phase": "upcoming", "start": "2026-10-16T16:00:00.000Z", "end": "2026-10-16T16:30:00.000Z" },
+      { "schedule_id": "sch_review", "topic": "Review", "phase": "upcoming", "start": "2026-10-16T16:00:00.000Z", "end": "2026-10-16T16:30:00.000Z" }
+    ],
+    "waiting": [
+      { "schedule_id": "sch_design", "topic": "Design", "phase": "upcoming", "start": "2026-10-16T16:00:00.000Z", "end": "2026-10-16T17:00:00.000Z" }
+    ]
+  }
+}
+```
+
+`meeting_id` on the envelope is empty for these events, because more than one meeting is involved. The ids are in `affected` and `waiting`. A future order that has not been materialized yet has a `schedule_id` and no `meeting_id`.
+
+**`capacity_status`** returns the same picture without waiting for the next event. `level` is `ok`, `near`, or `reached`. `live` is the seated set and the waiting set right now. `upcoming` is each instant inside the horizon where the level would be `near` or `reached`, with that instant's `affected` and `waiting`. Grok Bot calls this when it starts and whenever the human asks, and it treats `capacity.near`, `capacity.reached`, and `capacity.cleared` on the event stream as the push. The words the human reads are Grok Bot's.
 
 ### Persistence
 
@@ -140,6 +184,7 @@ Events, on the same stream as section 4, carry `schedule_id` and `meeting_id` wh
 | `schedule.waiting` | The cap blocked the join. |
 | `schedule.overrun` | `end` passed and the bot is staying under the overrun rule. Data includes the rule and the hard cap. |
 | `schedule.missed` | Reason `capacity`, `late`, or `restart_after_window`. |
+| `capacity.near` / `capacity.reached` / `capacity.cleared` | The human-facing capacity alerts. Payload is the one in the capacity section: `when`, `at`, `affected`, and `waiting`. |
 | `meeting.joined` / `meeting.left` | As in section 4. `meeting.left` adds `reason`. |
 
 `gifos://schedule/{schedule_id}` lists the public order and, for a series, the materialized occurrences. It does not include the password or the transcript body. The transcript stays on `gifos://meeting/{meeting_id}/transcript`.
@@ -249,8 +294,11 @@ One ordered stream for the whole connector, so a dashboard can update without po
 | `line.speech` / `line.chat` / `line.spoken` | the line fields |
 | `meeting.state` | `transcribing`, `speaking`, `listening`, `hand`, `mic`, `camera`, `people` |
 | `meeting.error` | `text` (already scrubbed) |
+| `capacity.near` / `capacity.reached` / `capacity.cleared` | `when` (`live` or `scheduled`), `at`, `cap`, `near`, `seated`, `affected`, `waiting`. Raised for a full room now and for a clash the schedule already shows. |
 
-`gifos://events` is the same bytes as newline-delimited JSON. Subscribe still uses the resource-updated notification this server already sends for transcripts. `tail_events` is the cursor form for a client that does not hold a subscription. Either way the payload is the rows above. There is no second protocol and no webhook in the first version.
+`gifos://events` is the same bytes as newline-delimited JSON. Subscribe still uses the resource-updated notification this server already sends for transcripts. `tail_events` is the cursor form for a client that does not hold a subscription. Either way the payload is the rows above. There is no second protocol and no webhook in the first version. Grok Bot is the client that turns `capacity.near` and `capacity.reached` into a warning the human sees, and `capacity.cleared` into the all-clear.
+
+**`capacity_status`** is the same snapshot as the latest capacity event, plus every future clash still inside the horizon. See section 2. A client calls it on connect so a warning is not lost when no new event is in flight.
 
 Per-meeting resources stay: `gifos://meeting/{id}/transcript` remains the speech feed. A later `.../lines` can carry all three kinds. Old clients that only understand `speech` keep working.
 
@@ -364,7 +412,7 @@ Nothing in this design puts a private address, a customer name, or a real host i
 
 | Repo | Change |
 |---|---|
-| gifos-mcp | Queue Kokoro by meeting id. Stop echoing the room password after the invite call. Add `meeting_status`, `tail_lines`, `meetings_report`, and `tail_events`. Add the schedule file, the clock, and `schedule_meeting`, `list_schedule`, `update_schedule`, `cancel_schedule`, and `import_schedule`. Enforce the cap once it has a measured default. The supervisor and the fleet are later. |
+| gifos-mcp | Queue Kokoro by meeting id. Stop echoing the room password after the invite call. Add `meeting_status`, `tail_lines`, `meetings_report`, `tail_events`, and `capacity_status`. Add the schedule file, the clock, and `schedule_meeting`, `list_schedule`, `update_schedule`, `cancel_schedule`, and `import_schedule`. Raise `capacity.near`, `capacity.reached`, and `capacity.cleared` for a full room now and for a future clash. Enforce the cap once it has a measured default. The supervisor and the fleet are later. |
 | gifos-app | Per-session voice generation and play target in `meet-host.js` / `host-voice.js`. Eyes: resize one session iframe. Chat events, if they are not already posted. |
 | gifos-apps-source | The RUN management screen: list, per-meeting status, the day's orders, paste link and password, leave, open eyes for one meeting. `interject` and conversation turns stay addressed by meeting id. |
 

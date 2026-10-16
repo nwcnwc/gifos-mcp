@@ -224,7 +224,7 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
 
   server.registerTool('status', {
     title: 'Connector status',
-    description: 'Is the headless GifOS browser up, which GifOS it uses, and which meetings the bot is in right now.',
+    description: 'Is the headless GifOS browser up, which GifOS it uses, which text-to-speech engine is selected, and which meetings the bot is in right now.',
     inputSchema: {},
   }, guarded(async () => {
     const info = await bot.info();
@@ -232,6 +232,7 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
       version: VERSION,
       gifos_url: cfg.gifosUrl,
       stt_app: cfg.sttApp || null,
+      tts: ttsPublic(cfg.tts, info && info.tts),
       live_meetings: meetings.all().filter((m) => m.state === 'live').map((m) => m.meeting_id),
       bot: info,
       participant: participant ? participant.info() : null,

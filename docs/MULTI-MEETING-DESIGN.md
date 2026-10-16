@@ -51,7 +51,7 @@ The bot does not sit in a room all day. A join order has a start and an end. The
 
 ### What a join order is
 
-`join_meeting` and `create_meeting` gain optional `start` and `end`. `schedule_meeting` is the same order when the caller is filling the company list rather than asking for an immediate seat. An order with no `start` joins now. An order with no `end` stays until `leave_meeting` or `cancel_schedule`, and the schedule marks it `open_ended` so the owner can see that this room will not end by itself. The normal company order has both times.
+`join_meeting` and `create_meeting` gain optional `start` and `end`. `schedule_meeting` is the same order when the caller is filling the company list rather than asking for an immediate seat. An order with no `start` joins now. An order may omit `end`. The stored end is then `start` plus 8 hours, and the order is marked `end_defaulted` so the owner can see the time was filled in. After that end, the overrun rule applies: leave when no human remains, or after 10 minutes of silence from anyone but the bot, and otherwise stay. An explicit `end` is kept as given and uses the same overrun rule. There is no separate open-ended stay.
 
 Fields stored with the order:
 
@@ -60,7 +60,7 @@ Fields stored with the order:
 | `schedule_id` | Stable id of the order. A series uses one id. One occurrence uses `meeting_id` once it is concrete. |
 | `meeting_id` | Present once this occurrence has a row in the meeting store. Reports and events use it. |
 | `topic`, `link` | Plain link. A missing link means this process mints a room, the way `create_meeting` does today. |
-| `start`, `end` | Instants. Absent `start` means now. Absent `end` means open-ended. |
+| `start`, `end` | Instants. Absent `start` means now. Absent `end` is stored as `start` plus 8 hours, with `end_defaulted: true`. Overrun begins at the stored end. |
 | `timezone` | IANA name, such as `America/Los_Angeles`. The instant is what the clock fires on. The name is how a weekly rule and a display stay in the company's zone. |
 | `early_margin` | How long before `start` the bot may join. Default is a small server margin (proposed: one minute), overridable per order. The bot is not in the room at the start of the work day. |
 | `overrun` | Decided. After `end`, leave when no human remains, or when speech and chat from anyone but the bot have been quiet for 10 minutes. Otherwise stay. There is no hard cap. |
@@ -405,7 +405,7 @@ Nothing in this design puts a private address, a customer name, or a real host i
 14. **Over capacity at schedule time.** The proposal stores the order and returns `over_by`. The alternative is to reject the write unless the caller forces it.
 15. **Recurrence shape.** The proposal is a small daily, weekly, or monthly rule, evaluated in the order's time zone, with exceptions. The alternative is to accept a calendar rule string that Grok Bot already has and store it opaquely.
 16. **Editing a series.** `update_schedule` without an occurrence changes the future. Is that enough, or do owners need "this occurrence only" as the default?
-17. **Open-ended orders.** An order with no `end` stays until someone leaves it, and the list marks `open_ended`. Should the company schedule refuse a missing `end` so the bot cannot sit all day by accident?
+17. **Open-ended orders.** Decided. An order may omit `end`. Every such meeting gets a scheduled end of 8 hours after `start`. After that end, the overrun rule applies: leave when no human remains, or after 10 minutes of silence from anyone but the bot, and otherwise stay.
 18. **Commands and advice on the order.** The proposal uses the bot's global switches while the occurrence is live. The alternative is per-order `commands` and `advice` that do not change the other rooms.
 
 ## Who changes what, when this leaves design
@@ -416,4 +416,4 @@ Nothing in this design puts a private address, a customer name, or a real host i
 | gifos-app | Per-session voice generation and play target in `meet-host.js` / `host-voice.js`. Eyes: resize one session iframe. Chat events, if they are not already posted. |
 | gifos-apps-source | The RUN management screen: list, per-meeting status, the day's orders, paste link and password, leave, open eyes for one meeting. `interject` and conversation turns stay addressed by meeting id. |
 
-No code in those repos follows from this document until the open questions that block stage A are answered: 1, 2, 4, 5, and 17. Question 12 is decided. Question 17 (open-ended orders) is still open.
+No code in those repos follows from this document until the open questions that block stage A are answered: 1, 2, 4, and 5. Questions 12 and 17 are decided. Stage A is not blocked on them.

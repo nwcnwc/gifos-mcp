@@ -1,0 +1,140 @@
+(node:2390955) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+TAP version 13
+# (node:2390961) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: create_meeting and start_meeting accept an optional password
+not ok 1 - create_meeting and start_meeting accept an optional password
+  ---
+  duration_ms: 20.718976
+  type: 'test'
+  location: '/home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:59:1'
+  failureType: 'testCodeFailure'
+  error: 'create_meeting has no password argument'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:64:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: a create password is stored, used by start, and omitted from every tool result
+not ok 2 - a create password is stored, used by start, and omitted from every tool result
+  ---
+  duration_ms: 5.765398
+  type: 'test'
+  location: '/home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:71:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    create_meeting did not store the password
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    hidden (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:19:10)
+    TestContext.<anonymous> (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:75:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: start_meeting password replaces the stored one
+not ok 3 - start_meeting password replaces the stored one
+  ---
+  duration_ms: 2.828684
+  type: 'test'
+  location: '/home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:97:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    start_meeting did not store the password it was given
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    hidden (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:19:10)
+    TestContext.<anonymous> (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:102:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: join_meeting stores its password and still passes it to the bot
+not ok 4 - join_meeting stores its password and still passes it to the bot
+  ---
+  duration_ms: 2.796974
+  type: 'test'
+  location: '/home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:106:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    join_meeting did not store the password
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    hidden (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:19:10)
+    TestContext.<anonymous> (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:114:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: driver seeds gifos_vpw_<room> before the meeting page loads
+not ok 5 - driver seeds gifos_vpw_<room> before the meeting page loads
+  ---
+  duration_ms: 2.636795
+  type: 'test'
+  location: '/home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:148:1'
+  failureType: 'testCodeFailure'
+  error: 'password was not seeded into the meeting page'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:155:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: driver fills the password door modal when it is open
+not ok 6 - driver fills the password door modal when it is open
+  ---
+  duration_ms: 1.305387
+  type: 'test'
+  location: '/home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:173:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    password door modal was not filled
+    
+    0 !== 1
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 1
+  actual: 0
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///home/nathan/ws0923/gifos-mcp/test/unit/password.test.js:176:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 0
+# fail 6
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 577.94552

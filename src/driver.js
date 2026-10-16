@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import { log } from './log.js';
+import { passwordStorageKey } from './meetings.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -254,10 +255,74 @@ export class MeetingBotDriver {
     return r.v;
   }
 
+  // Meeting Bot v1 can join with a password (join(link, password)) but has no
+  // lock or set-password method. Seeding gifos_vpw_<room> on the meeting
+  // origin before the session iframe loads is how the page learns the
+  // password: loadPw() runs before the room key is derived, so a room this
+  // bot founds is locked. The door modal is the same page's fallback when
+  // the room is already locked and asks out loud.
   async join(link, password) {
-    const r = await this.call('join', link, password || '');
+    const pw = String(password || '');
+    if (pw) await this.seedRoomPassword(link, pw);
+    const r = await this.call('join', link, pw);
+    if (pw) await this.fillPasswordModal(pw);
     await this.shot(this.bot.app, 'bot-joined.png');
     return r.id;
+  }
+
+  async seedRoomPassword(link, password) {
+    const key = passwordStorageKey(link);
+    const page = this.bot && this.bot.app;
+    if (!key || !password || !page || typeof page.evaluate !== 'function') return;
+    const entry = { key, atKey: 'gifos_vpwat_' + key.slice('gifos_vpw_'.length), password: String(password) };
+    try {
+      await page.evaluate((e) => {
+        try {
+          localStorage.setItem(e.key, e.password);
+          localStorage.setItem(e.atKey, String(Date.now()));
+        } catch (err) {}
+      }, entry);
+    } catch (e) {
+      const msg = String((e && e.message) || e).split(String(password)).join('***');
+      throw new Error('Could not store the meeting password for this room: ' + msg);
+    }
+  }
+
+  async fillPasswordModal(password) {
+    const page = this.bot && this.bot.app;
+    if (!password || !page || typeof page.frames !== 'function') return false;
+    const configured = Number(this.cfg && this.cfg.passwordModalWaitMs);
+    const budget = Number.isFinite(configured) ? configured : 2000;
+    const deadline = Date.now() + Math.max(0, budget);
+    for (;;) {
+      let frames = [];
+      try { frames = page.frames() || []; } catch (e) { frames = []; }
+      for (const frame of frames) {
+        let mode = '';
+        try {
+          mode = await frame.evaluate(() => {
+            const modal = document.getElementById('pw-modal');
+            if (!modal || modal.style.display === 'none') return '';
+            const title = (document.getElementById('pw-title') || {}).textContent || '';
+            if (modal.dataset.mode === 'join' || title === 'This room is locked') return 'join';
+            return '';
+          });
+        } catch (e) { mode = ''; }
+        if (mode !== 'join') continue;
+        try {
+          await frame.evaluate((pw) => {
+            const inp = document.getElementById('pw-new');
+            const save = document.getElementById('pw-save');
+            if (!inp || !save) return;
+            inp.value = pw;
+            save.click();
+          }, password);
+          return true;
+        } catch (e) { /* frame went away; do not repeat the password */ }
+      }
+      if (Date.now() >= deadline) return false;
+      await sleep(100);
+    }
   }
 
   async leave(sessionId) { await this.call('end', sessionId); }

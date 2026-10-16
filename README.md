@@ -22,7 +22,7 @@ Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium (one p
                                               └─ Offline Captions (Whisper), the speech-to-text provider
 ```
 
-- `create_meeting` only mints a meeting link. Nothing joins yet.
+- `create_meeting` only mints a meeting link. Nothing joins yet. Pass `password` to lock the room when the bot starts it.
 - `start_meeting` or `join_meeting` sends the bot into the meeting. Everyone in the meeting sees it as a tile
   labelled **🤖 bot** with a **📝 transcribing** chip. The bot has no camera and never sends audio.
 - Speech is turned into text on your computer by the Offline Captions (Whisper) app from the GifOS store. The bot
@@ -116,27 +116,44 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `create_meeting` | `topic`, `start_time?` | `{meeting_id, link}`. Only mints the link. `start_time` is stored as given, for your own scheduling. |
-| `start_meeting` | `meeting_id` | The bot joins and starts transcribing. |
-| `join_meeting` | `link`, `password?`, `topic?` | The bot joins someone else's GifOS meeting (`…/run.html#v=…` or `…/meet/…`). Returns a `meeting_id`. |
+| `create_meeting` | `topic`, `start_time?`, `password?` | `{meeting_id, link, locked}`. Only mints the link. `start_time` is stored as given, for your own scheduling. `password` locks the room when the bot starts it. The password is not in the result. |
+| `start_meeting` | `meeting_id`, `password?` | The bot joins and starts transcribing. `password` overrides one stored by `create_meeting`. |
+| `join_meeting` | `link`, `password?`, `topic?` | The bot joins someone else's GifOS meeting (`…/run.html#v=…` or `…/meet/…`). Returns a `meeting_id`. Pass `password` when that room is locked. |
 | `mute` | `meeting_id` | The bot stops transcribing, and the transcribing chip goes away. The bot never sends audio, so this is the only mute it has. |
 | `unmute` | `meeting_id` | The bot transcribes again. |
 | `share_content` | `meeting_id`, `text` | Posts text or a link (up to 2000 characters) into the meeting chat as the bot. There is no screen sharing, because the bot has no screen. |
 | `get_transcript` | `meeting_id` | Plain text, one `speaker: words` line per caption. Works while the meeting is live and after `end_meeting`. |
 | `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Everyone else can stay, because GifOS meetings have no owner who can close them. |
-| `list_meetings` | none | Every meeting this server created or joined, with its state (`scheduled`, `live` or `ended`). |
+| `list_meetings` | none | Every meeting this server created or joined, with its state (`scheduled`, `live` or `ended`) and `locked`. The password is not included. |
 | `status` | none | Browser state, bot name, the bot's live sessions, and its last heartbeat. |
 
 Errors come back as MCP tool errors with a readable message, for example `Unknown meeting_id …` or
 `Meeting m_… is scheduled. Call start_meeting first.`
+
+### Room passwords
+
+`create_meeting`, `start_meeting`, and `join_meeting` each take an optional `password`. A locked GifOS room
+derives its key from that password. A bot that joins without it sits alone at the door ("Just you").
+
+The password is written only to `GIFOS_MCP_HOME/meetings.json` (mode 0600). No tool returns it. `publicView`
+and `status` omit it. `locked: true` means a password is stored.
+
+GifOS Meeting Bot's local API (`window.MeetingBot` v1) can `join(link, password)` but has no lock or
+set-password method, so this server does not call one. Before the meeting page loads, the driver seeds
+`localStorage` on the meeting origin: `gifos_vpw_<room>` (and `gifos_vpwat_<room>` for the page's expiry
+clock). The page reads that key in `loadPw()` before it derives the room key, which is what locks a room
+this bot founds. The same password is passed to `MeetingBot.join`. If the door modal appears ("This room is
+locked"), the driver fills it and presses Join. A room someone else already opened without a password is not
+re-locked by seeding; the page treats a remembered password as a candidate and drops it when the room is open.
 
 ## Example: a 5 PM meeting
 
 The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, take notes, and send me a summary."*
 
 1. **Invite (now).** Grok Bot calls `create_meeting({topic: "Demo meeting", start_time: "17:00"})` and gets a
-   `link`. It drafts a calendar invite to Alice and Bob containing the link, in the user's own calendar. The
-   user approves the send.
+   `link`. To lock the room, it also passes `password`. It drafts a calendar invite to Alice and Bob containing
+   the link, in the user's own calendar, and shares the password only with them. The user approves the send.
+   The tool result does not contain the password.
 2. **Timing (a routine at 17:00).** Grok Bot calls `start_meeting({meeting_id})`. The bot joins and transcribes.
    `gifos-mcp` has to be running at this point.
 3. **Meeting (17:00 onward).** Alice and Bob open the link and see the 🤖 bot tile with the transcribing chip.
@@ -155,11 +172,11 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 - **Only one secret.** The bot name and password derive Meeting Bot's secret admin meeting, which can command
   the bot from another device (Meeting Bot's CONTROL mode). Keep
   `GIFOS_MCP_HOME/bot.json` private (it is mode 0600), or pass the pair through environment variables. Anyone
-  with the pair can command the bot.
-- **Meeting links are capabilities.** Anyone with a link can join that meeting, so share links only with the
-  people you invite.
-- **Transcripts are stored** in `GIFOS_MCP_HOME/meetings.json` (mode 0600) so they survive restarts. Delete the
-  file to forget them.
+  with the pair can command the bot. This is the bot's own credential, separate from a room password.
+- **Meeting links are capabilities.** Anyone with a link can join that meeting, unless it is locked. A locked
+  room also needs its password. Share the link and the password only with the people you invite.
+- **Room passwords and transcripts are stored** in `GIFOS_MCP_HOME/meetings.json` (mode 0600) so they survive
+  restarts. The password is not returned by any tool. Delete the file to forget them.
 - **No outgoing messages.** The server never sends email, calendar invites or anything else. Grok Bot does that
   through your own connectors, and you approve each send.
 - **HTTP mode** binds to 127.0.0.1, checks the `Host` header (DNS-rebinding protection), and can require a
@@ -176,6 +193,7 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 | `This Meeting Bot has no local control API` | The store's Meeting Bot is older than the control contract v1. Update it from the store (the server presses Update when the store offers it). |
 | `Chromium for Playwright is missing` | Run `npx playwright install chromium`. On Linux you may also need `npx playwright install-deps chromium`. |
 | The routine's `start_meeting` failed | The server wasn't running, or the machine was asleep. Keep it on an always-on machine. |
+| The bot sits alone ("Just you") in a room that has a password | Pass that password to `join_meeting` or `start_meeting`. Without it the bot is outside the room key. |
 | Tool calls time out in the client | The first call after launch can take about 10 seconds while the browser starts. Leave `GIFOS_MCP_LAZY` unset so it warms up at launch. |
 | Anything else | `GIFOS_HEADLESS=0` shows the browser windows. `GIFOS_MCP_SHOTS=/tmp/shots` saves screenshots of each step. |
 

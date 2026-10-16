@@ -1,0 +1,223 @@
+node --test test/unit/password.test.js
+(node:2396783) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+TAP version 13
+# (node:2396789) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: create_meeting and start_meeting accept an optional password
+ok 1 - create_meeting and start_meeting accept an optional password
+  ---
+  duration_ms: 17.198084
+  type: 'test'
+  ...
+# Subtest: a create password is stored, used by start, and omitted from every tool result
+ok 2 - a create password is stored, used by start, and omitted from every tool result
+  ---
+  duration_ms: 6.857086
+  type: 'test'
+  ...
+# Subtest: start_meeting password replaces the stored one
+ok 3 - start_meeting password replaces the stored one
+  ---
+  duration_ms: 2.833344
+  type: 'test'
+  ...
+# Subtest: join_meeting stores its password and still passes it to the bot
+ok 4 - join_meeting stores its password and still passes it to the bot
+  ---
+  duration_ms: 2.275645
+  type: 'test'
+  ...
+# Subtest: driver seeds gifos_vpw_<room> before the meeting page loads
+ok 5 - driver seeds gifos_vpw_<room> before the meeting page loads
+  ---
+  duration_ms: 2.378505
+  type: 'test'
+  ...
+# Subtest: driver fills the password door modal when it is open
+ok 6 - driver fills the password door modal when it is open
+  ---
+  duration_ms: 3.388193
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 556.048037
+
+npm test
+(node:2397078) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+> gifos-mcp@0.1.0 test
+> node --test test/unit/config.test.js test/unit/tools.test.js test/unit/http.test.js test/unit/password.test.js
+
+(node:2397090) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+TAP version 13
+# (node:2397096) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: defaults
+ok 1 - defaults
+  ---
+  duration_ms: 2.110395
+  type: 'test'
+  ...
+# Subtest: credential rules match the Meeting Bot app
+ok 2 - credential rules match the Meeting Bot app
+  ---
+  duration_ms: 1.277127
+  type: 'test'
+  ...
+# Subtest: generated credentials persist with mode 0600; env wins and is checked
+ok 3 - generated credentials persist with mode 0600; env wins and is checked
+  ---
+  duration_ms: 1.065608
+  type: 'test'
+  ...
+# Subtest: rooms and links
+ok 4 - rooms and links
+  ---
+  duration_ms: 3.003664
+  type: 'test'
+  ...
+# Subtest: a restart puts live meetings back to scheduled
+ok 5 - a restart puts live meetings back to scheduled
+  ---
+  duration_ms: 1.105158
+  type: 'test'
+  ...
+# (node:2397097) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: streamable HTTP on 127.0.0.1 with a bearer token
+ok 6 - streamable HTTP on 127.0.0.1 with a bearer token
+  ---
+  duration_ms: 609.215935
+  type: 'test'
+  ...
+# (node:2397098) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: create_meeting and start_meeting accept an optional password
+ok 7 - create_meeting and start_meeting accept an optional password
+  ---
+  duration_ms: 21.101816
+  type: 'test'
+  ...
+# Subtest: a create password is stored, used by start, and omitted from every tool result
+ok 8 - a create password is stored, used by start, and omitted from every tool result
+  ---
+  duration_ms: 7.775234
+  type: 'test'
+  ...
+# Subtest: start_meeting password replaces the stored one
+ok 9 - start_meeting password replaces the stored one
+  ---
+  duration_ms: 3.410863
+  type: 'test'
+  ...
+# Subtest: join_meeting stores its password and still passes it to the bot
+ok 10 - join_meeting stores its password and still passes it to the bot
+  ---
+  duration_ms: 2.750654
+  type: 'test'
+  ...
+# Subtest: driver seeds gifos_vpw_<room> before the meeting page loads
+ok 11 - driver seeds gifos_vpw_<room> before the meeting page loads
+  ---
+  duration_ms: 3.342603
+  type: 'test'
+  ...
+# Subtest: driver fills the password door modal when it is open
+ok 12 - driver fills the password door modal when it is open
+  ---
+  duration_ms: 1.493637
+  type: 'test'
+  ...
+# (node:2397099) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: lists every tool with an input schema
+ok 13 - lists every tool with an input schema
+  ---
+  duration_ms: 20.200817
+  type: 'test'
+  ...
+# Subtest: create_meeting mints a link on GIFOS_URL and does not touch the browser
+ok 14 - create_meeting mints a link on GIFOS_URL and does not touch the browser
+  ---
+  duration_ms: 5.436338
+  type: 'test'
+  ...
+# Subtest: create_meeting adds the relay to the link when GIFOS_RELAY is set
+ok 15 - create_meeting adds the relay to the link when GIFOS_RELAY is set
+  ---
+  duration_ms: 3.355433
+  type: 'test'
+  ...
+# Subtest: schemas refuse bad input
+ok 16 - schemas refuse bad input
+  ---
+  duration_ms: 4.098741
+  type: 'test'
+  ...
+# Subtest: start_meeting joins the link and turns transcription on
+ok 17 - start_meeting joins the link and turns transcription on
+  ---
+  duration_ms: 3.545263
+  type: 'test'
+  ...
+# Subtest: unknown meeting ids and meetings that are not live are explained
+ok 18 - unknown meeting ids and meetings that are not live are explained
+  ---
+  duration_ms: 2.808564
+  type: 'test'
+  ...
+# Subtest: a bot error comes back as a tool error, and the meeting stays scheduled
+ok 19 - a bot error comes back as a tool error, and the meeting stays scheduled
+  ---
+  duration_ms: 1.890846
+  type: 'test'
+  ...
+# Subtest: join_meeting accepts run.html and /meet links, refuses others
+ok 20 - join_meeting accepts run.html and /meet links, refuses others
+  ---
+  duration_ms: 3.631522
+  type: 'test'
+  ...
+# Subtest: mute and unmute switch transcription
+ok 21 - mute and unmute switch transcription
+  ---
+  duration_ms: 2.515125
+  type: 'test'
+  ...
+# Subtest: share_content posts into the meeting
+ok 22 - share_content posts into the meeting
+  ---
+  duration_ms: 3.357963
+  type: 'test'
+  ...
+# Subtest: get_transcript while live, end_meeting keeps a copy, and it survives a restart
+ok 23 - get_transcript while live, end_meeting keeps a copy, and it survives a restart
+  ---
+  duration_ms: 2.672125
+  type: 'test'
+  ...
+# Subtest: list_meetings and status
+ok 24 - list_meetings and status
+  ---
+  duration_ms: 2.526535
+  type: 'test'
+  ...
+1..24
+# tests 24
+# suites 0
+# pass 24
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 851.251428

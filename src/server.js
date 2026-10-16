@@ -7,6 +7,11 @@ import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
 export const VERSION = '0.1.0';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
+const roomPassword = z.string().max(200).optional().describe('The room password, if this meeting is locked. Stored only in the local meetings file and never returned.');
+
+function cleanPassword(p) {
+  return String(p == null ? '' : p).trim();
+}
 
 function ok(obj) {
   return { content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] };
@@ -34,37 +39,51 @@ export function createServer({ cfg, meetings, bot }) {
   };
 
   async function enter(m, password) {
+    const given = cleanPassword(password);
+    const pw = given || cleanPassword(m.password);
     await bot.ensureStarted();
-    const sessionId = await bot.join(m.link, password || '');
+    const sessionId = await bot.join(m.link, pw);
     await bot.transcribe(sessionId, true);
-    return meetings.update(m.meeting_id, {
+    const fields = {
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
-    });
+    };
+    if (pw) fields.password = pw;
+    return meetings.update(m.meeting_id, fields);
   }
 
   server.registerTool('create_meeting', {
     title: 'Create a GifOS meeting',
-    description: 'Creates a new GifOS meeting link. Nothing joins yet: share the link (for example in a calendar invite the user approves), then call start_meeting at meeting time. start_time is stored as given, for your own scheduling; this server does not schedule anything.',
+    description: 'Creates a new GifOS meeting link. Nothing joins yet: share the link (for example in a calendar invite the user approves), then call start_meeting at meeting time. start_time is stored as given, for your own scheduling; this server does not schedule anything. password, if given, is stored locally and locks the room when the bot starts it.',
     inputSchema: {
       topic: z.string().min(1).max(200).describe('What the meeting is about, e.g. "Demo meeting".'),
       start_time: z.string().max(64).optional().describe('When it should start, e.g. "2026-10-15T17:00:00-07:00". Informational only.'),
+      password: roomPassword,
     },
-  }, guarded(async ({ topic, start_time }) => {
+  }, guarded(async ({ topic, start_time, password }) => {
     const room = newRoom();
-    const m = meetings.add({ topic, start_time: start_time || null, room, link: linkFor(cfg.gifosUrl, room, cfg.relay) });
-    return ok({ meeting_id: m.meeting_id, link: m.link, topic: m.topic, start_time: m.start_time,
-      note: 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then.' });
+    const pw = cleanPassword(password);
+    const m = meetings.add({
+      topic, start_time: start_time || null, room, link: linkFor(cfg.gifosUrl, room, cfg.relay),
+      ...(pw ? { password: pw } : {}),
+    });
+    return ok({ meeting_id: m.meeting_id, link: m.link, topic: m.topic, start_time: m.start_time, locked: !!pw,
+      note: pw
+        ? 'The bot is not in the meeting yet. The room will be locked with the password you passed. That password stays in the local meetings file and is not repeated here. Call start_meeting(meeting_id) at meeting time; this server must be running then.'
+        : 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then.' });
   }));
 
   server.registerTool('start_meeting', {
     title: 'Start a meeting (the bot joins and transcribes)',
-    description: 'The headless Meeting Bot joins the meeting created with create_meeting and starts transcribing. Participants see a 🤖 bot badge and a transcribing chip.',
-    inputSchema: { meeting_id: meetingId },
-  }, guarded(async ({ meeting_id }) => {
+    description: 'The headless Meeting Bot joins the meeting created with create_meeting and starts transcribing. Participants see a 🤖 bot badge and a transcribing chip. password locks the room if create_meeting did not, and replaces a password already stored.',
+    inputSchema: {
+      meeting_id: meetingId,
+      password: roomPassword,
+    },
+  }, guarded(async ({ meeting_id, password }) => {
     const m = need(meeting_id);
     if (m.state === 'live') return ok({ ...publicView(m), note: 'Already live.' });
-    return ok(publicView(await enter(m)));
+    return ok(publicView(await enter(m, password)));
   }));
 
   server.registerTool('join_meeting', {
@@ -72,7 +91,7 @@ export function createServer({ cfg, meetings, bot }) {
     description: 'The Meeting Bot joins a GifOS meeting someone else created (a /run.html#v=… or /meet/… link) and starts transcribing. Returns a meeting_id for the other tools.',
     inputSchema: {
       link: z.string().url().max(2048).describe('The GifOS meeting link.'),
-      password: z.string().max(200).optional().describe('The meeting password, if the meeting has one.'),
+      password: roomPassword,
       topic: z.string().max(200).optional(),
     },
   }, guarded(async ({ link, password, topic }) => {

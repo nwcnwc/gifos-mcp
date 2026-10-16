@@ -1,15 +1,27 @@
-// Settings → AI models, as far as GifOS lets an outside program go.
-// install() takes a store slug. assign() points a role at an app already in
-// the Providers folder. Kokoro is not that slug: this process speaks, and
-// the headless harness registers the result on the tts role. A provider
-// GIF cannot fetch (connect-src 'none'), so the host page is handed the
-// WAV bytes. See docs/MEETBOT-BRIDGE.md. A raw URL never goes to Meet Bot.
+// Settings → AI models, for a store app. install() takes a store slug.
+// assign() points a role at an app already in the Providers folder.
+// This process is the host that embeds the headless GifOS, so it can answer
+// tts, stt, and smartest itself. The page calls one Playwright binding.
+// It does not fetch those roles, and no sandboxed provider GIF is mounted
+// for them. A raw URL and the key never go to Meet Bot.
+// See docs/MEETBOT-BRIDGE.md.
 
 import { MCP_TTS_APP } from './settings.js';
 
 export const CORS_PROXY = 'https://cors-proxy.gifos.app/';
-// Playwright exposeBinding name. The page calls it; Kokoro runs in Node.
-export const MCP_TTS_BINDING = '__gifosMcpSpeak';
+// One Playwright binding for every role this process serves. The page
+// passes a role and a JSON request. It does not fetch.
+export const HOST_BINDING = '__gifosHostCall';
+
+export function hostRoles(cfg) {
+  const voice = (cfg && cfg.voice) || {};
+  const tts = voice.tts || {};
+  const roles = [];
+  if (tts.source === 'mcp' || tts.engine === 'http') roles.push('tts');
+  if (!voice.llmApp && (voice.url || voice.key)) roles.push('smartest');
+  if (voice.sttUrl && !voice.sttApp) roles.push('stt');
+  return roles;
+}
 
 function endpoint(row) {
   const out = {};
@@ -27,13 +39,20 @@ function endpoint(row) {
 export function installPlan(cfg) {
   const voice = (cfg && cfg.voice) || {};
   const tts = voice.tts || {};
+  const hosted = new Set(hostRoles(cfg));
   const steps = [];
-  if (cfg && cfg.sttApp) steps.push({ role: 'stt', appId: cfg.sttApp });
-  else if (voice.sttUrl) steps.push({ role: 'stt', endpoint: endpoint({ url: voice.sttUrl }) });
-  if (tts.engine === 'http') steps.push({ role: 'tts', endpoint: endpoint(tts) });
-  else if (tts.source === 'store' && tts.app) steps.push({ role: 'tts', appId: tts.app });
-  if (voice.llmApp) steps.push({ role: 'smartest', appId: voice.llmApp });
-  else if (voice.url || voice.key) steps.push({ role: 'smartest', endpoint: endpoint(voice) });
+  if (!hosted.has('stt')) {
+    if (cfg && cfg.sttApp) steps.push({ role: 'stt', appId: cfg.sttApp });
+    else if (voice.sttUrl) steps.push({ role: 'stt', endpoint: endpoint({ url: voice.sttUrl }) });
+  }
+  if (!hosted.has('tts')) {
+    if (tts.engine === 'http') steps.push({ role: 'tts', endpoint: endpoint(tts) });
+    else if (tts.source === 'store' && tts.app) steps.push({ role: 'tts', appId: tts.app });
+  }
+  if (!hosted.has('smartest')) {
+    if (voice.llmApp) steps.push({ role: 'smartest', appId: voice.llmApp });
+    else if (voice.url || voice.key) steps.push({ role: 'smartest', endpoint: endpoint(voice) });
+  }
   return steps;
 }
 
@@ -72,9 +91,10 @@ function llmRole(llm) {
 // An assigned app becomes gifos-provider://<role> with no key.
 // An endpoint's URL and key are filled from Settings here, on the host page,
 // and are not copied back to the app.
-export function expandForHost(settings, ai) {
+export function expandForHost(settings, ai, hosted) {
   const next = settings ? JSON.parse(JSON.stringify(settings)) : {};
   const config = ai || {};
+  const own = new Set(hosted || []);
   if (next.llm) {
     const role = llmRole(next.llm);
     const row = config[role] || {};
@@ -108,6 +128,16 @@ export function expandForHost(settings, ai) {
     }
   }
   if (next.stt) next.stt = {};
+  if (own.has('smartest') && next.llm) {
+    next.llm = { url: 'gifos-provider://smartest', model: String(next.llm.model || 'provider') };
+  }
+  if (own.has('tts') && next.tts && next.tts.engine !== 'none') {
+    next.tts = {
+      engine: 'kokoro',
+      app: String(next.tts.app || 'gifos-mcp'),
+      voice: String(next.tts.voice || 'af_heart'),
+    };
+  }
   return next;
 }
 
@@ -125,42 +155,77 @@ export async function speakAsTts(engine, req) {
 }
 
 // Runs on the GifOS host page, before host-voice.js assigns window.HostVoice.
-// mcpTts: the tts role is answered by this process (Playwright binding),
-// not by a provider GIF. The GIF cannot fetch, and the host page must not
-// fetch the speech either: the binding carries the bytes.
+// hostRoles: roles this process answers through one Playwright binding.
+// assigned(role) is { host: true } for those roles, not a provider GIF.
+// call(role) sends the request to the binding and does not fetch.
 export function bridgeScript(opts) {
-  const mcp = !!(opts && opts.mcpTts);
-  const appLit = JSON.stringify(MCP_TTS_APP);
-  const bindLit = JSON.stringify(MCP_TTS_BINDING);
-  const arm = mcp
+  const allow = new Set(['tts', 'smartest', 'stt']);
+  const roles = [];
+  for (const role of (opts && opts.hostRoles) || []) {
+    if (allow.has(role) && !roles.includes(role)) roles.push(role);
+  }
+  const host = {};
+  for (const role of roles) host[role] = true;
+  const hostLit = JSON.stringify(host);
+  const bindLit = JSON.stringify(HOST_BINDING);
+  const arm = roles.length
     ? 'function arm(){\n' +
       '  var g=window.GifOS; var p=g&&g.providers;\n' +
       '  if(!p){ setTimeout(arm, 30); return; }\n' +
-      '  if(p.__gifosMcp) return;\n' +
+      '  if(p.__gifosHost) return;\n' +
       '  var origCall=p.call.bind(p);\n' +
       '  var origAssigned=p.assigned?p.assigned.bind(p):function(){return null;};\n' +
+      '  function asBytes(v){\n' +
+      '    if(v==null) return null;\n' +
+      '    if(typeof ArrayBuffer!=="undefined"&&ArrayBuffer.isView&&ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);\n' +
+      '    if(Object.prototype.toString.call(v)==="[object ArrayBuffer]") return new Uint8Array(v);\n' +
+      '    return null;\n' +
+      '  }\n' +
+      '  function b64(bytes){\n' +
+      '    var s="", i, n=bytes.length, chunk=0x8000, sub;\n' +
+      '    for(i=0;i<n;i+=chunk){ sub=bytes.subarray(i, i+chunk>n?n:i+chunk); s+=String.fromCharCode.apply(null, sub); }\n' +
+      '    return btoa(s);\n' +
+      '  }\n' +
+      '  function packReq(req){\n' +
+      '    var out={}, k, v, bytes; req=req||{};\n' +
+      '    for(k in req){ v=req[k]; bytes=asBytes(v); out[k]=bytes?b64(bytes):v; }\n' +
+      '    return JSON.stringify(out);\n' +
+      '  }\n' +
+      '  function unpack(raw){\n' +
+      '    var body=typeof raw==="string"?JSON.parse(raw):raw; body=body||{};\n' +
+      '    var out={role:body.role||"", text:body.text||"", mime:body.mime||""};\n' +
+      '    if(body.audio){\n' +
+      '      var bin=atob(String(body.audio)); var bytes=new Uint8Array(bin.length); var i;\n' +
+      '      for(i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i)&255;\n' +
+      '      out.bytes=bytes;\n' +
+      '    }\n' +
+      '    return out;\n' +
+      '  }\n' +
       '  p.assigned=function(role){\n' +
-      '    if(role==="tts") return {app:' + appLit + ', appId:' + appLit + ', appName:"Kokoro (this computer)"};\n' +
+      '    if(HOST[role]) return {host:true, role:role, name:"gifos-mcp"};\n' +
       '    return origAssigned(role);\n' +
       '  };\n' +
       '  p.call=function(role, req){\n' +
-      '    if(role==="tts"){\n' +
-      '      var speak=window[' + bindLit + '];\n' +
-      '      if(typeof speak!=="function") return Promise.reject(new Error("Kokoro is not available on this computer."));\n' +
-      '      var text=(req&&req.text)||""; var voice=(req&&req.voice)||"";\n' +
-      '      return Promise.resolve(speak(text, voice)).then(function(b64){\n' +
-      '        var bin=atob(String(b64||"")); var bytes=new Uint8Array(bin.length);\n' +
-      '        for(var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i)&255;\n' +
-      '        return {bytes:bytes, mime:"audio/wav"};\n' +
-      '      });\n' +
+      '    if(HOST[role]){\n' +
+      '      var fn=window[' + bindLit + '];\n' +
+      '      if(typeof fn!=="function") return Promise.reject(new Error("The host provider is not available."));\n' +
+      '      return Promise.resolve(fn(role, packReq(req))).then(unpack);\n' +
       '    }\n' +
       '    return origCall(role, req);\n' +
       '  };\n' +
-      '  p.__gifosMcp=true;\n' +
+      '  p.__gifosHost=true;\n' +
       '}\n' +
       'arm();\n'
     : '';
   return '(function(){\n' +
+    'var HOST=' + hostLit + ';\n' +
+    'function dropHosted(){\n' +
+    '  var ai, role, changed=false;\n' +
+    '  try{ ai=JSON.parse(localStorage.getItem("gifos_ai_config")||"{}")||{}; }catch(e){ return; }\n' +
+    '  for(role in HOST){ if(HOST[role]&&ai[role]){ delete ai[role]; changed=true; } }\n' +
+    '  if(changed){ try{ localStorage.setItem("gifos_ai_config", JSON.stringify(ai)); }catch(e){} }\n' +
+    '}\n' +
+    'dropHosted();\n' +
     arm +
     'var PREFIX="gifos-provider://";\n' +
     'var PROXY="https://cors-proxy.gifos.app/";\n' +
@@ -187,6 +252,8 @@ export function bridgeScript(opts) {
     '    else next.tts={engine:"kokoro", app:String(next.tts.app||trow.appId||' + JSON.stringify(MCP_TTS_APP) + '), voice:String(next.tts.voice||"af_heart")};\n' +
     '  }\n' +
     '  if(next.stt) next.stt={};\n' +
+    '  if(HOST.smartest&&next.llm){ next.llm={url:PREFIX+"smartest", model:String(next.llm.model||"provider")}; }\n' +
+    '  if(HOST.tts&&next.tts&&next.tts.engine!=="none"){ next.tts={engine:"kokoro", app:String(next.tts.app||"gifos-mcp"), voice:String(next.tts.voice||"af_heart")}; }\n' +
     '  return next;\n' +
     '}\n' +
     'function localHost(h){return h==="localhost"||h==="127.0.0.1"||h==="[::1]";}\n' +
@@ -212,7 +279,7 @@ export function bridgeScript(opts) {
     '    pullClauses:api.pullClauses,\n' +
     '    scrub:api.scrub,\n' +
     '    create:function(opts){\n' +
-    (mcp ? '      arm();\n' : '') +
+    (roles.length ? '      arm();\n' : '') +
     '      opts=opts||{};\n' +
     '      var origFetch=opts.fetch;\n' +
     '      var next={};\n' +

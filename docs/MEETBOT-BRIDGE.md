@@ -97,12 +97,114 @@ Remote control (a second copy of the app in CONTROL mode, `gb1 ` JSON on the adm
 
 ## Where the models live
 
-GifOS holds the models. Settings → AI models writes `gifos_ai_config` in the computer's localStorage (not in a shareable backup). The rows this server sets are `smartest` (the text model; Settings has no row named `llm`), `tts`, and `stt`. Each row is either:
+GifOS holds the models. Settings → AI models writes `gifos_ai_config` in the computer's localStorage (not in a shareable backup). The rows are `smartest` and `cheapest` for text (there is no row named `llm`), plus `tts`, `stt`, `image`, `image_to_video`, and `video`. Each row is one of two shapes:
 
-- A provider app: `{ app: fileId, appId, appName }`, written by `GifOS.providers.assign(role, { fileId, appId, name })`. The app must list the role under `provides.ai`, must not declare `capabilities.network` or `capabilities.api`, and its icon must sit in the Providers folder (`sys_providers`). `GifOS.providers.call(role, req)` mounts that app in a hidden sandbox and posts `{ ns: "gifos", type: "provider-request" }`.
-- An endpoint: `{ url, key, model }`, "your own address and key". The host page fetches it. The app frame cannot: its CSP is `connect-src 'none'`.
+- A provider app: `{ app: fileId, appId, appName }`, written by `GifOS.providers.assign(role, { fileId, appId, name })`.
+- An endpoint: `{ url, key, model }`, the "your own address and key" fields in that same Settings panel. The host page's AI broker fetches it. The key stays in that localStorage.
 
-Kokoro is the signed store app `offline-tts-kokoro`. On a fresh profile nothing is assigned, and Meet Bot's host refuses to speak until that app is installed and assigned (`Kokoro is not available on this computer.`). Speech-to-text is the same kind of assignment; transcription already installed `offline-stt-whisper` that way. This server now installs and assigns both during profile setup. It does not download weights, synthesize audio, or call a model. The first spoken line still waits on the provider's own download.
+## What a provider is
+
+A provider is an ordinary App GIF whose manifest lists roles:
+
+```json
+{
+  "gifos": "1.0",
+  "appId": "offline-tts-kokoro",
+  "name": "Offline Neural TTS (Kokoro, GPU)",
+  "entry": "index.html",
+  "capabilities": { "wasm": true, "gpu": true },
+  "provides": { "ai": ["tts"] }
+}
+```
+
+The signed providers in the store are Kokoro, Kitten, and eSpeak for `tts`; Whisper for `stt`; and BitNet, Gemma, and Gemma 4 for `cheapest`. Each one runs the model inside the GIF. None of them declares `capabilities.network` or `capabilities.api`.
+
+Registration is `gifos.provider.serve({ tts: fn, smartest: fn, ... })` in the app. When the computer calls that role, the runtime mounts the GIF in a hidden sandboxed iframe and posts `{ ns: "gifos", type: "provider-request", role, req }`. The handler is keyed by role. It returns `{ text }` for chat and speech-to-text, or `{ bytes, mime }` for speech. The iframe's CSP is `connect-src 'none'`. The mount refuses every bridge call except the provider request, asset reads, and `info`.
+
+Three checks, in `js/runtime.js`, decide whether that mount is allowed:
+
+1. `provides.ai` lists the role.
+2. The manifest does not declare `capabilities.network` or `capabilities.api`. A provider that could fetch would be an exfiltration path for every prompt, so the runtime refuses it. `wasm` and `gpu` are allowed. Kokoro uses both.
+3. The icon sits directly in the Providers folder (`sys_providers`). Anywhere else the desktop paints a red ✕ and `GifOS.providers.call` refuses with `PROVIDER_NOT_IN_FOLDER`.
+
+`GifOS.providers` on the host page is the whole program-facing surface today:
+
+| Call | What it does |
+|---|---|
+| `scan()` | Provider apps whose icons are in `sys_providers`. |
+| `assigned(role)` | The stored `{ app, appId, appName }`, or null. An endpoint row has no `app`, so this returns null. |
+| `assign(role, { fileId, appId, name })` | Writes the provider-app row. This is what Settings writes when the picker chooses an app. |
+| `install(slug)` | Downloads `/apps/<slug>/app.json` and the GIF, checks the catalog sha256, checks the signature when the listing claims one, enforces the two manifest rules, and files the icon into Providers. |
+| `call(role, req)` | Runs the assigned app. |
+| `stop(role)` | Unloads it. |
+
+`install` only accepts a store slug. It has no argument for files this program composed.
+
+## How a provider is packaged and signed
+
+`GifOS.gif.encode(files, { accent })` packs `manifest.json`, `index.html`, and the rest into an App GIF. That is the same encoder the desktop uses when someone drops a zip or pastes HTML (`createAppFromFiles` in `js/desktop.js`).
+
+A signature is a `GIFOSSIG` extension block (`js/gifos-sign.js`). It is authorship, the way DKIM is authorship. It is not an install permission.
+
+- Domain identity: Ed25519. The public key is fetched from `https://<domain>/gifos.key`. `GifOS.sign.signDomain` writes the block. The statement covers the picture and every file except `.state/`, `.lock/`, and hash-pinned `.assets/` entries.
+- Email identity: a detached OpenPGP signature, checked against keys.openpgp.org.
+- Stripping the block leaves a working unsigned app. Changing a signed file makes verification report `tampered`.
+
+The store checks a signature only when the listing's `app.json` has a `signature` field, and it checks `sha256` against the catalog bytes. A listing with no signature still installs. A GIF dropped on the Home Screen is not checked against the catalog at all. Unsigned dropped apps run.
+
+Default store apps that the Home Screen seeds by itself (Whisper, today) are a tighter list: the comment in `js/gifos-install.js` says to add one only when gifos.app has signed it.
+
+## How a provider gets into the Providers folder
+
+Two supported arrivals land directly in `sys_providers`:
+
+1. **Store install.** The store page, `GifOS.providers.install(slug)`, and the lazy seed. After the download is verified, `handlePlaceParam` in `js/desktop.js` (and `installProvider` in `js/runtime.js`) sees `provides.ai` and sets the icon's parent to `sys_providers`.
+2. **The person already has the file.** There is no second writer.
+
+A drop, and `createAppFromFiles`, set the icon's parent to whatever folder is open. A provider dropped on the Home Screen shows the red ✕ until a person drags it into Providers. `createAppFromFiles` is inside the desktop closure. It is not on `GifOS`.
+
+Settings assigns only after that. The picker lists apps `scan()` found in the folder. Choosing one calls `assign`. Choosing "your own address and key" writes `{ url, key, model }` and does not create a GIF.
+
+## An endpoint is not a provider app
+
+An OpenAI-compatible URL is the endpoint row. The broker in `js/runtime.js` (`brokerAI`) reads `gifos_ai_config`, attaches the key, and fetches from the host page. A provider app cannot do that job. The sandbox cannot fetch, and a manifest that declared network access would be refused at install and again at `call`. BitNet's own manifest says the usable assistant is a hosted endpoint on the Settings row, and the offline GIF is the on-device alternative.
+
+So "a provider that wraps an OpenAI-compatible endpoint" does not exist in this model. The endpoint row is the wrap. The GIF form is for an engine that runs on the computer, such as Kokoro.
+
+## What gifos-mcp can do today
+
+This server can install a slug the store already lists (`offline-tts-kokoro`, `offline-stt-whisper`, or `GIFOS_TTS_APP` / `GIFOS_STT_APP` / `GIFOS_LLM_APP`) and call `assign`. It can also write an endpoint row into `gifos_ai_config` from `GIFOS_LLM_URL`, `GIFOS_LLM_MODEL`, `GIFOS_LLM_KEY`, `GIFOS_TTS_URL`, and `GIFOS_STT_URL`. That is selecting a published app, or typing into Settings. It is not creating a provider.
+
+It does not synthesize speech and it does not call the model. Kokoro's first spoken line still waits on that app's own weight download.
+
+## What is missing
+
+There is no supported call that lets an outside program hand GifOS a provider it composed and have that provider filed into `sys_providers`.
+
+`GifOS.providers.install` requires a catalog listing on the GifOS origin. gifos-mcp cannot publish one to gifos.app. `assign` requires a `fileId` that is already in the folder. `createAppFromFiles` builds a GIF from files, then leaves it in the open folder, and a program cannot call it. Writing `store.putFile` and an item row from the driver would skip both the store checks and the desktop's own create path. This server does not do that.
+
+The smallest change is one function beside `install`, in `js/runtime.js`, reusing the folder filing `installProvider` already has:
+
+```js
+GifOS.providers.place(files) -> Promise<{ fileId, appId, name, roles }>
+```
+
+`files` is the map `GifOS.gif.encode` already accepts (`manifest.json`, `index.html`, and anything else the app needs). `place` then:
+
+1. Reads the manifest. `provides.ai` must be a non-empty list. `capabilities.network` and `capabilities.api` must be absent. Same refusal `fetchApp` already uses when `opts.provider` is set.
+2. Encodes with `GifOS.gif.encode`. No catalog sha256, because the bytes were not in a catalog. A `GIFOSSIG` block is left intact if the caller signed the bytes first; an unsigned GIF is accepted, because a GIF dropped on the Home Screen is unsigned and still runs.
+3. `store.putFile`, then the same `ensureProvidersFolder` and `putItem(..., parent: 'sys_providers')` path `installProvider` uses.
+4. Returns the identity `assign` already takes. It does not assign. The caller calls `assign(role, { fileId, appId, name })`.
+
+A second function, the same size, is the program form of the Settings endpoint fields. The panel writes them and nothing else does:
+
+```js
+GifOS.providers.configure(role, { url, key, model }) -> Promise<{ url, model }>
+```
+
+It writes `{ url, key, model }` for that role, omitting empty fields, the way `saveAi` in `js/desktop.js` does. The key stays in `gifos_ai_config`. The return value omits the key. `configure` is how gifos-mcp would register an OpenAI-compatible LLM, an HTTP speech stand-in, or an HTTP caption stand-in. `place` is how it would register an engine it actually authored, once that engine can serve the role without a network.
+
+With those two calls, profile setup becomes: `configure('smartest', { url, key, model })` from `GIFOS_LLM_URL` / `GIFOS_LLM_MODEL` / `GIFOS_LLM_KEY`; `install('offline-tts-kokoro')` then `assign('tts', ...)` for the signed Kokoro app, or `configure('tts', { url })` when `GIFOS_TTS_URL` is set; the same pair for speech-to-text. `MeetingBot.setVoice` keeps naming the roles.
 
 `MeetingBot.setVoice` receives roles, not addresses:
 
@@ -168,11 +270,14 @@ That line is the assistant cutting in. Meet Bot speaks it and it takes priority 
 
 ## Questions still open
 
-1. The text model is assigned to Settings role `smartest`. Settings also has `cheapest`. This server does not set `cheapest`. Is `smartest` the role Meet Bot should use?
-2. `js/runtime.js` fetches an AI endpoint directly and does not use the CORS proxy (a key would otherwise transit `https://cors-proxy.gifos.app`). Provider apps cannot fetch: a provider that declares network access is refused. For an http endpoint opened from `https://gifos.app`, this server's host script does use that proxy, because mixed content and a missing CORS preflight leave no other path. An https endpoint, including the suggested xAI host, is still fetched directly. Is sending an http endpoint's key through the public proxy acceptable, or should http endpoints be refused until the host broker grows its own proxy?
-3. CONTROL.md v2 still documents raw `llm`, `tts`, and `stt` URLs on `setVoice`, and `js/meet-host.js` still pushes `stt.url` into the meeting session. This server has stopped sending them. The host script papers over that. Should `cursor/meetbot-host-ops` read `gifos_ai_config` itself, so this server can drop the script?
-4. `GIFOS_LLM_APP` assigns a store provider to `smartest`. The requested setup is an OpenAI-compatible URL, model, and key. Is a provider app an allowed language model as well?
-5. The first `say` after installing Kokoro waits while that app downloads its weights. Is that pause the expected one?
+1. For an OpenAI-compatible URL, is `configure(role, { url, key, model })` the provider entry you want? A GIF that fetched that URL would be refused. The endpoint row is the wrap the broker already runs.
+2. Is `GifOS.providers.place(files)` the missing call, filed like `install` but with the caller's files instead of a store slug? The other small version is to teach `createAppFromFiles` to parent a network-less `provides.ai` app into `sys_providers` and put that function on `GifOS`.
+3. Kokoro and Whisper are signed store apps. Until `place` exists, this server installs those slugs. Should that stay, or should a generated provider be the only thing this server files?
+4. A dropped GIF runs unsigned. A seeded default must be signed by gifos.app. Which bar should `place` use?
+5. The text role this server assigns is `smartest`. Settings also has `cheapest`, which is what the offline LLMs provide. Should Meet Bot use `smartest`, `cheapest`, or both?
+6. The AI broker fetches an endpoint directly. This server's host script sends an http endpoint through `https://cors-proxy.gifos.app` when the page is https, because mixed content blocks the call. An https endpoint is fetched directly. May an http endpoint's key transit that proxy?
+7. CONTROL.md v2 still documents raw URLs on `setVoice`, and `meet-host.js` still pushes an STT URL into the session. Should `cursor/meetbot-host-ops` read `gifos_ai_config` itself?
+8. The first `say` after a real Kokoro install waits on that app's weight download. Is that the expected pause?
 
 ## Gaps Meet Bot must gain
 

@@ -1,6 +1,9 @@
-// Settings → AI models, as a headless profile would set them.
-// This module does not call a model and does not speak. The browser page
-// asks GifOS for the assigned provider. A raw URL never goes to Meet Bot.
+// Settings → AI models, as far as GifOS lets an outside program go.
+// install() takes a store slug. assign() points a role at an app already in
+// the Providers folder. There is no call that accepts a provider this
+// program composed and files it into that folder. See
+// docs/MEETBOT-BRIDGE.md, "What is missing". This module does not call a
+// model and does not speak. A raw URL never goes to Meet Bot.
 
 export const CORS_PROXY = 'https://cors-proxy.gifos.app/';
 

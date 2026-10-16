@@ -110,7 +110,7 @@ if (httpAt >= 0) {
       await server.connect(transport);
       await transport.handleRequest(req, res);
     } catch (e) {
-      log('http request failed: ' + e.message);
+      log('http request failed: ' + scrub(e.message, cfg.voice.key));
       if (!res.headersSent) res.writeHead(500).end();
     }
   });

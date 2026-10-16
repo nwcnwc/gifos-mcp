@@ -8,7 +8,7 @@ import { formatInvite, plainLink, PASSWORD_LINK_NOTE } from './invite.js';
 import { LiveTranscript } from './voice/live.js';
 import { CAMERA_GAP, CONTROLS_GAP, HAND_GAP, INTERJECT_GAP, MIC_GAP, SNAPSHOT_GAP, VOICE_GAP, scrub, voicePublic, voiceSettings } from './voice/settings.js';
 
-export const VERSION = '0.3.1';
+export const VERSION = '0.3.2';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 

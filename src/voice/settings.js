@@ -9,9 +9,10 @@ export const CAMERA_GAP = 'Meeting Bot has no setCamera method (contract version
 export const CONTROLS_GAP = 'Meeting Bot has no meetingState method (contract version 1). Hand, microphone, and camera are not reported. See docs/MEETBOT-BRIDGE.md.';
 export const SNAPSHOT_GAP = 'Meeting Bot has no snapshot method (contract version 1). A PNG of the Meet Bot page is saved when that page is open. See docs/MEETBOT-BRIDGE.md.';
 
-// Kokoro is the default text-to-speech provider app. The driver installs and
-// assigns it. This module only names it. Nothing here speaks.
+// The store app, used only when GIFOS_TTS_APP names one. The default voice
+// is Kokoro in this process, registered as MCP_TTS_APP on the tts role.
 export const KOKORO_APP = 'offline-tts-kokoro';
+export const MCP_TTS_APP = 'mcp-tts-kokoro';
 export const KOKORO_VOICE = 'af_heart';
 
 // One secret, or a list. Empty values are skipped. Used for the model key
@@ -33,7 +34,7 @@ function localTts(voice) {
   const t = (voice && voice.tts) || {};
   if (t.engine === 'http') return { provider: 'tts', engine: 'http' };
   if (t.engine === 'none') return { provider: 'tts', engine: 'none' };
-  return { provider: 'tts', engine: 'kokoro', app: t.app || KOKORO_APP, voice: t.voice || KOKORO_VOICE };
+  return { provider: 'tts', engine: 'kokoro', app: t.app || MCP_TTS_APP, voice: t.voice || KOKORO_VOICE };
 }
 
 function ttsPublic(voice) {

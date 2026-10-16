@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { KOKORO_APP, KOKORO_VOICE } from './voice/settings.js';
+import { KOKORO_VOICE, MCP_TTS_APP } from './voice/settings.js';
 
 export const DEFAULT_GIFOS_URL = 'https://gifos.app';
 export const DEFAULT_STT_APP = 'offline-stt-whisper';
@@ -91,20 +91,23 @@ export function voiceConfig(env = process.env) {
   };
 }
 
-// Speech and captions for Meet Bot's local mode. Nothing here is fetched.
+// Speech for Meet Bot's local mode. Default Kokoro runs in this process
+// (source "mcp") and is registered on the tts role by the headless harness.
+// GIFOS_TTS_APP names a store provider instead. GIFOS_TTS_URL is an endpoint row.
 const TTS_ENGINES = new Set(['', 'auto', 'kokoro', 'none']);
 
 function ttsConfig(env) {
   const ask = String(env.GIFOS_TTS_ENGINE || '').trim().toLowerCase();
   if (!TTS_ENGINES.has(ask)) {
-    throw new Error('GIFOS_TTS_ENGINE must be auto, kokoro, or none. This server does not run a speech engine.');
+    throw new Error('GIFOS_TTS_ENGINE must be auto, kokoro, or none.');
   }
   const named = String(env.GIFOS_TTS_VOICE || '').trim();
   if (ask === 'none') return { engine: 'none' };
   const url = String(env.GIFOS_TTS_URL || '').trim();
   if (url) return { engine: 'http', url: cleanBase(url, 'GIFOS_TTS_URL'), voice: named };
-  const app = String(env.GIFOS_TTS_APP || '').trim() || KOKORO_APP;
-  return { engine: 'kokoro', app, voice: named || KOKORO_VOICE };
+  const app = String(env.GIFOS_TTS_APP || '').trim();
+  if (app) return { engine: 'kokoro', app, voice: named || KOKORO_VOICE, source: 'store' };
+  return { engine: 'kokoro', app: MCP_TTS_APP, voice: named || KOKORO_VOICE, source: 'mcp' };
 }
 
 function sttUrl(env) {

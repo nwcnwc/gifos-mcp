@@ -10,12 +10,16 @@ import { bridgeScript, expandForHost, fetchPlan, installPlan } from '../../src/v
 
 const KEY = 'sk-test-key-which-must-stay-here';
 
-test('a fresh profile plan installs Kokoro and the speech-to-text app and does not fetch them', () => {
+test('a fresh profile keeps Kokoro in this process and installs speech-to-text from the store', () => {
   const cfg = loadConfig({ GIFOS_MCP_HOME: '/x', GIFOS_STT_APP: 'offline-stt-whisper' });
   const steps = installPlan(cfg);
-  assert.deepEqual(steps.map((s) => s.role + ':' + (s.appId || 'endpoint')), ['stt:offline-stt-whisper', 'tts:offline-tts-kokoro']);
+  assert.equal(cfg.voice.tts.source, 'mcp');
+  assert.equal(cfg.voice.tts.app, 'mcp-tts-kokoro');
+  assert.deepEqual(steps.map((s) => s.role + ':' + (s.appId || 'endpoint')), ['stt:offline-stt-whisper']);
+  assert.equal(steps.some((s) => s.role === 'tts'), false);
   assert.equal(steps.some((s) => s.endpoint), false);
   const named = loadConfig({ GIFOS_MCP_HOME: '/x', GIFOS_TTS_APP: 'tts-synthetic', GIFOS_STT_APP: 'stt-synthetic' });
+  assert.equal(named.voice.tts.source, 'store');
   assert.equal(installPlan(named).find((s) => s.role === 'tts').appId, 'tts-synthetic');
 });
 

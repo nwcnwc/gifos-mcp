@@ -62,11 +62,11 @@ Fields stored with the order:
 | `topic`, `link` | Plain link. A missing link means this process mints a room, the way `create_meeting` does today. |
 | `start`, `end` | Instants. Absent `start` means now. Absent `end` is stored as `start` plus 8 hours, with `end_defaulted: true`. Overrun begins at the stored end. |
 | `timezone` | IANA name, such as `America/Los_Angeles`. The instant is what the clock fires on. The name is how a weekly rule and a display stay in the company's zone. |
-| `early_margin` | How long before `start` the bot may join. Default is a small server margin (proposed: one minute), overridable per order. The bot is not in the room at the start of the work day. |
+| `early_margin` | Decided. The bot joins one minute before `start`. An order may set a different margin. The bot is not in the room at the start of the work day. |
 | `overrun` | Decided. After `end`, leave when no human remains, or when speech and chat from anyone but the bot have been quiet for 10 minutes. Otherwise stay. There is no hard cap. |
-| `recurrence` | Empty for one occurrence. Otherwise a rule plus exceptions. |
+| `recurrence` | Empty for one occurrence. Otherwise the calendar's own recurrence rule, as Grok Bot sent it, plus exceptions. |
 | `record`, `transcribe` | Turned on when the bot joins, off when it leaves. |
-| `commands`, `advice` | While this occurrence is live, the bot may take commands and offer advice. The first version uses the bot's global voice switches during that window. Per-order switches are an open question. |
+| `commands`, `advice` | Decided. While this occurrence is live, commands and advice follow the bot's global switches. They do not change the other rooms, and an order does not carry its own switches. |
 | `external_id` | Caller's id from a calendar import. A second import with the same id updates the order. It does not create a twin. |
 
 While the order is waiting, the state is `upcoming`. The bot is not in the room. States after that: `waiting_for_capacity`, `live`, `overrun`, `ended`, `missed`, `cancelled`, `left_early`.
@@ -75,7 +75,7 @@ While the order is waiting, the state is `upcoming`. The bot is not in the room.
 
 A clock in this process, started after the browser is up, looks at orders whose join time (`start` minus `early_margin`) has arrived.
 
-1. **Join.** Enter the room, then transcribe, and record if the order asked. Commands and advice follow the switches in force for that window. Emit `meeting.joined` with the `schedule_id`.
+1. **Join.** Enter the room, then transcribe, and record if the order asked. Commands and advice follow the bot's global switches. Emit `meeting.joined` with the `schedule_id`.
 2. **During.** The same per-meeting tools as a manual join: captions, chat, spoken lines, commands, advice. The bot is one participant. It does not hold the room open for people who have not arrived yet beyond the early margin. If nobody is there, it still stays until `end`, because the meeting may start late. It does not stay past the overrun rules.
 3. **End.** At `end`, the phase becomes `overrun` and the leave rule is fixed. There is no per-order choice and no hard cap.
    - Leave as soon as no human remains in the room. The bot does not count as a human. Reason `empty`.
@@ -85,11 +85,11 @@ A clock in this process, started after the browser is up, looks at orders whose 
 
 A manual `leave_meeting` during the window or during overrun sets `left_early`. The clock does not rejoin that occurrence. A crash is different from a manual leave: on startup, an order that was `live` and whose `end` is still ahead is joined again. An order that was `overrun`, or was `live` when the process died and whose `end` has since passed, is joined again, then the same rule runs (leave if no human remains, otherwise the 10 quiet minutes start from the rejoin, because the process could not hear the room while it was down). An order that never joined and whose `end` has passed is not entered. An order still in the future stays `upcoming`.
 
-Joining late: if the cap or a restart means the bot is not in the room at `start`, it still joins while `now` is before `end`, and the overrun rules are unchanged. If `now` is already at or past `end`, that occurrence is `missed` and is not entered for a leftover fragment. Section 7 asks whether late join should be stricter.
+Joining late is decided. If the cap or a restart means the bot is not in the room at `start`, it still joins while `now` is before `end`, and the overrun rules are unchanged. If `now` is already at or past `end`, that occurrence is `missed` and is not entered for a leftover fragment.
 
 ### Recurrence and time zones
 
-A series stores a rule, not a year of rows. The rule is small: `daily`, `weekly`, or `monthly`, an interval, optional weekdays, and `until` or `count`. Exceptions record a skipped day or a one-off new start and end. The next occurrence is materialized into a concrete order when it falls inside a horizon (proposed: the next day), so a restart has a row to fire and does not have to re-expand the rule before the browser is up.
+A series stores a rule, not a year of rows. The rule is the calendar's own recurrence string, passed through by Grok Bot. This process does not rewrite it into a smaller daily, weekly, or monthly form. Exceptions record a skipped day or a one-off new start and end. The next occurrence is materialized into a concrete order when it falls inside a horizon (proposed: the next day), so a restart has a row to fire and does not have to re-expand the rule before the browser is up. A rule this process cannot expand is reported on the import and is not guessed.
 
 The rule is evaluated in `timezone`. A weekly Monday at 09:00 stays 09:00 in that zone across a daylight-saving change. Instants are stored in UTC. `list_schedule` can return those instants plus the same times formatted in a zone the caller names. An unknown zone name is rejected. If an offset on `start` and the named zone disagree, the instant is what fires and the tool result says which zone was stored.
 
@@ -99,7 +99,7 @@ Grok Bot owns calendars. It reads the company calendar with the owner's calendar
 
 Overlap is the point of many meetings. Two orders whose windows overlap are both kept, and both go live, until the number that would be seated at one instant exceeds the cap from section 1.
 
-- **At schedule time.** `schedule_meeting` and `import_schedule` store the order and return `capacity: { cap, seated_at_start, over_by }`. `over_by` is how many orders, including this one, exceed the cap at this order's start. The default is to store and warn. `reject_if_over_capacity: true` refuses the write instead. The caller decides. This process does not drop some other meeting to make room.
+- **At schedule time.** Decided. `schedule_meeting` and `import_schedule` store the order even when it is over the cap. The response includes `capacity: { cap, seated_at_start, over_by }`. `over_by` is how many orders, including this one, exceed the cap at this order's start. The warning the human sees is the capacity alert (`capacity.reached` when the clash is over the cap, `capacity.near` when it only reaches the threshold). This process does not refuse the write and does not drop some other meeting to make room.
 - **Same room.** Two orders with the same room and an overlapping window are one session. The second write is a duplicate, matched on room and `external_id`. It updates the existing order or returns the existing `schedule_id`. It does not open a second iframe.
 - **At join time.** If the cap is full, the order waits as `waiting_for_capacity`. It does not kick a meeting that is still inside its window. When a seat frees and `now` is still before `end`, it joins. If `end` arrives first, the occurrence is `missed` with reason `capacity`.
 - **What the owner sees.** `list_schedule` can include `conflicts`: each instant where more orders overlap than the cap, with the `schedule_id`s involved. Overlap under the cap is not a conflict. A caller who wants every overlap passes `flag_overlaps: true`. The human is not expected to poll that list. The alerts below are what Grok Bot pushes.
@@ -204,7 +204,7 @@ The management screen to add on the RUN side:
 5. **Bot's eyes, for one meeting.** The session iframe for that meeting is shown at a readable size: the room as the bot is seated in it (tiles, chat, captions). Every other session stays at the tiny keepalive size. Opening eyes on a second meeting puts the first one back. Eyes is a local view for the operator. It does not add a camera tile in the room, and it does not open a second browser. The current `snapshot` tool is a PNG of the Meet Bot page and a read of hand / mic / camera. It is not this view. Eyes does not have to stream to MCP. If the owner wants a still image later, that is a separate frame grabbed from the open eyes view, still without a password or a key in the pixels' metadata.
 6. **The day.** A second list is the upcoming orders: start and end in the company's zone, topic, phase, and a mark when that instant is over the cap. The bot is not shown as seated in a room whose phase is still `upcoming`.
 
-Voice switches stay global for the first version: one conversation voice and one respond-to-commands switch for the whole bot. Per-meeting voice is a later question (section 7).
+Commands and advice follow the bot's global switches. One conversation voice and one respond-to-commands switch apply to every room. Whether a later `set_voice` can name a `meeting_id` is still question 7.
 
 ## 4. MCP tools for the owner
 
@@ -310,7 +310,7 @@ These are the company list. They persist across restarts (section 2). They retur
 
 **`list_schedule(from?, to?, timezone?, phase?, flag_overlaps?)`** returns orders in that window, soonest first, plus `conflicts` when the cap is exceeded. Recurrence is expanded inside the window. Each row is one occurrence with its `meeting_id` if it has been materialized.
 
-**`update_schedule(schedule_id, occurrence?, patch)`** changes one occurrence or, when `occurrence` is omitted, the rule and the future occurrences. It does not rewrite a transcript that already exists.
+**`update_schedule(schedule_id, occurrence?, patch)`** is decided. When `occurrence` is omitted, the change applies to the rule and the whole future series. When `occurrence` is set, only that occurrence changes. A transcript that already exists is not rewritten.
 
 **`cancel_schedule(schedule_id, occurrence?, leave_if_live?)`** cancels one occurrence or the series. The default also leaves if that occurrence is `live` or `overrun`.
 
@@ -399,14 +399,14 @@ Nothing in this design puts a private address, a customer name, or a real host i
 8. **Who is allowed to call the management tools?** Today anyone who can reach the MCP socket can join a meeting and read every transcript. A company deployment needs a caller identity on the tools. Is that in scope for the first multi-meeting change, or only at stage C?
 9. **Chat lines.** Meet Bot's `transcript(id)` is captions. Chat is a different event. Is the meeting page already willing to emit chat to the host as a `meet-event`, or does that wait on gifos-app?
 10. **Cap policy when the machine is full.** The proposal does not drop a meeting that is still in its window. A manual join is refused. A scheduled join waits, then joins if the seat frees before `end`, or is `missed`. Is that the rule, or should a higher-priority order be able to displace a lower one?
-11. **Early margin.** The proposal is one minute, overridable per order. Is that the company default?
+11. **Early margin.** Decided. The bot joins one minute before `start`. An order may set a different margin.
 12. **Overrun.** Decided. After `end`, leave as soon as no human remains in the room. Leave if speech and chat from anyone but the bot have been quiet for 10 minutes. Otherwise stay. No hard cap.
-13. **Late join.** The proposal still joins if the bot was late but `end` has not arrived. The alternative is to miss the occurrence unless it is seated by `start`.
-14. **Over capacity at schedule time.** The proposal stores the order and returns `over_by`. The alternative is to reject the write unless the caller forces it.
-15. **Recurrence shape.** The proposal is a small daily, weekly, or monthly rule, evaluated in the order's time zone, with exceptions. The alternative is to accept a calendar rule string that Grok Bot already has and store it opaquely.
-16. **Editing a series.** `update_schedule` without an occurrence changes the future. Is that enough, or do owners need "this occurrence only" as the default?
+13. **Late join.** Decided. The bot still joins while `end` is ahead. Once `end` has passed, that occurrence is missed.
+14. **Over capacity at schedule time.** Decided. The order is stored. The human is warned through the capacity alert, not by refusing the write.
+15. **Recurrence shape.** Decided. Store the calendar's own recurrence rule, as Grok Bot sends it. Do not rewrite it into a smaller daily, weekly, or monthly form.
+16. **Editing a series.** Decided. `update_schedule` with no occurrence changes the whole future series. An occurrence id changes only that one.
 17. **Open-ended orders.** Decided. An order may omit `end`. Every such meeting gets a scheduled end of 8 hours after `start`. After that end, the overrun rule applies: leave when no human remains, or after 10 minutes of silence from anyone but the bot, and otherwise stay.
-18. **Commands and advice on the order.** The proposal uses the bot's global switches while the occurrence is live. The alternative is per-order `commands` and `advice` that do not change the other rooms.
+18. **Commands and advice on the order.** Decided. They follow the bot's global switches while the occurrence is live. An order does not carry its own.
 
 ## Who changes what, when this leaves design
 
@@ -416,4 +416,4 @@ Nothing in this design puts a private address, a customer name, or a real host i
 | gifos-app | Per-session voice generation and play target in `meet-host.js` / `host-voice.js`. Eyes: resize one session iframe. Chat events, if they are not already posted. |
 | gifos-apps-source | The RUN management screen: list, per-meeting status, the day's orders, paste link and password, leave, open eyes for one meeting. `interject` and conversation turns stay addressed by meeting id. |
 
-No code in those repos follows from this document until the open questions that block stage A are answered: 1, 2, 4, and 5. Questions 12 and 17 are decided. Stage A is not blocked on them.
+Questions 11, 12, 13, 14, 15, 16, 17, and 18 are decided. Stage A is still blocked on questions 1, 2, 4, and 5, which are pending with Nathan.

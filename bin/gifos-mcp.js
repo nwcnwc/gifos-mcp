@@ -11,6 +11,9 @@ import { MeetingStore } from '../src/meetings.js';
 import { MeetingBotDriver } from '../src/driver.js';
 import { ParticipantHost } from '../src/participant/host.js';
 import { createServer, VERSION } from '../src/server.js';
+import { SpeechTurn } from '../src/providers/speech.js';
+import { Converse } from '../src/providers/converse.js';
+import { chatDeltas, grokVoice } from '../src/providers/llm.js';
 import { log } from '../src/log.js';
 
 const argv = process.argv.slice(2);
@@ -35,6 +38,43 @@ const reset = meetings.resetLive();
 if (reset) log(reset + ' meeting(s) were live in the last run; they are back to scheduled');
 const bot = new MeetingBotDriver(cfg, creds);
 const participant = new ParticipantHost(cfg, meetings);
+const turn = new SpeechTurn();
+
+async function speakClause(clause, ctx) {
+  if (ctx && ctx.signal && ctx.signal.aborted) return;
+  const stop = () => {
+    bot.quiet().catch(() => {});
+    participant.stop().catch(() => {});
+  };
+  if (ctx && ctx.signal) ctx.signal.addEventListener('abort', stop, { once: true });
+  try {
+    let bytes = null;
+    if (ctx && ctx.engine === 'grok') bytes = await grokVoice(process.env, clause);
+    else {
+      await participant.ensureVoice();
+      bytes = await participant.tts.synthesize(clause, '');
+    }
+    if (!bytes || (ctx && ctx.signal && ctx.signal.aborted)) return;
+    const played = await bot.playEncoded(bytes);
+    if (!played && participant.session) await participant.say(clause, '', true);
+  } finally {
+    if (ctx && ctx.signal) ctx.signal.removeEventListener('abort', stop);
+  }
+}
+
+const converse = new Converse({
+  turn,
+  pauseMs: cfg.turnPauseMs,
+  complete: (messages, onDelta) => chatDeltas(process.env, messages, onDelta),
+  speakText: speakClause,
+});
+participant.converse = converse;
+bot.onLine = (line) => converse.onHeard({
+  speaker: line && line.speaker,
+  text: line && line.text,
+  names: [creds.name, 'bot'],
+  self: !!(line && line.speaker && line.speaker === creds.name),
+});
 log('gifos-mcp ' + VERSION + ' · GifOS ' + cfg.gifosUrl + ' · bot "' + creds.name + '" (' + creds.source + ') · data ' + cfg.home);
 
 let closing = false;
@@ -64,7 +104,7 @@ if (httpAt >= 0) {
       enableDnsRebindingProtection: true,
       allowedHosts: ['127.0.0.1:' + port, 'localhost:' + port],
     });
-    const server = createServer({ cfg, meetings, bot, participant, adminPassword: creds.password });
+    const server = createServer({ cfg, meetings, bot, participant, adminPassword: creds.password, speech: turn });
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     try {
       await server.connect(transport);
@@ -76,7 +116,7 @@ if (httpAt >= 0) {
   });
   srv.listen(port, '127.0.0.1', () => log('listening on http://127.0.0.1:' + port + '/mcp'));
 } else {
-  const server = createServer({ cfg, meetings, bot, participant, adminPassword: creds.password });
+  const server = createServer({ cfg, meetings, bot, participant, adminPassword: creds.password, speech: turn });
   await server.connect(new StdioServerTransport());
   process.stdin.on('close', () => shutdown(0));
   log('ready on stdio');

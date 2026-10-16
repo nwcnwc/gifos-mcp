@@ -30,18 +30,25 @@ async function readError(res) {
   throw new Error('The conversation model returned ' + res.status + (clipped ? ': ' + clipped : '.'));
 }
 
-// Streams text fragments from a chat completion. `fetchImpl` is injectable.
-export async function chatText(env, messages, fetchImpl = globalThis.fetch) {
+// Streams text fragments from a chat completion. `onDelta` is called with each
+// piece as it arrives, so the first clause can be spoken before the rest.
+// `fetchImpl` is injectable. The key stays in the header.
+export async function chatDeltas(env, messages, onDelta, fetchImpl = globalThis.fetch) {
   const res = await fetchImpl(endpoint(env, '/chat/completions'), {
     method: 'POST',
     headers: headers(env),
     body: JSON.stringify(bodyOf(env, { messages, stream: true })),
   });
   if (!res.ok) await readError(res);
+  const emit = async (piece) => {
+    if (!piece) return;
+    if (typeof onDelta === 'function') await onDelta(piece);
+  };
   if (!res.body || typeof res.body.getReader !== 'function') {
     const whole = await res.json();
     const text = whole && whole.choices && whole.choices[0] && whole.choices[0].message
       ? whole.choices[0].message.content : '';
+    await emit(String(text || ''));
     return String(text || '');
   }
   const reader = res.body.getReader();
@@ -62,11 +69,18 @@ export async function chatText(env, messages, fetchImpl = globalThis.fetch) {
       try {
         const j = JSON.parse(data);
         const delta = j.choices && j.choices[0] && j.choices[0].delta;
-        if (delta && delta.content) out += delta.content;
+        if (delta && delta.content) {
+          out += delta.content;
+          await emit(delta.content);
+        }
       } catch (e) { /* a partial SSE line stays in buf */ }
     }
   }
   return out;
+}
+
+export async function chatText(env, messages, fetchImpl = globalThis.fetch) {
+  return chatDeltas(env, messages, null, fetchImpl);
 }
 
 // Grok Voice: ask the configured endpoint for speech audio. The key stays

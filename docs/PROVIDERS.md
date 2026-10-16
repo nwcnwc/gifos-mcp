@@ -22,6 +22,10 @@ Meet Bot is the single AI participant. This server starts the signed store app h
 
 Conversation voice yields while a command reply is speaking: the in-progress voice is aborted, and a new conversation line does not start until the command reply has finished.
 
+A line is a command when it starts with `/` or `!`, or when its first word is `bot` or the bot's name. Those are answered immediately while `respond_to_command` is on. Anything else waits until the room has been quiet for the turn pause, then the selected voice speaks. The model streams into the clause splitter, and the first short clause is handed to the speaker before the rest of the answer has arrived.
+
+That audio is played into the signed Meet Bot's own meeting. The bot's caption flag stays muted, so the meeting does not write the bot's voice down. If the bot is not in a meeting, the same clause is spoken through the participant microphone instead.
+
 The first clause of a spoken line is short (about four words, earlier if there is a comma) so the first audio can start before the rest of the line is synthesized.
 
 ## Transcript

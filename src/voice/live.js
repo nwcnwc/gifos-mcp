@@ -123,14 +123,15 @@ export class LiveTranscript {
 }
 
 // Polls Meeting Bot's caption text while a meeting is live.
-export function watchCaptions({ meetings, bot, live, intervalMs, botName }) {
+export function watchCaptions({ meetings, bot, live, intervalMs, botName, scrubText }) {
   const timers = new Map();
   const gap = intervalMs > 0 ? intervalMs : 500;
+  const hide = typeof scrubText === 'function' ? scrubText : (s) => s;
   async function tick(id) {
     const m = meetings.get(id);
     if (!m || m.state !== 'live' || !m.session_id) return;
     try {
-      const text = await bot.transcript(m.session_id);
+      const text = hide(await bot.transcript(m.session_id));
       live.ingestCaption(m.meeting_id, text, botName);
     } catch (e) { /* the next poll retries */ }
   }

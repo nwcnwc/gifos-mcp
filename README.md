@@ -144,7 +144,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `create_meeting` | `topic`, `start_time?` | `{meeting_id, link}`. Only mints the link. `start_time` is stored as given, for your own scheduling. |
+| `create_meeting` | `topic`, `start_time?`, `room_password?` | `{meeting_id, link, invite_email, invite_calendar}`. Only mints the link. The link never contains the room password. `invite_email` and `invite_calendar` are text for the caller to send. This server does not send them. |
 | `start_meeting` | `meeting_id` | The bot joins and starts transcribing. |
 | `join_meeting` | `link`, `password?`, `topic?` | The bot joins someone else's GifOS meeting (`…/run.html#v=…` or `…/meet/…`). Returns a `meeting_id`. |
 | `mute` | `meeting_id` | The bot stops transcribing, and the transcribing chip goes away. The bot never sends audio, so this is the only mute it has. |
@@ -175,8 +175,9 @@ Errors come back as MCP tool errors with a readable message, for example `Unknow
 The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, take notes, and send me a summary."*
 
 1. **Invite (now).** Grok Bot calls `create_meeting({topic: "Demo meeting", start_time: "17:00"})` and gets a
-   `link`. It drafts a calendar invite to Alice and Bob containing the link, in the user's own calendar. The
-   user approves the send.
+   plain `link`, plus `invite_email` and `invite_calendar`. A room password, when one was set, is a separate
+   field the guest types. It is not inside the link. Grok Bot drafts a calendar invite to Alice and Bob in the
+   user's own calendar. The user approves the send.
 2. **Timing (a routine at 17:00).** Grok Bot calls `start_meeting({meeting_id})`. The bot joins and transcribes.
    `gifos-mcp` has to be running at this point.
 3. **Meeting (17:00 onward).** Alice and Bob open the link and see the 🤖 bot tile with the transcribing chip.

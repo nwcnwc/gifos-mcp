@@ -4,6 +4,7 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
+import { formatInvite, plainLink, PASSWORD_LINK_NOTE } from './invite.js';
 import { LiveTranscript } from './voice/live.js';
 import { CAMERA_GAP, CONTROLS_GAP, HAND_GAP, INTERJECT_GAP, MIC_GAP, SNAPSHOT_GAP, VOICE_GAP, scrub, voicePublic, voiceSettings } from './voice/settings.js';
 
@@ -11,10 +12,10 @@ export const VERSION = '0.3.1';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
-export function createServer({ cfg, meetings, bot, live, captions, botName }) {
+export function createServer({ cfg, meetings, bot, live, captions, botName, botPassword }) {
   const server = new McpServer({ name: 'gifos-mcp', version: VERSION });
   const transcript = live || new LiveTranscript(cfg.home);
-  const secret = (cfg.voice && cfg.voice.key) || '';
+  const secret = [(cfg.voice && cfg.voice.key) || '', botPassword || ''];
   const choice = {
     respondToCommand: cfg.voice.respondToCommand,
     conversationVoice: cfg.voice.conversationVoice,
@@ -56,7 +57,8 @@ export function createServer({ cfg, meetings, bot, live, captions, botName }) {
 
   async function enter(m, password) {
     await bot.ensureStarted();
-    const sessionId = await bot.join(m.link, password || '');
+    const roomPassword = password || m.room_password || '';
+    const sessionId = await bot.join(plainLink(m.link, roomPassword), roomPassword);
     await bot.transcribe(sessionId, true);
     const updated = meetings.update(m.meeting_id, {
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
@@ -73,12 +75,22 @@ export function createServer({ cfg, meetings, bot, live, captions, botName }) {
     inputSchema: {
       topic: z.string().min(1).max(200).describe('What the meeting is about, e.g. "Demo meeting".'),
       start_time: z.string().max(64).optional().describe('When it should start, e.g. "2026-10-15T17:00:00-07:00". Informational only.'),
+      room_password: z.string().max(200).optional().describe('Room password guests type to join. It is returned beside the link, never inside it.'),
     },
-  }, guarded(async ({ topic, start_time }) => {
+  }, guarded(async ({ topic, start_time, room_password }) => {
     const room = newRoom();
-    const m = meetings.add({ topic, start_time: start_time || null, room, link: linkFor(cfg.gifosUrl, room, cfg.relay) });
-    return ok({ meeting_id: m.meeting_id, link: m.link, topic: m.topic, start_time: m.start_time,
-      note: 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then.' });
+    const link = plainLink(linkFor(cfg.gifosUrl, room, cfg.relay), room_password || '');
+    const m = meetings.add({
+      topic, start_time: start_time || null, room, link,
+      room_password: room_password || '',
+    });
+    const invite = formatInvite({ topic, link: m.link, roomPassword: room_password || '', startTime: start_time || '' });
+    return ok({ meeting_id: m.meeting_id, link: invite.link, topic: m.topic, start_time: m.start_time,
+      room_password: room_password || '',
+      invite_email: invite.email,
+      invite_calendar: invite.calendar,
+      password_links: PASSWORD_LINK_NOTE,
+      note: 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then. Put invite_email in the email and invite_calendar in the calendar event. The link stays plain. This server does not send either.' });
   }));
 
   server.registerTool('start_meeting', {
@@ -102,10 +114,12 @@ export function createServer({ cfg, meetings, bot, live, captions, botName }) {
   }, guarded(async ({ link, password, topic }) => {
     const room = roomFromLink(link);
     if (!room) return fail('That is not a GifOS meeting link (expected …/run.html#v=<room> or …/meet/<room>).');
+    const clean = plainLink(link, password || '');
     let m = meetings.byRoom(room);
     if (m && m.state === 'live') return ok({ ...publicView(m), note: 'Already in this meeting.' });
-    if (!m) m = meetings.add({ topic: topic || '', room, link });
-    return ok(publicView(await enter(m, password)));
+    if (!m) m = meetings.add({ topic: topic || '', room, link: clean, room_password: password || '' });
+    else if (m.link !== clean) meetings.update(m.meeting_id, { link: clean, room_password: password || m.room_password || '' });
+    return ok(publicView(await enter(meetings.get(m.meeting_id), password)));
   }));
 
   server.registerTool('mute', {
@@ -148,7 +162,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName }) {
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
     if (m.state === 'live' && m.session_id) {
-      const text = await bot.transcript(m.session_id);
+      const text = scrub(await bot.transcript(m.session_id), secret);
       meetings.update(m.meeting_id, { transcript: text });
       transcript.ingestCaption(m.meeting_id, text, botName);
       return ok(text || '(no transcript lines yet)');
@@ -159,8 +173,8 @@ export function createServer({ cfg, meetings, bot, live, captions, botName }) {
 
   async function depart(m) {
     if (captions) captions.stop(m.meeting_id);
-    let text = m.transcript || '';
-    try { text = await bot.transcript(m.session_id); } catch (e) { /* keep the last copy */ }
+    let text = scrub(m.transcript || '', secret);
+    try { text = scrub(await bot.transcript(m.session_id), secret); } catch (e) { /* keep the last copy */ }
     transcript.ingestCaption(m.meeting_id, text, botName);
     await bot.leave(m.session_id);
     const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false,
@@ -246,6 +260,9 @@ export function createServer({ cfg, meetings, bot, live, captions, botName }) {
     return ok({ meeting_id: m.meeting_id, spoken: true });
   }));
 
+  // Hand, microphone, camera, and room state are a GifOS meeting-control
+  // capability. The gifos-apps-source agent builds it on Meeting Bot.
+  // These tools only forward window.MeetingBot and report a gap until then.
   async function control(name, gap, fn) {
     if (typeof bot[name] !== 'function') throw new Error(gap);
     const out = await fn();

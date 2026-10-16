@@ -14,11 +14,17 @@ export const SNAPSHOT_GAP = 'Meeting Bot has no snapshot method (contract versio
 export const KOKORO_APP = 'offline-tts-kokoro';
 export const KOKORO_VOICE = 'af_heart';
 
+// One secret, or a list. Empty values are skipped. Used for the model key
+// and for the bot password, so neither lands in a tool result.
 export function scrub(text, secret) {
-  const s = String(text == null ? '' : text);
-  const key = String(secret || '');
-  if (!key) return s;
-  return s.split(key).join('[redacted]');
+  const keys = Array.isArray(secret) ? secret : [secret];
+  let out = String(text == null ? '' : text);
+  for (const key of keys) {
+    const k = String(key || '');
+    if (!k) continue;
+    out = out.split(k).join('[redacted]');
+  }
+  return out;
 }
 
 // Kokoro unless the environment names an HTTP stand-in or turns speech off.

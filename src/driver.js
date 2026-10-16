@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import { log } from './log.js';
-import { mouthInitScript } from './voice/mouth.js';
+import { VOICE_GAP, INTERJECT_GAP } from './voice/settings.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -37,7 +37,6 @@ export class MeetingBotDriver {
     this.starting = null;
     this.bot = null;      // { ctx, desk, app, frame, fileId }
     this.sttFileId = '';
-    this.playGen = 0;
   }
 
   ensureStarted() {
@@ -89,7 +88,6 @@ export class MeetingBotDriver {
     const init = { gifos_meet_bar: '0', gifos_name: this.creds.name };
     if (this.cfg.relay) init.gifos_relay = this.cfg.relay;
     await ctx.addInitScript({ content: 'try{var o=' + JSON.stringify(init) + ';for(var k in o)localStorage.setItem(k,o[k]);}catch(e){}' });
-    await ctx.addInitScript({ content: mouthInitScript() });
     return ctx;
   }
 
@@ -269,52 +267,26 @@ export class MeetingBotDriver {
   async list() { return this.call('list'); }
   async transcript(sessionId) { return (await this.call('transcript', sessionId)).text || ''; }
 
-  // Meeting pages are iframes inside the Meeting Bot app. The mouth script
-  // installed on the browser context is what plays into them.
-  async workFrames() {
-    if (!this.bot || !this.bot.app) return [];
-    const ids = await this.bot.app.evaluate(() => {
-      const host = window.GifOS && window.GifOS.meetHost;
-      const list = host && host.list ? host.list() : [];
-      return list.filter((s) => s && !s.control).map((s) => s.meetingId);
-    }).catch(() => []);
-    const frames = [];
-    for (const id of ids || []) {
-      const el = await this.bot.app.$('iframe[data-gifos-meet="' + id + '"]');
-      if (!el) continue;
-      const frame = await el.contentFrame();
-      if (frame) frames.push(frame);
-    }
-    return frames;
+  // Hands the local-LLM setting to the app. The key is not evaluated into the
+  // page unless MeetingBot.setVoice already exists.
+  async setVoice(settings) {
+    await this.ensureStarted();
+    const has = await this.bot.frame.evaluate(() => typeof (window.MeetingBot && window.MeetingBot.setVoice) === 'function');
+    if (!has) return { applied: false, gap: VOICE_GAP };
+    const result = await this.bot.frame.evaluate((s) => window.MeetingBot.setVoice(s), settings);
+    return { applied: true, result: result == null ? null : result };
   }
 
-  async playEncoded(bytes) {
-    if (!bytes || !bytes.length) return false;
-    const frames = await this.workFrames().catch(() => []);
-    if (!frames.length) return false;
-    this.playGen += 1;
-    const gen = this.playGen;
-    const b64 = Buffer.from(bytes).toString('base64');
-    let played = false;
-    for (const frame of frames) {
-      const ok = await frame.evaluate((audio) => {
-        if (typeof window.__gifosPlayEncoded !== 'function') return false;
-        return window.__gifosPlayEncoded(audio);
-      }, b64).catch(() => false);
-      if (ok) played = true;
-    }
-    if (this.playGen === gen) await this.quiet().catch(() => {});
-    return played;
-  }
-
-  async quiet() {
-    this.playGen += 1;
-    const frames = await this.workFrames().catch(() => []);
-    for (const frame of frames) {
-      await frame.evaluate(() => {
-        if (typeof window.__gifosQuiet === 'function') window.__gifosQuiet();
-      }).catch(() => {});
-    }
+  // Spoken interjection from the assistant. Chat stays on say().
+  async interject(sessionId, text) {
+    await this.ensureStarted();
+    const has = await this.bot.frame.evaluate(() => typeof (window.MeetingBot && window.MeetingBot.interject) === 'function');
+    if (!has) return { applied: false, gap: INTERJECT_GAP };
+    const result = await this.bot.frame.evaluate(
+      ({ id, text }) => window.MeetingBot.interject(id, text),
+      { id: sessionId, text: String(text) },
+    );
+    return { applied: true, result: result == null ? null : result };
   }
 
   async info() {

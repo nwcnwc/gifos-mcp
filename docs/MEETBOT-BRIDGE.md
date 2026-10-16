@@ -20,6 +20,8 @@ These pieces were added on `cursor/meeting-voice-streaming` and repeat work that
 | `MeetingBotDriver.playEncoded` / `quiet` | Pushed that audio into `iframe[data-gifos-meet]`. | Same duplication. The driver may only call `window.MeetingBot`. |
 | `say` speaking in the Node process | The assistant's line was synthesized here and played into the meeting. | `say` is a command this server passes through. |
 
+Those files are not in this tree. `set_voice` calls `MeetingBot.setVoice` with the object below, and `say` calls `MeetingBot.interject`. If either method is missing, the tool reports the gap and does nothing else.
+
 What stays, because it is management rather than participation:
 
 - Launching headless Chromium, installing Meeting Bot and the speech-to-text app from the store, and calling `window.MeetingBot` (`src/driver.js`).
@@ -110,7 +112,7 @@ Local LLM settings, suggested default xAI Grok:
 | Model | `GIFOS_LLM_MODEL` | `grok-4.20-0309-non-reasoning` on that host. Set it yourself for any other host. |
 | Key | `GIFOS_LLM_KEY` | No default. The user's own key. |
 
-The object this server will pass, once Meet Bot accepts it:
+The object passed to `MeetingBot.setVoice`, once that method exists:
 
 ```js
 MeetingBot.setVoice({

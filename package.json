@@ -1,6 +1,6 @@
 {
   "name": "gifos-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "GifOS Meet connector for Grok Bot: an MCP server that runs the GifOS Meeting Bot in a headless browser on your own machine.",
   "license": "MIT",
   "type": "module",

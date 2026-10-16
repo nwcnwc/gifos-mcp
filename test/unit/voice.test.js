@@ -1,30 +1,122 @@
-// Meeting voice against a local OpenAI-compatible streaming server.
-// No browser, and no call to any host but 127.0.0.1.
+// Voice is a setting handed to Meet Bot. This process does not call a model
+// and does not play audio. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createServer } from '../../src/server.js';
 import { loadConfig } from '../../src/config.js';
 import { MeetingStore } from '../../src/meetings.js';
+import { MeetingBotDriver } from '../../src/driver.js';
 import { LiveTranscript, watchCaptions } from '../../src/voice/live.js';
-import { MeetingVoice } from '../../src/voice/talk.js';
-import { chatDeltas } from '../../src/voice/llm.js';
-import { speechRequest, synthesize } from '../../src/voice/speech.js';
-import { clauses, readyClauses } from '../../src/voice/clauses.js';
-import { mouthInitScript } from '../../src/voice/mouth.js';
+import { voiceSettings, scrub } from '../../src/voice/settings.js';
 
 const KEY = 'sk-test-key-which-must-stay-here';
-const FIRST = 'Hello there friend today, we should talk';
-const SECOND = ' about the weather.';
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function jsFiles(dir, acc) {
+  for (const name of fs.readdirSync(dir)) {
+    if (name === 'node_modules') continue;
+    const p = path.join(dir, name);
+    if (fs.statSync(p).isDirectory()) jsFiles(p, acc);
+    else if (name.endsWith('.js')) acc.push(p);
+  }
+  return acc;
+}
+
+test('src and bin do not call a chat model or play into the meeting', () => {
+  const forbidden = ['/chat/completions', '/audio/speech', '/tts', '__gifosPlayEncoded', '__gifosQuiet', 'MeetingVoice', 'chatDeltas', 'mouthInitScript'];
+  const files = [...jsFiles(path.join(ROOT, 'src'), []), ...jsFiles(path.join(ROOT, 'bin'), [])];
+  assert.ok(files.length > 5);
+  for (const file of files) {
+    const src = fs.readFileSync(file, 'utf8');
+    for (const needle of forbidden) {
+      assert.equal(src.includes(needle), false, path.relative(ROOT, file) + ' contains ' + needle);
+    }
+  }
+  assert.equal(fs.existsSync(path.join(ROOT, 'src', 'voice', 'talk.js')), false);
+  assert.equal(fs.existsSync(path.join(ROOT, 'src', 'voice', 'llm.js')), false);
+  assert.equal(fs.existsSync(path.join(ROOT, 'src', 'voice', 'speech.js')), false);
+  assert.equal(fs.existsSync(path.join(ROOT, 'src', 'voice', 'clauses.js')), false);
+  assert.equal(fs.existsSync(path.join(ROOT, 'src', 'voice', 'mouth.js')), false);
+});
+
+test('local voice settings carry the key, and public text does not', () => {
+  const voice = {
+    respondToCommand: true,
+    conversationVoice: 'local',
+    url: 'http://127.0.0.1:9/v1',
+    model: 'local-model',
+    key: KEY,
+  };
+  const settings = voiceSettings(voice);
+  assert.equal(settings.llm.key, KEY);
+  assert.equal(settings.llm.url, 'http://127.0.0.1:9/v1');
+  assert.equal('llm' in voiceSettings({ ...voice, conversationVoice: 'grok' }), false);
+  assert.equal('llm' in voiceSettings({ ...voice, conversationVoice: 'none' }), false);
+  assert.equal(scrub('failed ' + KEY, KEY), 'failed [redacted]');
+  assert.equal(scrub('fine', ''), 'fine');
+});
+
+test('the key stays out of the page until MeetingBot.setVoice exists', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-drv-'));
+  const cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510', GIFOS_LLM_KEY: KEY });
+  const driver = new MeetingBotDriver(cfg, { name: 'harbor-maple', password: 'quiet-cedar-42' });
+  const seen = [];
+  driver.state = 'ready';
+  driver.bot = {
+    app: { isClosed: () => false },
+    frame: {
+      evaluate(fn, arg) {
+        seen.push({ src: String(fn), arg });
+        if (arg === undefined) return Promise.resolve(false);
+        return Promise.resolve(true);
+      },
+    },
+  };
+  const settings = voiceSettings(cfg.voice);
+  assert.equal(settings.llm.key, KEY);
+  const missing = await driver.setVoice(settings);
+  assert.equal(missing.applied, false);
+  assert.match(missing.gap, /setVoice/);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].arg, undefined);
+  assert.equal(JSON.stringify(seen).includes(KEY), false);
+
+  seen.length = 0;
+  driver.bot.frame.evaluate = (fn, arg) => {
+    seen.push({ src: String(fn), arg });
+    if (arg === undefined) return Promise.resolve(true);
+    return Promise.resolve({ ok: true });
+  };
+  const handed = await driver.setVoice(settings);
+  assert.equal(handed.applied, true);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0].arg, undefined);
+  assert.equal(seen[1].arg.llm.key, KEY);
+  assert.equal(seen[1].src.includes('setVoice'), true);
+
+  seen.length = 0;
+  driver.bot.frame.evaluate = (fn, arg) => {
+    seen.push(arg);
+    if (arg === undefined) return Promise.resolve(false);
+    return Promise.resolve(true);
+  };
+  const quiet = await driver.interject('mt_1', 'Hello');
+  assert.equal(quiet.applied, false);
+  assert.match(quiet.gap, /interject/);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0], undefined);
+});
 
 class FakeBot {
-  constructor() { this.calls = []; this.lines = {}; this.seq = 0; }
+  constructor() { this.calls = []; this.lines = {}; this.seq = 0; this.voice = null; }
   async ensureStarted() {}
   async join() {
     const id = 'mt_' + (++this.seq);
@@ -34,177 +126,35 @@ class FakeBot {
   }
   async leave(id) { this.calls.push(['leave', id]); }
   async transcribe() {}
-  async say() { throw new Error('chat say should not be used for voice'); }
+  async say() { throw new Error('chat say should not be used for a spoken line'); }
+  async setVoice(settings) {
+    this.voice = settings;
+    this.calls.push(['setVoice', settings.conversation_voice]);
+    return { applied: true, result: { conversation_voice: settings.conversation_voice } };
+  }
+  async interject(id, text) {
+    this.calls.push(['interject', id, text]);
+    return { applied: true };
+  }
   async transcript(id) { return (this.lines[id] || []).join('\n'); }
   async info() { return { state: 'ready', bot_name: 'notes-test' }; }
 }
 
-function startMock() {
-  const requests = [];
-  let releaseHold;
-  const hold = new Promise((r) => { releaseHold = r; });
-  const server = http.createServer(async (req, res) => {
-    const chunks = [];
-    for await (const c of req) chunks.push(c);
-    let body = {};
-    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (e) { body = {}; }
-    const rec = { method: req.method, url: req.url, authorization: req.headers.authorization || '', body, clientClosed: false };
-    requests.push(rec);
-    const blob = JSON.stringify(body);
-    if (blob.includes('__boom__')) {
-      res.writeHead(500, { 'content-type': 'text/plain' }).end('refused ' + KEY);
-      return;
-    }
-    if (req.url.endsWith('/audio/speech') || req.url.endsWith('/tts')) {
-      res.writeHead(200, { 'content-type': 'audio/wav' });
-      res.end(Buffer.from('RIFF'));
-      return;
-    }
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
-    res.write('data: {"choices":[{"delta":{"content":' + JSON.stringify(FIRST) + '}}]}\n');
-    let gone = false;
-    req.on('close', () => { gone = true; rec.clientClosed = true; });
-    await new Promise((resolve) => {
-      const finish = () => resolve();
-      req.on('close', finish);
-      hold.then(finish);
-    });
-    if (gone || res.writableEnded) return;
-    res.write('\n');
-    res.write('data: {"choices":[{"delta":{"content":' + JSON.stringify(SECOND) + '}}]}\n\n');
-    res.write('data: [DONE]\n\n');
-    res.end();
-  });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      const port = server.address().port;
-      resolve({
-        url: 'http://127.0.0.1:' + port + '/v1',
-        requests,
-        release: () => releaseHold(),
-        close: () => new Promise((r) => server.close(r)),
-      });
-    });
-  });
-}
-
-function voiceAt(url, extra = {}) {
-  return {
-    enabled: true,
-    url,
-    key: KEY,
-    model: 'local-model',
-    ttsUrl: url,
-    ttsPath: '/audio/speech',
-    ttsVoice: 'alloy',
-    ttsModel: 'tts-1',
-    pauseMs: 0,
-    ...extra,
-  };
-}
-
-const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-
-test('the first clause is ready before the model finishes the sentence', () => {
-  const early = readyClauses(FIRST, 0, false);
-  assert.deepEqual(early.next, ['Hello there friend today.']);
-  const later = readyClauses(FIRST + SECOND, early.emitted, true);
-  assert.equal(later.next[0], 'we should talk about the weather.');
-  const parts = clauses('Hello friend today, we should talk about the weather. Then we leave.');
-  assert.ok(parts.length >= 3, parts.join(' | '));
-  assert.ok(parts[0].split(/\s+/).length <= 6, parts[0]);
-});
-
-test('speech requests keep the key in the header', () => {
-  const xai = speechRequest({ ttsUrl: 'https://api.x.ai/v1', ttsPath: '/tts', ttsVoice: 'eve', key: KEY }, 'Hello');
-  assert.equal(xai.url, 'https://api.x.ai/v1/tts');
-  assert.deepEqual(xai.body, { text: 'Hello', voice_id: 'eve', language: 'en' });
-  assert.equal(xai.headers.authorization, 'Bearer ' + KEY);
-  assert.equal(JSON.stringify(xai.body).includes(KEY), false);
-  const openai = speechRequest({ ttsUrl: 'http://127.0.0.1:9/v1', ttsPath: '/audio/speech', ttsVoice: 'alloy', ttsModel: 'tts-1', key: KEY }, 'Hello');
-  assert.equal(openai.url, 'http://127.0.0.1:9/v1/audio/speech');
-  assert.deepEqual(openai.body, { model: 'tts-1', input: 'Hello', voice: 'alloy' });
-  assert.equal(JSON.stringify(openai.body).includes(KEY), false);
-});
-
-test('the mouth script does not carry a key', () => {
-  const src = mouthInitScript();
-  assert.match(src, /__gifosPlayEncoded/);
-  assert.match(src, /__gifosQuiet/);
-  assert.equal(src.includes(KEY), false);
-  assert.equal(src.includes('GIFOS_LLM_KEY'), false);
-  assert.equal(src.includes('authorization'), false);
-  assert.equal(src.includes('Bearer'), false);
-});
-
-test('a streaming chat has no tools, and an error does not echo the key', { timeout: 10000 }, async (t) => {
-  const mock = await startMock();
-  t.after(() => mock.close());
-  const voice = voiceAt(mock.url);
-  const spoken = [];
-  let sawFirst;
-  const first = new Promise((r) => { sawFirst = r; });
-  const pending = chatDeltas(voice, [{ role: 'user', content: 'What next?' }], async (delta) => {
-    spoken.push(delta);
-    if (spoken.length === 1) sawFirst();
-  });
-  await first;
-  const call = mock.requests[0];
-  assert.equal(spoken[0], FIRST);
-  mock.release();
-  const out = await pending;
-  assert.equal(out, FIRST + SECOND);
-  assert.equal(call.method, 'POST');
-  assert.equal(call.url, '/v1/chat/completions');
-  assert.equal(call.authorization, 'Bearer ' + KEY);
-  assert.deepEqual(Object.keys(call.body).sort(), ['messages', 'model', 'stream']);
-  assert.equal(call.body.stream, true);
-  assert.equal(call.body.model, 'local-model');
-  assert.equal('tools' in call.body, false);
-  assert.equal(JSON.stringify(call.body).includes(KEY), false);
-  const audio = await synthesize(voice, 'Hello there.', {});
-  assert.equal(audio.toString(), 'RIFF');
-  const speech = mock.requests.find((r) => r.url.endsWith('/audio/speech'));
-  assert.equal(speech.authorization, 'Bearer ' + KEY);
-  assert.equal(JSON.stringify(speech.body).includes(KEY), false);
-  await assert.rejects(
-    () => chatDeltas(voice, [{ role: 'user', content: '__boom__ ' + KEY }], null),
-    (e) => {
-      assert.match(e.message, /returned 500/);
-      assert.match(e.message, /refused \[redacted\]/);
-      assert.equal(String(e.message).includes(KEY), false);
-      return true;
-    },
-  );
-});
-
-test('say cuts off the model, and the assistant still has the transcript after the meeting', { timeout: 10000 }, async (t) => {
-  const mock = await startMock();
-  t.after(() => mock.close());
+test('say and the transcript go through Meet Bot, and the key stays out of tool text', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-voice-'));
   const cfg = loadConfig({
     GIFOS_MCP_HOME: home,
     GIFOS_URL: 'http://127.0.0.1:19510',
-    GIFOS_LLM_URL: mock.url,
+    GIFOS_LLM_URL: 'http://127.0.0.1:9/v1',
     GIFOS_LLM_KEY: KEY,
     GIFOS_LLM_MODEL: 'local-model',
-    GIFOS_TURN_PAUSE_MS: '0',
-    GIFOS_TTS_PATH: '/audio/speech',
   });
   const meetings = new MeetingStore(home);
   const bot = new FakeBot();
   const live = new LiveTranscript(home);
-  const spoken = [];
-  const voice = new MeetingVoice({
-    voice: cfg.voice,
-    live,
-    pauseMs: 0,
-    fetchImpl: globalThis.fetch,
-    speak: async (text) => { spoken.push(text); return { played: true }; },
-  });
   const captions = watchCaptions({ meetings, bot, live, intervalMs: 20, botName: 'notes-test' });
-  t.after(() => { captions.stopAll(); voice.stopAll(); });
-  const server = createServer({ cfg, meetings, bot, voice, live, captions, botName: 'notes-test' });
+  t.after(() => captions.stopAll());
+  const server = createServer({ cfg, meetings, bot, live, captions, botName: 'notes-test' });
   const [a, b] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'unit', version: '1' });
   const updates = [];
@@ -215,61 +165,65 @@ test('say cuts off the model, and the assistant still has the transcript after t
 
   const created = await json('create_meeting', { topic: 'Demo meeting' });
   await json('start_meeting', { meeting_id: created.meeting_id });
-  const listed = await client.listResources();
+  assert.equal(bot.voice.conversation_voice, 'local');
+  assert.equal(bot.voice.llm.key, KEY);
+  assert.equal(bot.voice.llm.url, 'http://127.0.0.1:9/v1');
+  assert.equal(bot.voice.llm.model, 'local-model');
+  assert.equal(bot.calls.some((c) => c[0] === 'say'), false);
+
+  const status = await json('status');
+  assert.equal(status.voice.handed, true);
+  assert.equal(status.voice.conversation_voice, 'local');
+  assert.equal(status.voice.model, 'local-model');
+  assert.equal(status.voice.gap, null);
+  assert.equal(JSON.stringify(status).includes(KEY), false);
+  assert.equal(JSON.stringify(status).includes('127.0.0.1:9'), false);
+  assert.equal(JSON.stringify(status).includes('api.x.ai'), false);
+
   const uri = 'gifos://meeting/' + created.meeting_id + '/transcript';
+  const listed = await client.listResources();
   assert.ok(listed.resources.some((r) => r.uri === uri));
   await client.subscribeResource({ uri });
-
   bot.lines.mt_1.push('Ada: What should we do next?');
-  for (let i = 0; i < 50 && spoken.length < 1; i++) await delay(20);
-  assert.equal(spoken[0], 'Hello there friend today.');
-  const chat = mock.requests.find((r) => r.url.endsWith('/chat/completions'));
-  assert.ok(chat, 'the speaking model was called');
-  assert.equal(chat.authorization, 'Bearer ' + KEY);
-  assert.deepEqual(Object.keys(chat.body).sort(), ['messages', 'model', 'stream']);
-  assert.equal(chat.body.tools, undefined);
-  assert.equal(JSON.stringify(chat.body).includes(KEY), false);
-  assert.match(chat.body.messages[0].content, /no tools/i);
-  assert.match(chat.body.messages.map((m) => m.content).join('\n'), /Ada: What should we do next/);
-
-  const said = await json('say', { meeting_id: created.meeting_id, text: 'I will take that question.' });
-  assert.equal(said.spoken, true);
-  assert.equal(said.interrupted_voice, true);
-  assert.equal(spoken.at(-1), 'I will take that question.');
-  assert.equal(spoken.some((s) => /weather/.test(s)), false);
-  await delay(30);
-  assert.equal(mock.requests.filter((r) => r.url.endsWith('/chat/completions')).length, 1);
-
-  const tail = await json('tail_transcript', { meeting_id: created.meeting_id });
-  assert.deepEqual(tail.lines.map((l) => l.kind), ['speech', 'voice', 'say']);
-  assert.equal(tail.lines[2].text, 'I will take that question.');
-  assert.equal(JSON.stringify(tail).includes(KEY), false);
-  const again = await json('tail_transcript', { meeting_id: created.meeting_id, since: tail.lines[0].seq });
-  assert.equal(again.lines[0].kind, 'voice');
-
-  const resource = await client.readResource({ uri });
-  const rows = resource.contents[0].text.split('\n').map((l) => JSON.parse(l));
-  assert.equal(rows.length, 3);
-  assert.equal(resource.contents[0].mimeType, 'application/x-ndjson');
-
-  bot.lines.mt_1.push('Bob: One more thing');
   for (let i = 0; i < 50 && updates.length < 1; i++) await delay(20);
   assert.ok(updates.includes(uri));
+
+  const said = await json('say', { meeting_id: created.meeting_id, text: 'I will take that question.' });
+  assert.deepEqual(said, { meeting_id: created.meeting_id, spoken: true });
+  assert.deepEqual(bot.calls.filter((c) => c[0] === 'interject'), [['interject', 'mt_1', 'I will take that question.']]);
+  assert.equal(JSON.stringify(said).includes(KEY), false);
+
+  const tail = await json('tail_transcript', { meeting_id: created.meeting_id });
+  assert.deepEqual(tail.lines.map((l) => l.kind), ['speech']);
+  assert.equal(tail.lines[0].speaker, 'Ada');
+  assert.equal(tail.lines[0].text, 'What should we do next?');
+  const resource = await client.readResource({ uri });
+  assert.equal(resource.contents[0].mimeType, 'application/x-ndjson');
+  assert.match(resource.contents[0].text, /What should we do next/);
+  assert.equal(resource.contents[0].text.includes(KEY), false);
+
+  const grok = await json('set_voice', { conversation_voice: 'grok', respond_to_command: false });
+  assert.equal(grok.conversation_voice, 'grok');
+  assert.equal(grok.respond_to_command, false);
+  assert.equal(grok.model, null);
+  assert.equal(grok.handed, true);
+  assert.equal(bot.voice.conversation_voice, 'grok');
+  assert.equal('llm' in bot.voice, false);
+  assert.equal(JSON.stringify(grok).includes(KEY), false);
+
+  bot.interject = async () => { throw new Error('refused ' + KEY); };
+  const boom = await call('say', { meeting_id: created.meeting_id, text: 'again' });
+  assert.equal(boom.isError, true);
+  assert.match(boom.content[0].text, /refused \[redacted\]/);
+  assert.equal(boom.content[0].text.includes(KEY), false);
 
   const ended = await json('end_meeting', { meeting_id: created.meeting_id });
   assert.equal(ended.state, 'ended');
   const after = await json('tail_transcript', { meeting_id: created.meeting_id });
-  assert.ok(after.lines.length >= 3);
-  const callsBefore = mock.requests.filter((r) => r.url.endsWith('/chat/completions')).length;
-  voice.hear({ meeting_id: created.meeting_id, speaker: 'Ada', text: 'still there?', kind: 'speech' });
-  await delay(40);
-  assert.equal(mock.requests.filter((r) => r.url.endsWith('/chat/completions')).length, callsBefore);
-
+  assert.equal(after.lines.length, 1);
   const file = path.join(home, 'transcripts', created.meeting_id + '.jsonl');
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(fs.readFileSync(file, 'utf8').includes(KEY), false);
-  const restored = new LiveTranscript(home);
-  assert.ok(restored.tail(created.meeting_id, 0).lines.length >= 3);
   await client.close();
 });
 

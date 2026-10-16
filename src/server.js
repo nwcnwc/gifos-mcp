@@ -4,18 +4,32 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
-import { voicePublic } from './config.js';
 import { LiveTranscript } from './voice/live.js';
-import { scrub } from './voice/llm.js';
+import { INTERJECT_GAP, VOICE_GAP, scrub, voicePublic, voiceSettings } from './voice/settings.js';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.2.1';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
-export function createServer({ cfg, meetings, bot, voice, live, captions, botName }) {
+export function createServer({ cfg, meetings, bot, live, captions, botName }) {
   const server = new McpServer({ name: 'gifos-mcp', version: VERSION });
   const transcript = live || new LiveTranscript(cfg.home);
   const secret = (cfg.voice && cfg.voice.key) || '';
+  const choice = {
+    respondToCommand: cfg.voice.respondToCommand,
+    conversationVoice: cfg.voice.conversationVoice,
+  };
+  let handed = null;
+  const currentVoice = () => ({ ...cfg.voice, respondToCommand: choice.respondToCommand, conversationVoice: choice.conversationVoice });
+  async function applyVoice() {
+    const settings = voiceSettings(currentVoice());
+    if (typeof bot.setVoice !== 'function') {
+      handed = { applied: false, gap: VOICE_GAP };
+      return handed;
+    }
+    handed = await bot.setVoice(settings);
+    return handed;
+  }
 
   function ok(obj) {
     const raw = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
@@ -48,7 +62,7 @@ export function createServer({ cfg, meetings, bot, voice, live, captions, botNam
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
     });
-    if (voice && voice.openMeeting) voice.openMeeting(m.meeting_id);
+    await applyVoice();
     if (captions) await captions.start(updated);
     return updated;
   }
@@ -150,7 +164,6 @@ export function createServer({ cfg, meetings, bot, voice, live, captions, botNam
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
-    if (voice) voice.closeMeeting(m.meeting_id);
     if (captions) captions.stop(m.meeting_id);
     let text = m.transcript || '';
     try { text = await bot.transcript(m.session_id); } catch (e) { /* keep the last copy */ }
@@ -180,14 +193,30 @@ export function createServer({ cfg, meetings, bot, voice, live, captions, botNam
       gifos_url: cfg.gifosUrl,
       stt_app: cfg.sttApp || null,
       live_meetings: meetings.all().filter((m) => m.state === 'live').map((m) => m.meeting_id),
-      voice: voicePublic(cfg.voice),
+      voice: voicePublic(currentVoice(), handed),
       bot: info,
     });
   }));
 
+  server.registerTool('set_voice', {
+    title: 'Hand Meet Bot its voice switches',
+    description: 'Passes respond_to_command and conversation_voice (none, grok, or local) through to Meet Bot. local uses the OpenAI-compatible endpoint configured in the environment. This server does not call the model. The key is not an argument and is not returned.',
+    inputSchema: {
+      respond_to_command: z.boolean().optional().describe('When true, Meet Bot may answer commands it hears. When false, it does not.'),
+      conversation_voice: z.enum(['none', 'grok', 'local']).optional().describe('none, grok (Grok Voice), or local (the configured LLM, then Kokoro).'),
+    },
+  }, guarded(async ({ respond_to_command, conversation_voice }) => {
+    if (conversation_voice === 'local' && (!cfg.voice.url || !cfg.voice.model)) {
+      throw new Error('conversation_voice local needs GIFOS_LLM_URL and GIFOS_LLM_MODEL. A GIFOS_LLM_KEY alone selects the suggested xAI endpoint.');
+    }
+    if (respond_to_command !== undefined) choice.respondToCommand = !!respond_to_command;
+    if (conversation_voice) choice.conversationVoice = conversation_voice;
+    return ok(voicePublic(currentVoice(), await applyVoice()));
+  }));
+
   server.registerTool('tail_transcript', {
     title: 'Tail the live transcript',
-    description: 'New lines since `since` (the seq from the previous tail, or 0). Each line is {seq, ts, speaker, text, kind}. kind is speech (someone in the room), voice (the speaking model), or say (an interjection from the say tool). Works while the meeting is live and after it ends. The same bytes are the gifos://meeting/{id}/transcript resource.',
+    description: 'New caption lines since `since` (the seq from the previous tail, or 0). Each line is {seq, ts, speaker, text, kind} and kind is speech. Lines come from Meet Bot. Works while the meeting is live and after it ends. The same bytes are the gifos://meeting/{id}/transcript resource.',
     inputSchema: {
       meeting_id: meetingId,
       since: z.number().int().min(0).optional().describe('Return lines with a seq greater than this. Omit or pass 0 to read from the start.'),
@@ -199,15 +228,17 @@ export function createServer({ cfg, meetings, bot, voice, live, captions, botNam
 
   server.registerTool('say', {
     title: 'Speak in the meeting',
-    description: 'Says text out loud in a live meeting, ahead of the speaking model. The speaking model has no tools and only makes conversation. Use say to interject. After the meeting, handle notes, mail, and calendar yourself; this server does not.',
+    description: 'Passes a spoken line through to Meet Bot (MeetingBot.interject), ahead of conversation voice. This server does not synthesize speech. share_content remains chat. After the meeting, handle notes, mail, and calendar yourself.',
     inputSchema: {
       meeting_id: meetingId,
-      text: z.string().min(1).max(2000).describe('What to say, in one or two sentences.'),
+      text: z.string().min(1).max(2000).describe('What Meet Bot should say, in one or two sentences.'),
     },
   }, guarded(async ({ meeting_id, text }) => {
     const m = needLive(meeting_id);
-    if (!voice) throw new Error('Meeting voice is off. Set GIFOS_LLM_KEY to use xAI Grok, or set GIFOS_LLM_URL and GIFOS_LLM_MODEL for another OpenAI-compatible endpoint.');
-    return ok(await voice.say(m.meeting_id, text));
+    if (typeof bot.interject !== 'function') throw new Error(INTERJECT_GAP);
+    const said = await bot.interject(m.session_id, text);
+    if (!said || said.applied === false) throw new Error((said && said.gap) || INTERJECT_GAP);
+    return ok({ meeting_id: m.meeting_id, spoken: true });
   }));
 
   const subs = new Set();
@@ -248,7 +279,7 @@ export function createServer({ cfg, meetings, bot, voice, live, captions, botNam
     }),
     {
       title: 'Live meeting transcript',
-      description: 'Newline-delimited JSON for one meeting. Each line is {seq, ts, speaker, text, kind}. kind is speech, voice, or say. Subscribe for updates while the meeting is live. After the meeting, read it and do the follow-up yourself.',
+      description: 'Newline-delimited JSON for one meeting, tailed from Meet Bot. Each line is {seq, ts, speaker, text, kind}. Subscribe for updates while the meeting is live. After the meeting, read it and do the follow-up yourself.',
       mimeType: 'application/x-ndjson',
     },
     async (uri, vars) => {

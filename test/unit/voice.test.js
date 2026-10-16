@@ -49,7 +49,7 @@ test('src and bin do not call a chat model or play into the meeting', () => {
   }
 });
 
-test('local voice settings carry the key, and public text does not', () => {
+test('local voice settings name providers, and public text does not carry the key', () => {
   const voice = {
     respondToCommand: true,
     conversationVoice: 'local',
@@ -58,11 +58,15 @@ test('local voice settings carry the key, and public text does not', () => {
     key: KEY,
   };
   const settings = voiceSettings(voice);
-  assert.equal(settings.llm.key, KEY);
-  assert.equal(settings.llm.url, 'http://127.0.0.1:9/v1');
+  assert.equal(settings.llm.provider, 'smartest');
+  assert.equal('key' in settings.llm, false);
+  assert.equal('url' in settings.llm, false);
+  assert.equal(settings.tts.provider, 'tts');
   assert.equal(settings.tts.engine, 'kokoro');
   assert.equal(settings.tts.app, 'offline-tts-kokoro');
   assert.equal(settings.tts.voice, 'af_heart');
+  assert.equal(JSON.stringify(settings).includes(KEY), false);
+  assert.equal(JSON.stringify(settings).includes('127.0.0.1'), false);
   assert.equal('llm' in voiceSettings({ ...voice, conversationVoice: 'grok' }), false);
   assert.equal('tts' in voiceSettings({ ...voice, conversationVoice: 'grok' }), false);
   assert.equal('llm' in voiceSettings({ ...voice, conversationVoice: 'none' }), false);
@@ -88,7 +92,8 @@ test('the key stays out of the page until MeetingBot.setVoice exists', async () 
     },
   };
   const settings = voiceSettings(cfg.voice);
-  assert.equal(settings.llm.key, KEY);
+  assert.equal(settings.llm.provider, 'smartest');
+  assert.equal('key' in settings.llm, false);
   const missing = await driver.setVoice(settings);
   assert.equal(missing.applied, false);
   assert.match(missing.gap, /setVoice/);
@@ -106,7 +111,8 @@ test('the key stays out of the page until MeetingBot.setVoice exists', async () 
   assert.equal(handed.applied, true);
   assert.equal(seen.length, 2);
   assert.equal(seen[0].arg, undefined);
-  assert.equal(seen[1].arg.llm.key, KEY);
+  assert.equal(seen[1].arg.llm.provider, 'smartest');
+  assert.equal('key' in seen[1].arg.llm, false);
   assert.equal(seen[1].src.includes('setVoice'), true);
 
   seen.length = 0;
@@ -199,12 +205,14 @@ test('say and the transcript go through Meet Bot, and the key stays out of tool 
   const created = await json('create_meeting', { topic: 'Demo meeting' });
   await json('start_meeting', { meeting_id: created.meeting_id });
   assert.equal(bot.voice.conversation_voice, 'local');
-  assert.equal(bot.voice.llm.key, KEY);
-  assert.equal(bot.voice.llm.url, 'http://127.0.0.1:9/v1');
-  assert.equal(bot.voice.llm.model, 'local-model');
+  assert.equal(bot.voice.llm.provider, 'smartest');
+  assert.equal('key' in bot.voice.llm, false);
+  assert.equal('url' in bot.voice.llm, false);
+  assert.equal(bot.voice.tts.provider, 'tts');
   assert.equal(bot.voice.tts.engine, 'http');
-  assert.equal(bot.voice.tts.url, 'http://127.0.0.1:10/voice');
-  assert.equal(bot.voice.stt.url, 'http://127.0.0.1:11/captions');
+  assert.equal('url' in bot.voice.tts, false);
+  assert.equal(bot.voice.stt.provider, 'stt');
+  assert.equal('url' in bot.voice.stt, false);
   assert.equal(bot.calls.some((c) => c[0] === 'say'), false);
 
   const status = await json('status');
@@ -250,7 +258,8 @@ test('say and the transcript go through Meet Bot, and the key stays out of tool 
   assert.equal(bot.voice.conversation_voice, 'grok');
   assert.equal('llm' in bot.voice, false);
   assert.equal('tts' in bot.voice, false);
-  assert.equal(bot.voice.stt.url, 'http://127.0.0.1:11/captions');
+  assert.equal(bot.voice.stt.provider, 'stt');
+  assert.equal('url' in bot.voice.stt, false);
   assert.equal(JSON.stringify(grok).includes(KEY), false);
 
   bot.interject = async () => { throw new Error('refused ' + KEY); };

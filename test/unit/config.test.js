@@ -36,7 +36,10 @@ test('meeting voice is a Meet Bot setting, and the public view hides the endpoin
   assert.equal(suggested.url, SUGGESTED_LLM_URL);
   assert.equal(suggested.model, SUGGESTED_LLM_MODEL);
   assert.equal(suggested.key, 'sk-test-key');
-  assert.equal(voiceSettings(suggested).llm.key, 'sk-test-key');
+  assert.equal(voiceSettings(suggested).llm.provider, 'smartest');
+  assert.equal('key' in voiceSettings(suggested).llm, false);
+  assert.equal(JSON.stringify(voiceSettings(suggested)).includes('sk-test-key'), false);
+  assert.equal(JSON.stringify(voiceSettings(suggested)).includes('api.x.ai'), false);
   const shown = voicePublic(suggested, { applied: true });
   assert.equal(shown.handed, true);
   assert.equal(shown.gap, null);

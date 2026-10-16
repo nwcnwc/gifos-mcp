@@ -7,7 +7,7 @@ import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
 import { LiveTranscript } from './voice/live.js';
 import { CAMERA_GAP, CONTROLS_GAP, HAND_GAP, INTERJECT_GAP, MIC_GAP, SNAPSHOT_GAP, VOICE_GAP, scrub, voicePublic, voiceSettings } from './voice/settings.js';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.3.1';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
@@ -211,8 +211,8 @@ export function createServer({ cfg, meetings, bot, live, captions, botName }) {
       conversation_voice: z.enum(['none', 'grok', 'local']).optional().describe('none, grok (Grok Voice), or local (the configured LLM, then Kokoro).'),
     },
   }, guarded(async ({ respond_to_command, conversation_voice }) => {
-    if (conversation_voice === 'local' && (!cfg.voice.url || !cfg.voice.model)) {
-      throw new Error('conversation_voice local needs GIFOS_LLM_URL and GIFOS_LLM_MODEL. A GIFOS_LLM_KEY alone selects the suggested xAI endpoint.');
+    if (conversation_voice === 'local' && !cfg.voice.llmApp && (!cfg.voice.url || !cfg.voice.model)) {
+      throw new Error('conversation_voice local needs GIFOS_LLM_URL and GIFOS_LLM_MODEL, or GIFOS_LLM_APP. A GIFOS_LLM_KEY alone selects the suggested xAI endpoint.');
     }
     if (respond_to_command !== undefined) choice.respondToCommand = !!respond_to_command;
     if (conversation_voice) choice.conversationVoice = conversation_voice;

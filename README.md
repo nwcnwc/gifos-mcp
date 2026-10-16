@@ -37,8 +37,10 @@ Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium (one p
 in a headless browser and passes commands through `window.MeetingBot`. It does not join as a second participant
 and it does not call a model. Meet Bot has two switches: respond to commands (on or off) and conversation voice
 (`none`, Grok Voice, or a local LLM with Kokoro). A local LLM is any OpenAI-compatible endpoint, with your own
-key. The suggested default is xAI Grok (`grok-4.20-0309-non-reasoning`). Those settings are handed to Meet Bot
-with `set_voice`. Until the app accepts them, the tool reports the gap and this server does not imitate speech.
+key, or a provider app. The suggested default is xAI Grok (`grok-4.20-0309-non-reasoning`). On startup this
+server installs the speech providers and writes the endpoint into Settings → AI models, the same way you would.
+`set_voice` then names those providers. It does not send the URL or the key. Until the app accepts the setting,
+the tool reports the gap and this server does not imitate speech.
 
 Your own assistant tails the live transcript (`gifos://meeting/{id}/transcript`, or `tail_transcript`) and can
 cut in with `say`, which Meet Bot speaks. After the meeting, that assistant does the notes, mail, and calendar
@@ -124,17 +126,19 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_MCP_LAZY` | `0` | `1` starts the browser on the first tool call instead of at launch. |
 | `GIFOS_MCP_DEBUG` | `0` | `1` logs the GifOS console to stderr and adds per-meeting caption state to `status`. |
 | `GIFOS_MCP_SHOTS` | none | A folder for screenshots of the bot's screens (for debugging). |
-| `GIFOS_LLM_KEY` | none | Your key for Meet Bot's local LLM. It is not logged and not put in a tool result. It is sent into the page only when `MeetingBot.setVoice` exists. Leave it unset and conversation voice stays off unless you set `GIFOS_CONVERSATION_VOICE`. |
-| `GIFOS_LLM_URL` | `https://api.x.ai/v1` when a key is set | OpenAI-compatible base URL, handed to Meet Bot as its local-LLM setting. This server does not call it. |
-| `GIFOS_LLM_MODEL` | `grok-4.20-0309-non-reasoning` on that host | Model name handed to Meet Bot. That suggested model does not spend a reasoning pass before the first word. Required when the URL is not xAI and conversation voice is `local`. |
+| `GIFOS_LLM_KEY` | none | Your key for the text model. It is written into the GifOS computer's Settings → AI models (the `smartest` row), which is where you would type it. It is not logged, not put in a tool result, and not passed to `MeetingBot.setVoice`. Leave it unset and conversation voice stays off unless you set `GIFOS_CONVERSATION_VOICE` or `GIFOS_LLM_APP`. |
+| `GIFOS_LLM_URL` | `https://api.x.ai/v1` when a key is set and `GIFOS_LLM_APP` is empty | OpenAI-compatible base URL, stored as the `smartest` endpoint in Settings. This server does not call it. |
+| `GIFOS_LLM_MODEL` | `grok-4.20-0309-non-reasoning` on that host | Model name stored with that endpoint. Required when the URL is not xAI, conversation voice is `local`, and `GIFOS_LLM_APP` is empty. |
+| `GIFOS_LLM_APP` | empty | A store provider app assigned to `smartest` instead of a URL. |
 | `GIFOS_CONVERSATION_VOICE` | `local` when a key or URL is set, otherwise `none` | `none`, `grok` (Grok Voice), or `local` (the configured LLM, then Kokoro). Meet Bot owns the voice. |
 | `GIFOS_RESPOND_TO_COMMAND` | on | `0` tells Meet Bot not to answer commands it hears. |
 | `GIFOS_VOICE` | follows the settings above | `0` forces conversation voice `none`. Tailing the transcript still works. |
 | `GIFOS_TRANSCRIPT_POLL_MS` | `500` | How often captions are copied from Meet Bot into the live transcript. |
-| `GIFOS_TTS_ENGINE` | `kokoro` | Passed to Meet Bot with local voice. `auto` and `kokoro` name the store app `offline-tts-kokoro` (voice `af_heart`). `none` turns that off. This server does not install or run it. |
+| `GIFOS_TTS_ENGINE` | `kokoro` | `auto` and `kokoro` install the store app `offline-tts-kokoro` (voice `af_heart`) and assign it as text-to-speech, including on a fresh profile. `none` does not install it. This server does not run the speech engine. |
+| `GIFOS_TTS_APP` | `offline-tts-kokoro` | Another store provider app to install and assign for speech. |
 | `GIFOS_TTS_VOICE` | `af_heart` | Kokoro voice name, passed through with local voice. |
-| `GIFOS_TTS_URL` | empty | HTTP speech stand-in for Meet Bot's local voice. Replaces Kokoro in the setting. Not requested by this server. `GIFOS_TTS_ENGINE=none` wins. |
-| `GIFOS_STT_URL` | empty | HTTP caption stand-in passed to Meet Bot on `set_voice`. v1 transcription still uses `GIFOS_STT_APP`. Not requested by this server. |
+| `GIFOS_TTS_URL` | empty | HTTP speech stand-in, stored as the `tts` endpoint in Settings. Replaces the Kokoro install. Not requested by this server. `GIFOS_TTS_ENGINE=none` wins. |
+| `GIFOS_STT_URL` | empty | HTTP caption stand-in, stored as the `stt` endpoint in Settings when `GIFOS_STT_APP=none`. Not passed to Meet Bot as a URL. |
 
 ## Tools
 
@@ -199,10 +203,10 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
   people you invite.
 - **Transcripts are stored** in `GIFOS_MCP_HOME/meetings.json` (mode 0600) so they survive restarts. Delete the
   file to forget them.
-- **This server does not call a model.** `GIFOS_LLM_KEY` is read on this machine and handed to Meet Bot only
-  when `MeetingBot.setVoice` already exists, and only for conversation voice `local`. It is not logged, not
-  written into a tool result, and not put in the page when that method is missing. Leave the key unset and
-  conversation voice stays `none` unless you ask for Grok Voice.
+- **This server does not call a model.** `GIFOS_LLM_KEY` is read on this machine and written into the GifOS
+  computer's Settings → AI models, the same place you would type it. `MeetingBot.setVoice` receives the provider
+  role `smartest` and never the URL or the key. Leave the key unset and conversation voice stays `none` unless
+  you ask for Grok Voice or name a provider app with `GIFOS_LLM_APP`.
 - **No outgoing messages.** The server never sends email, calendar invites or anything else. Grok Bot does that
   through your own connectors, and you approve each send. Follow-up after the meeting is Grok Bot's job.
 - **HTTP mode** binds to 127.0.0.1, checks the `Host` header (DNS-rebinding protection), and can require a

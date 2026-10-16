@@ -61,19 +61,21 @@ const VOICES = new Set(['none', 'grok', 'local']);
 // endpoint. This process never calls that endpoint.
 export function voiceConfig(env = process.env) {
   const key = String(env.GIFOS_LLM_KEY || '');
+  const llmApp = String(env.GIFOS_LLM_APP || '').trim();
   const url = env.GIFOS_LLM_URL === undefined || String(env.GIFOS_LLM_URL).trim() === ''
-    ? (key ? SUGGESTED_LLM_URL : '')
+    ? (key && !llmApp ? SUGGESTED_LLM_URL : '')
     : cleanBase(env.GIFOS_LLM_URL, 'GIFOS_LLM_URL');
   const xai = hostOf(url) === 'api.x.ai';
   const model = String(env.GIFOS_LLM_MODEL || (xai ? SUGGESTED_LLM_MODEL : '')).trim();
   let conversationVoice = String(env.GIFOS_CONVERSATION_VOICE || '').trim().toLowerCase();
   if (env.GIFOS_VOICE === '0') conversationVoice = 'none';
-  else if (!conversationVoice) conversationVoice = (key || url) ? 'local' : 'none';
+  else if (!conversationVoice) conversationVoice = (key || url || llmApp) ? 'local' : 'none';
   if (!VOICES.has(conversationVoice)) throw new Error('GIFOS_CONVERSATION_VOICE must be none, grok, or local.');
-  if (conversationVoice === 'local') {
+  if (conversationVoice === 'local' && !llmApp) {
     if (!url) throw new Error('GIFOS_LLM_URL or GIFOS_LLM_KEY is required when conversation voice is local.');
     if (!model) throw new Error('GIFOS_LLM_MODEL is required for this GIFOS_LLM_URL.');
   }
+  const sttRaw = env.GIFOS_STT_APP === undefined ? DEFAULT_STT_APP : String(env.GIFOS_STT_APP).trim();
   const pollRaw = Number(env.GIFOS_TRANSCRIPT_POLL_MS);
   return {
     conversationVoice,
@@ -81,9 +83,11 @@ export function voiceConfig(env = process.env) {
     url,
     key,
     model,
+    llmApp,
     pollMs: pollRaw > 0 ? pollRaw : 500,
     tts: ttsConfig(env),
     sttUrl: sttUrl(env),
+    sttApp: sttRaw === 'none' ? '' : sttRaw,
   };
 }
 
@@ -98,8 +102,9 @@ function ttsConfig(env) {
   const named = String(env.GIFOS_TTS_VOICE || '').trim();
   if (ask === 'none') return { engine: 'none' };
   const url = String(env.GIFOS_TTS_URL || '').trim();
-  if (url) return { engine: 'http', url: cleanBase(url, 'GIFOS_TTS_URL') };
-  return { engine: 'kokoro', app: KOKORO_APP, voice: named || KOKORO_VOICE };
+  if (url) return { engine: 'http', url: cleanBase(url, 'GIFOS_TTS_URL'), voice: named };
+  const app = String(env.GIFOS_TTS_APP || '').trim() || KOKORO_APP;
+  return { engine: 'kokoro', app, voice: named || KOKORO_VOICE };
 }
 
 function sttUrl(env) {

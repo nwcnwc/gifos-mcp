@@ -48,13 +48,31 @@ const text = (r) => (r && r.content && r.content[0] && r.content[0].text) || '';
 
 function need(cond, msg) { if (!cond) { console.error('e2e setup: ' + msg); process.exit(2); } }
 
-// Synthetic speech-to-text provider: "synthetic speech" for any loud clip.
+// Synthetic speech-to-text provider: a question, so conversation voice will answer it.
+const SYNTH_LINE = 'Can you hear this synthetic speech?';
 const SYNTH_STT = {
   'manifest.json': JSON.stringify({ gifos: '1.0', appId: 'stt-synthetic', name: 'Synthetic Speech', version: '1.0', entry: 'index.html', capabilities: {}, provides: { ai: ['stt'] } }),
   'index.html': '<!doctype html><meta charset="utf-8"><title>Synthetic Speech</title><script>gifos.provider.serve({ stt: function (req) {' +
     'var raw = req && req.bytes; var u = !raw ? new Float32Array(0) : (raw instanceof Float32Array ? raw : new Float32Array(raw.buffer || raw));' +
     'var acc = 0, n = 0; for (var i = 0; i < u.length; i += 16) { acc += u[i] * u[i]; n++; }' +
-    'return { text: (n ? Math.sqrt(acc / n) : 0) > 0.02 ? "synthetic speech" : "" }; } });<\/script>',
+    'return { text: (n ? Math.sqrt(acc / n) : 0) > 0.02 ? ' + JSON.stringify(SYNTH_LINE) + ' : "" }; } });<\/script>',
+};
+
+// A short PCM wav the meeting page can decode, and a one-line language model.
+const SYNTH_TTS = {
+  'manifest.json': JSON.stringify({ gifos: '1.0', appId: 'tts-synthetic', name: 'Synthetic Voice', version: '1.0', entry: 'index.html', capabilities: {}, provides: { ai: ['tts'] } }),
+  'index.html': '<!doctype html><meta charset="utf-8"><title>Synthetic Voice</title><script>gifos.provider.serve({ tts: function () {' +
+    'var rate=8000,n=160,data=n*2,buf=new ArrayBuffer(44+data),v=new DataView(buf);' +
+    'function w(o,s){for(var i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));}' +
+    'w(0,"RIFF");v.setUint32(4,36+data,true);w(8,"WAVE");w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);' +
+    'v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,data,true);' +
+    'for(var i=0;i<n;i++)v.setInt16(44+i*2,(Math.sin(i/8)*4000)|0,true);' +
+    'return { bytes: buf, mime: "audio/wav" }; } });<\/script>',
+};
+const SYNTH_LLM = {
+  'manifest.json': JSON.stringify({ gifos: '1.0', appId: 'llm-synthetic', name: 'Synthetic LLM', version: '1.0', entry: 'index.html', capabilities: {}, provides: { ai: ['smartest'] } }),
+  'index.html': '<!doctype html><meta charset="utf-8"><title>Synthetic LLM</title><script>gifos.provider.serve({ smartest: function () {' +
+    'return { text: "Round trip reply." }; } });<\/script>',
 };
 
 function noiseWav(dest) {
@@ -99,14 +117,17 @@ async function main() {
   // Meeting Bot from MEETING_BOT_SRC when given, else the site's own store listing.
   const extra = [];
   if (BOT_SRC) {
-    const bot = await packApp(BOT_SRC, SITE_DIR, ['manifest.json', 'index.html', 'app.js', 'protocol.js', 'help.md', 'CONTROL.md', 'listing.json']);
+    const bot = await packApp(BOT_SRC, SITE_DIR, ['manifest.json', 'index.html', 'app.js', 'protocol.js', 'voice.js', 'help.md', 'CONTROL.md', 'listing.json']);
     extra.push({ slug: 'meeting-bot', ...bot, cover: logo });
   }
   if (STT === 'synthetic') {
-    const dir = path.join(work, 'stt-synthetic');
-    fs.mkdirSync(dir);
-    for (const [n, t] of Object.entries(SYNTH_STT)) fs.writeFileSync(path.join(dir, n), t);
-    extra.push({ slug: 'stt-synthetic', ...(await packApp(dir, SITE_DIR, ['manifest.json', 'index.html'])), cover: logo });
+    const apps = [['stt-synthetic', SYNTH_STT], ['tts-synthetic', SYNTH_TTS], ['llm-synthetic', SYNTH_LLM]];
+    for (const [slug, files] of apps) {
+      const dir = path.join(work, slug);
+      fs.mkdirSync(dir);
+      for (const [n, t] of Object.entries(files)) fs.writeFileSync(path.join(dir, n), t);
+      extra.push({ slug, ...(await packApp(dir, SITE_DIR, ['manifest.json', 'index.html'])), cover: logo });
+    }
   }
   const site = await startSite({ siteDir: SITE_DIR, port: SITE_PORT, extraApps: extra });
   const listing = JSON.parse(await (await fetch(BASE + '/apps/meeting-bot/app.json')).text());
@@ -134,10 +155,13 @@ async function main() {
       GIFOS_RELAY: relay,
       GIFOS_MCP_HOME: mcpHome,
       GIFOS_STT_APP: STT === 'synthetic' ? 'stt-synthetic' : 'offline-stt-whisper',
-      GIFOS_VOICE: '0',
+      GIFOS_TTS_APP: STT === 'synthetic' ? 'tts-synthetic' : '',
+      GIFOS_TTS_ENGINE: STT === 'synthetic' ? 'kokoro' : 'none',
+      GIFOS_LLM_APP: STT === 'synthetic' ? 'llm-synthetic' : '',
+      GIFOS_CONVERSATION_VOICE: STT === 'synthetic' ? 'local' : 'none',
+      GIFOS_VOICE: STT === 'synthetic' ? '' : '0',
       GIFOS_LLM_KEY: '',
       GIFOS_LLM_URL: '',
-      GIFOS_TTS_ENGINE: 'none',
       GIFOS_MCP_SHOTS: PROOF,
     },
     stderr: 'pipe',
@@ -200,6 +224,36 @@ async function main() {
     if (!EXPECT.test(transcript)) say('status at transcript timeout: ' + text(await client.callTool({ name: 'status', arguments: {} }, undefined, CALL)));
     say('transcript so far:\n' + transcript.split('\n').slice(0, 12).map((l) => '    | ' + l).join('\n'));
     check('get_transcript returns Alice\'s words', /^Alice: /m.test(transcript) && EXPECT.test(transcript), 'expect ' + EXPECT);
+
+    if (STT === 'synthetic') {
+      const said = await client.callTool({ name: 'say', arguments: { meeting_id: meeting.meeting_id, text: 'Hello from the bot' } }, undefined, CALL);
+      const spoken = said.isError ? null : JSON.parse(text(said));
+      check('say speaks through the assigned text-to-speech provider', spoken && spoken.spoken === true, text(said));
+      let round = null;
+      let sawConversation = 0;
+      const voiceEnd = Date.now() + 90000;
+      while (Date.now() < voiceEnd) {
+        round = JSON.parse(text(await client.callTool({ name: 'status', arguments: {} }, undefined, CALL)));
+        const cmds = (round.bot && round.bot.commands) || [];
+        const errs = (round.bot && round.bot.errors) || [];
+        if (errs.length) break;
+        if (cmds.some((c) => c.op === 'conversation')) {
+          if (!sawConversation) sawConversation = Date.now();
+          if (Date.now() - sawConversation > 2500) break;
+        }
+        await sleep(500);
+      }
+      const cmds = (round && round.bot && round.bot.commands) || [];
+      const errs = (round && round.bot && round.bot.errors) || [];
+      const voice = (round && round.voice) || {};
+      check('status handed local voice to Meet Bot without a URL or a key',
+        voice.conversation_voice === 'local' && voice.handed === true && voice.tts && voice.tts.app === 'tts-synthetic' &&
+        !JSON.stringify(voice).includes('127.0.0.1') && !JSON.stringify(round.bot.commands || []).includes('gifos-provider'),
+        JSON.stringify(voice));
+      check('a converse turn round-trips through speech-to-text, the language model, and speech',
+        cmds.some((c) => c.op === 'conversation') && errs.length === 0,
+        JSON.stringify({ commands: cmds, errors: errs }));
+    }
 
     const shared = await client.callTool({ name: 'share_content', arguments: { meeting_id: meeting.meeting_id, text: 'Agenda for the demo meeting: intro, questions.' } }, undefined, CALL);
     check('share_content answers', !shared.isError, text(shared));

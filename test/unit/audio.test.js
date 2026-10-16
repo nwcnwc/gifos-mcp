@@ -73,19 +73,22 @@ test('whisper silence lines are dropped and real words are kept', () => {
 });
 
 test('engine selection prefers a URL and rejects unknown names', () => {
-  assert.equal(selectStt({}).id, 'whisper.cpp');
+  assert.equal(selectStt({}).id, 'faster-whisper');
   assert.equal(selectStt({ GIFOS_STT_MODEL: 'small.en' }).model, 'small.en');
+  assert.equal(selectStt({ GIFOS_STT: 'whisper.cpp' }).id, 'whisper.cpp');
   assert.deepEqual(selectStt({ GIFOS_STT_URL: 'http://127.0.0.1:9/v1/audio/transcriptions' }), {
     id: 'http', url: 'http://127.0.0.1:9/v1/audio/transcriptions', openai: true,
   });
   assert.equal(selectStt({ GIFOS_STT_URL: 'http://127.0.0.1:9/stt' }).openai, false);
   assert.equal(selectStt({ GIFOS_STT_ENGINE: 'transformers' }).id, 'transformers');
-  assert.throws(() => selectStt({ GIFOS_STT_ENGINE: 'cloud' }), /GIFOS_STT_ENGINE/);
-  assert.equal(selectTts({}).id, 'piper');
+  assert.throws(() => selectStt({ GIFOS_STT_ENGINE: 'cloud' }), /GIFOS_STT/);
+  assert.throws(() => selectStt({ GIFOS_STT_MODEL: 'distil-small.en' }), /distil/);
+  assert.equal(selectTts({}).id, 'kokoro');
+  assert.equal(selectTts({ GIFOS_TTS: 'piper' }).id, 'piper');
   assert.equal(selectTts({ GIFOS_TTS_ENGINE: 'espeak' }).id, 'espeak');
   assert.equal(selectTts({ GIFOS_TTS_URL: 'http://127.0.0.1:9/v1/audio/speech' }).openai, true);
-  assert.throws(() => selectTts({ GIFOS_TTS_ENGINE: 'cloud' }), /GIFOS_TTS_ENGINE/);
-  assert.equal(sttThreads({}), 2);
+  assert.throws(() => selectTts({ GIFOS_TTS_ENGINE: 'cloud' }), /GIFOS_TTS/);
+  assert.equal(sttThreads({}), 4);
   assert.equal(sttThreads({ GIFOS_STT_THREADS: '1' }), 1);
   assert.equal(sttThreads({ GIFOS_STT_THREADS: '99' }), 8);
 });

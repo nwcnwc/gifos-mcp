@@ -16,11 +16,12 @@ People who have no private speech stack can still use it. Speech-to-text and tex
 | `raise_hand` | `on: true` raises, `on: false` lowers. |
 | `set_mic`, `set_camera` | `on: true` or `false`. |
 | `get_meeting_state` | Participants, who is talking, hand, mic, camera, and whether the join disclosure has been spoken. |
+| `snapshot` | Read-only. Same facts as `get_meeting_state`, plus recent transcript lines. Saves a PNG of the current view under the meeting folder and appends a `snapshot` line to the transcript. |
 | `leave_meeting` | Leaves. |
 
 There is one participant session at a time. Joining again leaves the previous meeting. The notes bot is a separate browser and is unchanged.
 
-Load the prompt `meeting_participant_etiquette` before taking part. It says: wait for `your_turn`, keep replies to one to three sentences, say you are an AI assistant, do not record or transcribe without disclosing it, keep the 🤖 badge, leave when asked, and do not speak over people.
+Load the prompt `meeting_participant_etiquette` before taking part. It has two roles. The speaking loop may only call `say`, `stop_speaking`, and `snapshot`. The outer agent subscribes to the transcript resource and may call `send_chat`, `raise_hand`, `set_mic`, `set_camera`, and `leave_meeting`. Both roles wait for `your_turn`, keep replies to one to three sentences, say they are an AI assistant, do not record or transcribe without disclosing it, keep the 🤖 badge, and do not speak over people.
 
 ## What people in the room see and hear
 
@@ -40,30 +41,42 @@ In a two-person meeting, and among people who are direct peers, that is the real
 
 `turn_hint` stays `wait` while anyone is talking (including you), while a transcript line is still being recognized, or while the room has been quiet for less than `GIFOS_TURN_PAUSE_MS` (default 700). It becomes `your_turn` after that pause. Speak then, not before.
 
+## Voice sidecar
+
+On the first `join_meeting_as_participant`, this process creates a Python venv under `GIFOS_MCP_HOME/voice-venv` and starts a sidecar on `127.0.0.1` with a random port and a bearer token. The same sidecar is reused until the process exits. It is not a shared server. Weights are downloaded into the cache on first use and are not in this repo.
+
+`GET /health` reports the engines and a self-test real-time factor. `POST /tts` streams 16-bit PCM, one clause at a time: the first short clause (about four words when the opening sentence is long) is synthesized immediately, and the next clause is synthesized while the current one plays. `POST /stt` accepts a wav or a per-speaker PCM chunk and returns newline-delimited JSON with `partial` and `final` lines. Speech is segmented per speaker with Silero, and an utterance ends after 500 ms of silence. faster-whisper is given a numpy audio array, not a file path.
+
+The meeting page plays that PCM into the microphone. When the https page cannot fetch `127.0.0.1` itself, the participant process pulls the same stream and hands chunks to the page. Either way the audio comes from the local sidecar.
+
+## Live transcript
+
+Each meeting writes `GIFOS_MCP_HOME/meetings/<id>/transcript.jsonl` and a plain-text view beside it. A line is `{seq, ts, speaker, text, kind}` and `kind` is `speech`, `chat`, `bot`, `snapshot`, or `event`. The MCP resource is `gifos://meeting/<id>/transcript` (`application/x-ndjson`). A client can subscribe and receive `notifications/resources/updated`. `get_new_utterances` remains the polling fallback. `snapshot` stores its PNG under that meeting folder and logs the relative path.
+
 ## Speech engines
 
-Speech-to-text runs on the server, not in the browser. The default is [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (`ggml-base.en-q5_1`, two CPU threads, no GPU), kept warm so the model loads once. The first use downloads the binary and the model into `GIFOS_MCP_HOME/models`. Numbers are in [STT-BENCH.md](STT-BENCH.md).
+Numbers below were measured on a stock 8-vCPU / 15 GB CPU-only agent box. See [STT-BENCH.md](STT-BENCH.md).
 
-| Variable | Default | Replaces |
+Default text-to-speech is Kokoro-82M int8 through [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) (Apache-2.0). The model is about 92 MB and the voices file about 28 MB. Load was 0.7 s. First audio was 0.24 s for a 20-character sentence and 0.62 s for an 80-character sentence. Real-time factor was about 0.15. Resident memory was about 577 MB. Kokoro phonemizes with espeak-ng. That data is GPL and is an optional downloaded dependency. It is never vendored here.
+
+Default speech-to-text is faster-whisper `base.en` int8, 4 threads, beam 1, VAD on. An 11-second clip took about 0.44 s with a word error rate of 0% on the JFK line ("And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."). Resident memory was about 386 MB. `GIFOS_STT_MODEL=tiny.en` is the small-box model. `small.en` is the accuracy model. Do not use `distil-small.en`.
+
+| Variable | Default | What it selects |
 |---|---|---|
-| `GIFOS_STT_URL` | empty | POST a wav, get JSON `{"text":"..."}`. A URL ending in `/v1/audio/transcriptions` is sent as an OpenAI multipart request. |
-| `GIFOS_STT_ENGINE` | `whisper.cpp` | `transformers` uses `@huggingface/transformers` on CPU if that package is installed. |
-| `GIFOS_STT_MODEL` | `base.en` | `base.en` or `small.en` (quantized q5). |
-| `GIFOS_STT_THREADS` | `2` | Capped at 8. |
-| `GIFOS_WHISPER_BIN`, `GIFOS_WHISPER_MODEL` | downloaded | Point at a whisper.cpp build and a ggml model you already have. |
-
-Text-to-speech default is [Piper](https://github.com/rhasspy/piper) with the `en_US-lessac-medium` voice, downloaded into the same models folder on first use. `espeak-ng` is the fallback when Piper cannot run (a binary on `PATH`, or the copy shipped inside Piper). `GIFOS_TTS_ENGINE=kokoro` uses the optional `kokoro-js` package.
-
-| Variable | Default | Replaces |
-|---|---|---|
-| `GIFOS_TTS_URL` | empty | POST `{"text","voice"}` and read audio bytes back. A URL ending in `/v1/audio/speech` is the OpenAI speech body. |
-| `GIFOS_TTS_ENGINE` | `piper` | `piper`, `espeak`, or `kokoro`. |
-| `GIFOS_TTS_VOICE` | lessac medium | A Piper onnx model path, or the voice name your HTTP engine expects. |
-| `GIFOS_PIPER_BIN` | downloaded | A Piper binary you already have. |
-| `GIFOS_VAD_END_MS` | `450` | Trailing silence that closes one utterance. |
+| `GIFOS_TTS` | `kokoro` | `kokoro`, `piper`, or `espeak`. `GIFOS_TTS_ENGINE` is the same switch. |
+| `GIFOS_TTS_URL` | empty | OpenAI-compatible `POST /v1/audio/speech`, or a JSON `{text, voice}` endpoint. |
+| `GIFOS_TTS_VOICE` | `af_heart` | Kokoro voice name, or a Piper onnx path when `GIFOS_TTS=piper`. |
+| `GIFOS_STT` | `faster-whisper` | `faster-whisper` or `whisper.cpp`. `GIFOS_STT_ENGINE` is the same switch. |
+| `GIFOS_STT_URL` | empty | OpenAI-compatible `POST /v1/audio/transcriptions`, or a wav-in JSON-out endpoint. |
+| `GIFOS_STT_MODEL` | `base.en` | `tiny.en`, `base.en`, or `small.en`. |
+| `GIFOS_STT_THREADS` | `4` | Capped at 8. |
+| `GIFOS_VAD_END_MS` | `500` | Trailing silence that closes one utterance in the sidecar. |
 | `GIFOS_TURN_PAUSE_MS` | `700` | Quiet time before `turn_hint` becomes `your_turn`. |
+| `GIFOS_VOICE_PORT` | random | With `GIFOS_VOICE_TOKEN`, reuse a sidecar that is already listening on `127.0.0.1`. |
 
-`say`'s `voice` argument is a voice name for an HTTP engine, or a filesystem path of a Piper model. Anything else uses the default voice.
+Piper is the fast fallback for a weak host (`GIFOS_TTS=piper`, for example `en_US-lessac-medium`). On that same box, first audio was under 70 ms and the real-time factor was 0.017. piper1-gpl is GPL-3.0, so Piper is a subprocess only, and only when you select it. Check the voice `MODEL_CARD` license before you ship a voice. espeak-ng is the floor (`GIFOS_TTS=espeak`), also a subprocess. whisper.cpp stays available as `GIFOS_STT=whisper.cpp` and is not the default.
+
+`say`'s `voice` argument is a Kokoro voice name, or a Piper model path when Piper is selected. Anything else uses the default voice.
 
 ## Try it
 

@@ -1,6 +1,6 @@
 // The MCP tools. Everything that touches a browser goes through `bot` (the
 // MeetingBotDriver in driver.js, or a fake in the unit tests).
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
 import { etiquetteResult } from './participant/etiquette.js';
@@ -9,6 +9,15 @@ import { withAiBadge } from './participant/names.js';
 export const VERSION = '0.2.0';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
+
+const SubscribeRequestSchema = z.object({
+  method: z.literal('resources/subscribe'),
+  params: z.object({ uri: z.string() }).passthrough(),
+}).passthrough();
+const UnsubscribeRequestSchema = z.object({
+  method: z.literal('resources/unsubscribe'),
+  params: z.object({ uri: z.string() }).passthrough(),
+}).passthrough();
 
 function ok(obj) {
   return { content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] };
@@ -19,6 +28,32 @@ function fail(message) {
 
 export function createServer({ cfg, meetings, bot, participant }) {
   const server = new McpServer({ name: 'gifos-mcp', version: VERSION });
+  const subs = new Set();
+  server.server.registerCapabilities({ resources: { subscribe: true } });
+  server.server.setRequestHandler(SubscribeRequestSchema, async (request) => {
+    if (request && request.params && request.params.uri) subs.add(String(request.params.uri));
+    return {};
+  });
+  server.server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
+    if (request && request.params && request.params.uri) subs.delete(String(request.params.uri));
+    return {};
+  });
+  if (participant) {
+    participant._transcriptNotify = (entry) => {
+      if (!entry || !entry.meeting_id) return;
+      const uri = 'gifos://meeting/' + entry.meeting_id + '/transcript';
+      if (!subs.has(uri)) return;
+      server.server.sendResourceUpdated({ uri }).catch(() => {});
+    };
+    if (!participant._transcriptHooked) {
+      participant._transcriptHooked = true;
+      const prev = participant.onTranscript;
+      participant.onTranscript = (entry) => {
+        if (typeof prev === 'function') prev(entry);
+        if (typeof participant._transcriptNotify === 'function') participant._transcriptNotify(entry);
+      };
+    }
+  }
   const part = () => {
     if (!participant) throw new Error('Participant mode is not available in this process.');
     return participant;
@@ -261,11 +296,44 @@ export function createServer({ cfg, meetings, bot, participant }) {
     inputSchema: {},
   }, guarded(async () => ok(await part().meetingState())));
 
+  server.registerTool('snapshot', {
+    title: 'Snapshot of the meeting',
+    description: 'Read-only. Returns who is here, who is talking, the turn, and recent transcript lines, and saves a PNG of the current view into the meeting folder. The speaking loop may call this. It does not change the meeting.',
+    inputSchema: {},
+  }, guarded(async () => ok(await part().snapshot())));
+
   server.registerTool('leave_meeting', {
     title: 'Leave the meeting',
     description: 'Leaves the meeting. Call this when someone asks you to leave.',
     inputSchema: {},
   }, guarded(async () => ok(await part().leave())));
+
+  server.registerResource(
+    'meeting-transcript',
+    new ResourceTemplate('gifos://meeting/{id}/transcript', {
+      list: async () => {
+        const resources = [];
+        if (participant && participant.meetingId && /^m_[0-9a-f]+$/.test(participant.meetingId)) {
+          resources.push({
+            uri: 'gifos://meeting/' + participant.meetingId + '/transcript',
+            name: 'meeting-transcript',
+            mimeType: 'application/x-ndjson',
+          });
+        }
+        return { resources };
+      },
+    }),
+    {
+      title: 'Meeting transcript',
+      description: 'Live JSONL for one meeting. Each line is {seq, ts, speaker, text, kind} and kind is speech, chat, bot, snapshot, or event.',
+      mimeType: 'application/x-ndjson',
+    },
+    async (uri, vars) => {
+      const id = vars && vars.id;
+      const text = part().readTranscript(String(id || ''));
+      return { contents: [{ uri: String(uri), mimeType: 'application/x-ndjson', text }] };
+    },
+  );
 
   server.registerPrompt('meeting_participant_etiquette', {
     title: 'Meeting participant etiquette',

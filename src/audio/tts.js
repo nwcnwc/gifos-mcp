@@ -193,7 +193,8 @@ class HttpTts {
 export function createTts(cfg, env = process.env) {
   const choice = selectTts(env);
   if (choice.id === 'http') return new HttpTts(choice);
-  if (choice.id === 'kokoro') return new KokoroTts();
+  if (choice.id === 'kokoro-js') return new KokoroTts();
   if (choice.id === 'espeak') return new EspeakTts(cfg);
-  return new PiperTts(cfg);
+  if (choice.id === 'piper') return new PiperTts(cfg);
+  throw new Error('The default voice is Kokoro in the local voice sidecar (kokoro-onnx). Set GIFOS_TTS=piper or GIFOS_TTS=espeak for a subprocess engine.');
 }

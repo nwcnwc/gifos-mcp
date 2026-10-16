@@ -243,7 +243,8 @@ export function createStt(cfg, env = process.env) {
   const choice = selectStt(env);
   if (choice.id === 'http') return new HttpStt(choice);
   if (choice.id === 'transformers') return new TransformersStt(env);
-  return new WhisperCpp(cfg);
+  if (choice.id === 'whisper.cpp') return new WhisperCpp(cfg);
+  throw new Error('The default speech engine is faster-whisper in the local voice sidecar. Set GIFOS_STT=whisper.cpp to use the optional whisper.cpp engine.');
 }
 
 export { isOpenAiTranscriptions, postInference };

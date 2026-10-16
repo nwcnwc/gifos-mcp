@@ -4,13 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '../log.js';
 import { roomFromLink } from '../meetings.js';
-import { createStt } from '../audio/stt.js';
-import { createTts } from '../audio/tts.js';
-import { createVad, isHallucination, turnHint } from '../audio/vad.js';
+import { createVad, isHallucination, rms, turnHint } from '../audio/vad.js';
 import { f32FromI16, i16FromB64, wavFromPcm } from '../audio/wav.js';
 import { requestBuf } from '../audio/net.js';
+import { sharedVoice } from '../voice/client.js';
 import { isSelfName, withAiBadge } from './names.js';
 import { ParticipantSession } from './session.js';
+import { readTranscript, TranscriptLog } from './transcript.js';
 
 const DISCLOSE_CHAT = "I'm an AI assistant. I transcribe speech in this meeting so I can take part, and I'm telling you that here. I am not recording. I'll leave if you ask.";
 const DISCLOSE_SAY = "I'm an AI assistant. I transcribe what I hear so I can take part, and I am not recording.";
@@ -53,8 +53,10 @@ export class ParticipantHost {
     this.cfg = cfg;
     this.meetings = meetings;
     this.sessionFactory = sessionFactory || ((cfg) => new ParticipantSession(cfg));
-    this.makeStt = deps.stt || ((c) => createStt(c));
-    this.makeTts = deps.tts || ((c) => createTts(c));
+    // Injected engines keep unit tests off the sidecar. Production uses the sidecar.
+    this.injected = !!(deps.stt || deps.tts);
+    this.makeStt = deps.stt || null;
+    this.makeTts = deps.tts || null;
     this.session = null;
     this.meetingId = null;
     this.displayName = '';
@@ -76,6 +78,38 @@ export class ParticipantHost {
     this.speakChain = Promise.resolve();
     this.gen = 0;
     this.announceTimer = null;
+    this.voice = null;
+    this.transcript = null;
+    this.onTranscript = null;
+    this.sttQueues = new Map();
+    this.quietMs = new Map();
+  }
+
+  async ensureVoice() {
+    if (this.injected) {
+      if (!this.stt && this.makeStt) this.stt = this.makeStt(this.cfg);
+      if (!this.tts && this.makeTts) this.tts = this.makeTts(this.cfg);
+      return;
+    }
+    if (!this.voice) {
+      this.voice = await sharedVoice(this.cfg);
+      this.stt = this.voice;
+      this.tts = this.voice;
+    }
+  }
+
+  appendLine(fields) {
+    if (!this.transcript || !this.meetingId) return null;
+    const entry = this.transcript.append(fields);
+    if (typeof this.onTranscript === 'function') {
+      try { this.onTranscript({ ...entry, meeting_id: this.meetingId }); }
+      catch (e) { log('transcript notify: ' + (e && e.message || e)); }
+    }
+    return entry;
+  }
+
+  readTranscript(id) {
+    return readTranscript(this.cfg.home, id);
   }
 
   need() {
@@ -87,6 +121,7 @@ export class ParticipantHost {
     const link = String(url || '').trim();
     if (!roomFromLink(link)) throw new Error('That is not a GifOS meeting link (expected …/run.html#v=<room> or …/meet/<room>).');
     if (this.session) await this.leave();
+    await this.ensureVoice();
     const gen = ++this.gen;
     const name = withAiBadge(display_name);
     this.displayName = name;
@@ -127,6 +162,8 @@ export class ParticipantHost {
       started_at: new Date().toISOString(),
     });
     this.meetingId = m.meeting_id;
+    this.transcript = new TranscriptLog(this.cfg.home, m.meeting_id);
+    this.appendLine({ kind: 'event', speaker: name, text: 'joined', ts: Date.now() });
     this.watchRoom(gen);
     log('participant ' + name + ' in ' + m.meeting_id);
     return { meeting_id: m.meeting_id, display_name: name, link };
@@ -147,6 +184,7 @@ export class ParticipantHost {
         }
         if (fresh) {
           await this.session.chat(DISCLOSE_CHAT);
+          this.appendLine({ kind: 'chat', speaker: this.displayName, text: DISCLOSE_CHAT, ts: Date.now() });
           log('participant disclosed in chat to ' + others.length);
         }
         if (!this.spoken && others.length) {
@@ -187,6 +225,22 @@ export class ParticipantHost {
       }
       if (name && name !== 'speaker' && name !== '…') slot.name = name;
       const now = Date.now();
+      if (this.voice) {
+        const energy = rms(f32FromI16(i16));
+        const speaker = (name && name !== '…') ? name : (slot.name || 'speaker');
+        if (name && name !== 'speaker' && name !== '…') slot.name = name;
+        if (energy > 0.006) {
+          this.speakingNow.set(speaker, now);
+          this.quietMs.set(id, 0);
+        } else {
+          const quiet = (this.quietMs.get(id) || 0) + (i16.length / 16);
+          this.quietMs.set(id, quiet);
+          if (quiet > 800) this.speakingNow.delete(speaker);
+        }
+        this.enqueuePcm(id, slot.name || speaker, i16);
+        this.poke();
+        return this.stopRequested ? { stop: true } : undefined;
+      }
       const r = slot.vad.feed(f32FromI16(i16), i16, now);
       if (r.speaking) this.speakingNow.set(slot.name, now);
       else this.speakingNow.delete(slot.name);
@@ -223,11 +277,43 @@ export class ParticipantHost {
       this.heard.push(entry);
       if (this.heard.length > 400) this.heard.splice(0, this.heard.length - 400);
       this.lastSpeechEnd = Math.max(this.lastSpeechEnd, utter.tEnd);
+      this.appendLine({ kind: 'speech', speaker, text, ts: utter.tEnd });
       log('stt ' + speaker + ' ' + (out.ms || 0) + 'ms ' + text.length + ' chars');
     } finally {
       this.pending = Math.max(0, this.pending - 1);
       this.poke();
     }
+  }
+
+  enqueuePcm(streamId, speaker, i16) {
+    const prev = this.sttQueues.get(streamId) || Promise.resolve();
+    this.pending++;
+    const run = prev.then(async () => {
+      if (!this.voice) return;
+      const events = await this.voice.pushPcm(streamId, speaker, i16);
+      for (const ev of events || []) this.applyStt(speaker, ev);
+    }).catch((e) => log('stt failed: ' + (e && e.message || e))).finally(() => {
+      this.pending = Math.max(0, this.pending - 1);
+      this.poke();
+    });
+    this.sttQueues.set(streamId, run.then(() => {}, () => {}));
+  }
+
+  applyStt(speaker, ev) {
+    if (!ev || !ev.final) return;
+    const text = String(ev.text || '').trim();
+    if (!text || isHallucination(text) || isSelfName(speaker, this.displayName)) {
+      log('stt drop ' + speaker);
+      return;
+    }
+    const tStart = Number(ev.t_start) || Date.now();
+    const tEnd = Math.max(tStart, Number(ev.t_end) || Date.now());
+    const entry = { id: 'u' + (this.nextId++), speaker, text, t_start: tStart, t_end: tEnd };
+    this.heard.push(entry);
+    if (this.heard.length > 400) this.heard.splice(0, this.heard.length - 400);
+    this.lastSpeechEnd = Math.max(this.lastSpeechEnd, tEnd);
+    this.appendLine({ kind: 'speech', speaker, text, ts: tEnd });
+    log('stt ' + speaker + ' ' + text.length + ' chars');
   }
 
   pick(since) {
@@ -297,18 +383,23 @@ export class ParticipantHost {
 
   async sayNow(text, voice, interruptible) {
     const session = this.need();
+    await this.ensureVoice();
     this.stopRequested = false;
-    if (!this.tts) this.tts = this.makeTts(this.cfg);
-    const wav = await this.tts.synthesize(String(text), voice || '');
-    if (!wav || !wav.length) throw new Error('text to speech returned no audio');
-    if (this.stopRequested || !this.session) {
-      return { interrupted: true, spoken_until_ms: 0, text: String(text) };
-    }
     this.selfSpeaking = true;
     this.poke();
     let result;
     try {
-      result = await session.play(Buffer.from(wav).toString('base64'), interruptible);
+      if (this.voice && typeof session.playRemote === 'function') {
+        result = await session.playRemote(this.voice.ttsUrl(), { text: String(text), voice: voice || '' }, interruptible, this.voice.token);
+      } else {
+        if (!this.tts) throw new Error('text to speech is not available');
+        const wav = await this.tts.synthesize(String(text), voice || '');
+        if (!wav || !wav.length) throw new Error('text to speech returned no audio');
+        if (this.stopRequested || !this.session) {
+          return { interrupted: true, spoken_until_ms: 0, ttfa_ms: 0, text: String(text) };
+        }
+        result = await session.play(Buffer.from(wav).toString('base64'), interruptible);
+      }
     } finally {
       this.selfSpeaking = false;
       this.selfSpeakEnd = Date.now();
@@ -318,8 +409,12 @@ export class ParticipantHost {
     }
     const spoken = result && Number(result.spoken_ms) || 0;
     const interrupted = !!(result && result.interrupted);
-    log('say ' + (interrupted ? 'interrupted ' : '') + spoken + 'ms ' + String(text).length + ' chars');
-    return { interrupted, spoken_until_ms: spoken, text: String(text) };
+    const ttfa = result && Number(result.ttfa_ms);
+    this.appendLine({ kind: 'bot', speaker: this.displayName, text: String(text), ts: Date.now() });
+    log('say ' + (interrupted ? 'interrupted ' : '') + spoken + 'ms' + (Number.isFinite(ttfa) ? ' ttfa ' + ttfa + 'ms' : '') + ' ' + String(text).length + ' chars');
+    const out = { interrupted, spoken_until_ms: spoken, text: String(text) };
+    if (Number.isFinite(ttfa)) out.ttfa_ms = ttfa;
+    return out;
   }
 
   async stop() {
@@ -331,6 +426,7 @@ export class ParticipantHost {
 
   async chat(text) {
     await this.need().chat(String(text));
+    this.appendLine({ kind: 'chat', speaker: this.displayName, text: String(text), ts: Date.now() });
     return { sent: true };
   }
 
@@ -347,6 +443,25 @@ export class ParticipantHost {
   async cam(on) {
     await this.need().setCam(!!on);
     return { camera_on: !!on };
+  }
+
+  async snapshot() {
+    const state = await this.meetingState();
+    let rel = null;
+    if (this.session && typeof this.session.screenshot === 'function' && this.transcript) {
+      const dir = path.join(this.transcript.dir, 'snapshots');
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const name = 'snap-' + Date.now() + '.png';
+      await this.session.screenshot(path.join(dir, name));
+      rel = 'snapshots/' + name;
+    }
+    const line = this.appendLine({ kind: 'snapshot', speaker: this.displayName, text: rel || 'snapshot', ts: Date.now() });
+    return {
+      ...state,
+      snapshot: rel,
+      recent: this.transcript ? this.transcript.recent(12) : [],
+      transcript_seq: line ? line.seq : null,
+    };
   }
 
   async meetingState() {
@@ -368,6 +483,8 @@ export class ParticipantHost {
 
   async leave() {
     const id = this.meetingId;
+    if (this.transcript && id) this.appendLine({ kind: 'event', speaker: this.displayName, text: 'left', ts: Date.now() });
+    this.transcript = null;
     this.gen++;
     if (this.announceTimer) clearTimeout(this.announceTimer);
     this.announceTimer = null;
@@ -377,6 +494,8 @@ export class ParticipantHost {
     this.selfSpeaking = false;
     this.vads.clear();
     this.speakingNow.clear();
+    this.sttQueues.clear();
+    this.quietMs.clear();
     if (session) {
       await session.leave().catch(() => {});
       await session.close().catch(() => {});
@@ -395,14 +514,17 @@ export class ParticipantHost {
       meeting_id: this.meetingId,
       display_name: this.displayName || null,
       disclosed: this.disclosed,
-      stt: this.stt ? this.stt.id : null,
-      tts: this.tts ? this.tts.id : null,
+      stt: this.voice ? this.voice.sttId : (this.stt ? this.stt.id : null),
+      tts: this.voice ? this.voice.ttsId : (this.tts ? this.tts.id : null),
     };
   }
 
   async close() {
     if (this.session) await this.leave().catch(() => {});
-    if (this.stt) await this.stt.close().catch(() => {});
+    if (this.stt && this.stt !== this.voice && this.stt.close) await this.stt.close().catch(() => {});
     this.stt = null;
+    this.tts = null;
+    if (this.voice && this.voice.close) await this.voice.close().catch(() => {});
+    this.voice = null;
   }
 }

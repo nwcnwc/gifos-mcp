@@ -113,9 +113,9 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_MCP_LAZY` | `0` | `1` starts the browser on the first tool call instead of at launch. |
 | `GIFOS_MCP_DEBUG` | `0` | `1` logs the GifOS console to stderr and adds per-meeting caption state to `status`. |
 | `GIFOS_MCP_SHOTS` | none | A folder for screenshots of the bot's screens (for debugging). |
-| `GIFOS_STT_URL`, `GIFOS_TTS_URL` | local engines | Replace server-side speech-to-text or text-to-speech. See [docs/PARTICIPANT.md](docs/PARTICIPANT.md). |
-| `GIFOS_STT_ENGINE`, `GIFOS_STT_MODEL`, `GIFOS_STT_THREADS` | whisper.cpp, `base.en`, 2 | The local speech-to-text engine. |
-| `GIFOS_TTS_ENGINE`, `GIFOS_TTS_VOICE` | Piper, lessac medium | The local text-to-speech engine. |
+| `GIFOS_STT`, `GIFOS_STT_MODEL`, `GIFOS_STT_THREADS` | faster-whisper, `base.en`, 4 | Local speech-to-text. `tiny.en` or `small.en` change the model. `whisper.cpp` is optional. |
+| `GIFOS_TTS`, `GIFOS_TTS_VOICE` | Kokoro, `af_heart` | Local text-to-speech. `piper` and `espeak` are optional subprocesses. |
+| `GIFOS_STT_URL`, `GIFOS_TTS_URL` | empty | OpenAI-compatible HTTP stand-ins. See [docs/PARTICIPANT.md](docs/PARTICIPANT.md). |
 
 ## Tools
 
@@ -139,9 +139,10 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `raise_hand` | `on` | Raise or lower the hand. |
 | `set_mic`, `set_camera` | `on` | Mute or show the camera. |
 | `get_meeting_state` | none | Who is here, who is talking, hand, mic, camera. |
+| `snapshot` | none | Read-only state plus a PNG of the current view, logged in the transcript. |
 | `leave_meeting` | none | Leave the participant session. |
 
-Participant mode has its own browser. The prompt `meeting_participant_etiquette` is the rule set for the assistant that calls these tools. Details, engine environment variables, and the limit on stadium mixes are in [docs/PARTICIPANT.md](docs/PARTICIPANT.md).
+Participant mode has its own browser and a local voice sidecar (Kokoro and faster-whisper). The resource `gifos://meeting/<id>/transcript` is the live JSONL transcript. The prompt `meeting_participant_etiquette` splits the speaking loop (say, stop_speaking, snapshot) from the outer agent that watches the transcript and uses the other tools. Details are in [docs/PARTICIPANT.md](docs/PARTICIPANT.md). Benchmarks are in [docs/STT-BENCH.md](docs/STT-BENCH.md).
 
 Errors come back as MCP tool errors with a readable message, for example `Unknown meeting_id …` or
 `Meeting m_… is scheduled. Call start_meeting first.`

@@ -71,6 +71,8 @@ export class ParticipantSession {
         '--disable-background-timer-throttling',
         '--disable-renderer-backgrounding',
         '--disable-backgrounding-occluded-windows',
+        // The meeting page is https. Let it POST PCM to the sidecar on 127.0.0.1.
+        '--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights',
       ],
     });
     // Seed the name before the voice graph, and the voice graph before the
@@ -87,6 +89,12 @@ export class ParticipantSession {
     await this.page.exposeBinding('__vbCtrl', () => {
       try { return { stop: !!(this.ctrl && this.ctrl()) }; }
       catch (e) { return { stop: false }; }
+    });
+    // The page pulls the next PCM chunk. The handler must not call page.evaluate.
+    this.pull = null;
+    await this.page.exposeBinding('__vbPull', () => {
+      try { return (this.pull && this.pull()) || { done: true }; }
+      catch (e) { return { done: true }; }
     });
     log('participant opening ' + target);
     await this.page.goto(target, { waitUntil: 'domcontentloaded', timeout: this.cfg.timeoutMs });
@@ -130,6 +138,74 @@ export class ParticipantSession {
       if (typeof window.__vbPlay !== 'function') throw new Error('voice output is not ready');
       return await window.__vbPlay(b64);
     }, { b64, allowBarge: !!allowBarge });
+  }
+
+  // Stream TTS from the local sidecar into the mic. Prefer a fetch the page
+  // makes itself. If the https page cannot reach 127.0.0.1, pull chunks
+  // through the binding instead. The clock for time-to-first-audio starts
+  // inside the page, before the body is read.
+  async playRemote(url, body, allowBarge, token) {
+    if (!this.page) throw new Error('Not in a meeting.');
+    if (this.directVoice == null) {
+      this.directVoice = await this.page.evaluate(async ({ url, token }) => {
+        try {
+          if (typeof window.__vbPlayRemote !== 'function') return false;
+          const health = new URL('/health', url).toString();
+          const res = await fetch(health, { headers: { authorization: 'Bearer ' + (token || '') } });
+          return !!res.ok;
+        } catch (e) { return false; }
+      }, { url, token: token || '' }).catch(() => false);
+    }
+    if (this.directVoice) {
+      const direct = await this.page.evaluate(async ({ url, body, allowBarge, token }) => {
+        window.__vbAllowBarge = !!allowBarge;
+        return await window.__vbPlayRemote(url, body, token);
+      }, { url, body, allowBarge: !!allowBarge, token: token || '' });
+      if (direct && !direct.fetch_error) return direct;
+      this.directVoice = false;
+    }
+    return await this.playPulled(url, body, allowBarge, token);
+  }
+
+  async playPulled(url, body, allowBarge, token) {
+    let reader = null;
+    let rate = 24000;
+    let opened = false;
+    this.pull = async () => {
+      if (this.ctrl && this.ctrl()) {
+        if (reader) { try { await reader.cancel(); } catch (e) {} }
+        return { stop: true };
+      }
+      if (!opened) {
+        opened = true;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (token || '') },
+          body: JSON.stringify(body || {}),
+        });
+        if (!res.ok || !res.body) return { done: true, error: 'tts ' + res.status };
+        rate = Number(res.headers.get('x-audio-rate') || 24000);
+        reader = res.body.getReader();
+      }
+      const chunk = await reader.read();
+      if (chunk.done) return { done: true, rate };
+      return { b64: Buffer.from(chunk.value).toString('base64'), rate, done: false };
+    };
+    try {
+      return await this.page.evaluate(async (allowBarge) => {
+        window.__vbAllowBarge = !!allowBarge;
+        if (typeof window.__vbPlayPull !== 'function') throw new Error('voice output is not ready');
+        return await window.__vbPlayPull();
+      }, !!allowBarge);
+    } finally {
+      this.pull = null;
+      if (reader) { try { await reader.cancel(); } catch (e) {} }
+    }
+  }
+
+  async screenshot(dest) {
+    if (!this.page) throw new Error('Not in a meeting.');
+    await this.page.screenshot({ path: dest, type: 'png' });
   }
 
   async stop() {

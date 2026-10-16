@@ -75,6 +75,7 @@ export function voiceInitScript(opts = {}) {
       window.__vbStopRequested = false;
       window.__vbPlaying = false;
       let current = null;
+      let liveSources = [];
       window.__vbUnmute = () => {
         try {
           const mic = document.getElementById('mic');
@@ -90,7 +91,40 @@ export function voiceInitScript(opts = {}) {
           if ((mic && !mic.classList.contains('off')) || ++n > 40) clearInterval(iv);
         }, 500);
       });
-      window.__vbStop = () => { window.__vbStopRequested = true; if (current) current.stop(true); };
+      window.__vbStop = () => {
+        window.__vbStopRequested = true;
+        if (current) current.stop(true);
+        for (let i = 0; i < liveSources.length; i++) { try { liveSources[i].stop(); } catch (e) {} }
+        liveSources = [];
+      };
+      function voiceUrlOk(u) {
+        try {
+          const x = new URL(String(u || ''));
+          return x.protocol === 'http:' && (x.hostname === '127.0.0.1' || x.hostname === 'localhost');
+        } catch (e) { return false; }
+      }
+      function schedulePcm(bytes, rate, state) {
+        if (!bytes || bytes.length < 2) return;
+        const n = Math.floor(bytes.length / 2);
+        const f32 = new Float32Array(n);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, n * 2);
+        for (let i = 0; i < n; i++) f32[i] = view.getInt16(i * 2, true) / 32768;
+        const buf = ac.createBuffer(1, n, rate || 24000);
+        buf.getChannelData(0).set(f32);
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        src.connect(window.__vbDst);
+        liveSources.push(src);
+        if (!state.t0) {
+          state.t0 = ac.currentTime;
+          state.ttfa = Math.round(performance.now() - state.started);
+          state.next = ac.currentTime + 0.02;
+          window.__vbPlaying = true;
+        }
+        const at = Math.max(state.next, ac.currentTime);
+        try { src.start(at); } catch (e) { note(e); }
+        state.next = at + buf.duration;
+      }
       window.__vbPlay = (b64) => new Promise((resolve) => {
         window.__vbStopRequested = false;
         if (current) current.stop(true);
@@ -139,6 +173,132 @@ export function voiceInitScript(opts = {}) {
             }, 40);
             setTimeout(() => finish(stopped), Math.max(500, buf.duration * 1000 + 800));
           } catch (e) { note(e); finish(false); }
+        })();
+      });
+      function armWatch(finish, stopSources) {
+        return setInterval(() => {
+          try {
+            const ctrl = window.__vbCtrl;
+            if (typeof ctrl === 'function') {
+              const p = ctrl();
+              if (p && typeof p.then === 'function') p.then((r) => { if (r && r.stop) window.__vbStopRequested = true; }).catch(() => {});
+            }
+          } catch (e) {}
+          if (!window.__vbStopRequested) return;
+          stopSources();
+          finish(true);
+        }, 40);
+      }
+      function beginStream() {
+        window.__vbStopRequested = false;
+        if (current) current.stop(true);
+        liveSources = [];
+        const state = { t0: 0, next: 0, ttfa: 0, started: performance.now() };
+        let stopped = false, settled = false, watch = 0;
+        const finish = (interrupted) => {
+          if (settled) return;
+          settled = true;
+          if (watch) clearInterval(watch);
+          window.__vbPlaying = false;
+          if (current && current.state === state) current = null;
+          const spoken = state.t0 ? Math.max(0, Math.round((ac.currentTime - state.t0) * 1000)) : 0;
+          return { interrupted: !!interrupted, spoken_ms: spoken, ttfa_ms: state.ttfa || 0 };
+        };
+        const stopSources = () => {
+          stopped = true;
+          for (let i = 0; i < liveSources.length; i++) { try { liveSources[i].stop(); } catch (e) {} }
+          liveSources = [];
+        };
+        const api = {
+          state, finish, stopSources,
+          get stopped() { return stopped; },
+          resolve: null,
+        };
+        current = {
+          state,
+          stop(flag) { stopSources(); if (api.resolve) api.resolve(finish(!!flag)); },
+        };
+        watch = armWatch((flag) => { if (api.resolve) api.resolve(finish(flag)); }, stopSources);
+        api.watch = () => watch;
+        return api;
+      }
+      async function waitOut(api) {
+        const endAt = api.state.next;
+        while (!api.stopped && !window.__vbStopRequested && ac.currentTime + 0.05 < endAt) {
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        return api.finish(api.stopped || !!window.__vbStopRequested);
+      }
+      window.__vbPlayRemote = (url, body, token) => new Promise((resolve) => {
+        if (!voiceUrlOk(url)) { note('voice url refused'); resolve({ fetch_error: true, interrupted: false, spoken_ms: 0, ttfa_ms: 0 }); return; }
+        const api = beginStream();
+        api.resolve = resolve;
+        (async () => {
+          try {
+            window.__vbUnmute();
+            if (ac.state === 'suspended') await ac.resume();
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + (token || '') },
+              body: JSON.stringify(body || {}),
+            });
+            if (!res.ok || !res.body) {
+              note('voice ' + res.status);
+              const done = api.finish(false) || {};
+              done.fetch_error = true;
+              resolve(done);
+              return;
+            }
+            const rate = Number(res.headers.get('x-audio-rate')) || 24000;
+            const reader = res.body.getReader();
+            let pending = new Uint8Array(0);
+            while (!api.stopped && !window.__vbStopRequested) {
+              const chunk = await reader.read();
+              if (chunk.done) break;
+              const merged = new Uint8Array(pending.length + chunk.value.length);
+              merged.set(pending, 0);
+              merged.set(chunk.value, pending.length);
+              const even = merged.length - (merged.length % 2);
+              schedulePcm(merged.subarray(0, even), rate, api.state);
+              pending = merged.subarray(even);
+            }
+            try { reader.cancel(); } catch (e) {}
+            resolve(await waitOut(api));
+          } catch (e) {
+            note(e);
+            resolve({ fetch_error: true, interrupted: false, spoken_ms: 0, ttfa_ms: 0 });
+          }
+        })();
+      });
+      window.__vbPlayPull = () => new Promise((resolve) => {
+        const api = beginStream();
+        api.resolve = resolve;
+        (async () => {
+          try {
+            window.__vbUnmute();
+            if (ac.state === 'suspended') await ac.resume();
+            const pull = window.__vbPull;
+            if (typeof pull !== 'function') { note('voice pull is missing'); resolve(api.finish(false)); return; }
+            let pending = new Uint8Array(0);
+            let rate = 24000;
+            while (!api.stopped && !window.__vbStopRequested) {
+              const piece = await pull();
+              if (!piece || piece.done) break;
+              if (piece.stop) { api.stopSources(); resolve(api.finish(true)); return; }
+              if (piece.rate) rate = piece.rate;
+              if (!piece.b64) continue;
+              const bin = atob(piece.b64);
+              const bytes = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i) & 255;
+              const merged = new Uint8Array(pending.length + bytes.length);
+              merged.set(pending, 0);
+              merged.set(bytes, pending.length);
+              const even = merged.length - (merged.length % 2);
+              schedulePcm(merged.subarray(0, even), rate, api.state);
+              pending = merged.subarray(even);
+            }
+            resolve(await waitOut(api));
+          } catch (e) { note(e); resolve(api.finish(false)); }
         })();
       });
     } catch (e) { note(e); }

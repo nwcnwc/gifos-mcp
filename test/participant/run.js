@@ -15,7 +15,6 @@ import { loadConfig } from '../../src/config.js';
 import { MeetingStore, linkFor, newRoom } from '../../src/meetings.js';
 import { ParticipantHost } from '../../src/participant/host.js';
 import { ParticipantSession } from '../../src/participant/session.js';
-import { createStt } from '../../src/audio/stt.js';
 import { concatI16, i16FromB64, wavFromPcm } from '../../src/audio/wav.js';
 import { keywordHits } from '../../src/audio/wer.js';
 
@@ -136,9 +135,9 @@ try {
   await sleep(900);
   record = false;
   const pcm = chunks.length ? concatI16(chunks) : new Int16Array(0);
-  note('bot said ' + said.spoken_until_ms + 'ms, human captured ' + pcm.length + ' samples');
+  note('bot said ' + said.spoken_until_ms + 'ms ttfa_ms=' + (said.ttfa_ms == null ? 'n/a' : said.ttfa_ms) + ', human captured ' + pcm.length + ' samples');
   if (pcm.length < 8000) throw new Error('human captured too little audio (' + pcm.length + ' samples)');
-  if (!bot.stt) bot.stt = createStt(cfg);
+  if (!bot.stt) throw new Error('the voice sidecar was not started');
   const back = await bot.stt.transcribe(wavFromPcm(pcm, 16000, 1));
   note('bot->human transcript: ' + back.text + ' (' + back.ms + 'ms)');
   const backHits = hits(back.text);
@@ -164,6 +163,20 @@ try {
 
   const state = await bot.meetingState();
   note('state participants=' + JSON.stringify(state.participants) + ' mic=' + state.mic_on + ' cam=' + state.camera_on + ' hand=' + state.hand_raised);
+  if (bot.voice && bot.voice.health) {
+    const h = await bot.voice.health();
+    const sttName = h.engines && h.engines.stt;
+    const ttsName = h.engines && h.engines.tts;
+    const ttfa = h.self_test && h.self_test.ttfa_s;
+    const rtf = h.self_test && h.self_test.tts_rtf;
+    const vad = h.vad && h.vad.kind;
+    note('sidecar stt=' + sttName + ' model=' + (h.engines && h.engines.stt_model) + ' tts=' + ttsName + ' vad=' + vad + ' self_test_ttfa_s=' + ttfa + ' self_test_tts_rtf=' + rtf);
+  }
+  const shot = await bot.snapshot();
+  note('snapshot ' + (shot.snapshot || 'none'));
+  const raw = bot.meetingId ? bot.readTranscript(bot.meetingId) : '';
+  const rows = raw.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 8);
+  for (const row of rows) note('transcript ' + row);
   note('PASS');
 } catch (e) {
   failed = e && e.stack ? e.stack : String(e);

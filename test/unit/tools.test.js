@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../../src/server.js';
@@ -42,6 +43,21 @@ class FakeParticipant {
     return { left: true, meeting_id: id };
   }
   info() { return { joined: !!this.meetingId, display_name: this.meetingId ? 'Helper 🤖' : null }; }
+  readTranscript(id) {
+    if (!/^m_[0-9a-f]+$/.test(String(id || ''))) throw new Error('bad meeting id');
+    return this.transcriptText || '';
+  }
+  async snapshot() {
+    this.calls.push(['snapshot']);
+    return {
+      meeting_id: this.meetingId,
+      display_name: 'Helper 🤖',
+      participants: ['Ada'],
+      snapshot: 'snapshots/snap-1.png',
+      recent: [{ seq: 1, kind: 'speech', speaker: 'Ada', text: 'hello' }],
+      turn_hint: 'your_turn',
+    };
+  }
 }
 
 class FakeBot {
@@ -88,7 +104,7 @@ test('lists every tool with an input schema', async () => {
   assert.deepEqual(names, [
     'create_meeting', 'end_meeting', 'get_meeting_state', 'get_new_utterances', 'get_transcript',
     'join_meeting', 'join_meeting_as_participant', 'leave_meeting', 'list_meetings', 'mute',
-    'raise_hand', 'say', 'send_chat', 'set_camera', 'set_mic', 'share_content', 'start_meeting',
+    'raise_hand', 'say', 'send_chat', 'set_camera', 'set_mic', 'share_content', 'snapshot', 'start_meeting',
     'status', 'stop_speaking', 'unmute',
   ]);
   for (const t of tools) {
@@ -263,6 +279,32 @@ test('participant tools join, listen, speak, and leave without the notes bot', a
   assert.equal(left.left, true);
   assert.equal(meetings.get(j.meeting_id).state, 'ended');
   assert.equal(bot.calls.length, 0);
+});
+
+test('snapshot is read-only and the transcript resource notifies subscribers', async () => {
+  const j = json(await call('join_meeting_as_participant', {
+    url: 'https://gifos.app/run.html#v=room-snap', display_name: 'Helper',
+  }));
+  const shot = json(await call('snapshot', {}));
+  assert.equal(shot.snapshot, 'snapshots/snap-1.png');
+  assert.equal(shot.meeting_id, j.meeting_id);
+  assert.deepEqual(participant.calls.at(-1), ['snapshot']);
+  const listed = await client.listResources();
+  const uri = 'gifos://meeting/' + j.meeting_id + '/transcript';
+  assert.ok(listed.resources.some((r) => r.uri === uri));
+  participant.transcriptText = '{"seq":1,"ts":1,"speaker":"Ada","text":"hello","kind":"speech"}\n';
+  const body = await client.readResource({ uri });
+  assert.match(body.contents[0].text, /"kind":"speech"/);
+  const updated = [];
+  client.setNotificationHandler(z.object({
+    method: z.literal('notifications/resources/updated'),
+    params: z.object({ uri: z.string() }).passthrough(),
+  }).passthrough(), (note) => { updated.push(note.params.uri); });
+  await client.subscribeResource({ uri });
+  participant.onTranscript({ meeting_id: j.meeting_id, seq: 2, ts: 2, speaker: 'Ada', text: 'again', kind: 'speech' });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(updated, [uri]);
+  await client.unsubscribeResource({ uri });
 });
 
 test('meeting_participant_etiquette tells the agent to wait, disclose, and leave', async () => {

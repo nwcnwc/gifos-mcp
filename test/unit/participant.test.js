@@ -8,6 +8,7 @@ import { ParticipantHost } from '../../src/participant/host.js';
 import { loadConfig } from '../../src/config.js';
 import { MeetingStore } from '../../src/meetings.js';
 import { wavFromPcm } from '../../src/audio/wav.js';
+import { readTranscript } from '../../src/participant/transcript.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -78,6 +79,9 @@ test('each remote stream is attributed to that person, and our own name is ignor
   assert.equal(got.utterances.length, 1);
   assert.equal(got.utterances[0].speaker, 'Ada');
   assert.match(got.utterances[0].text, /purple giraffe/);
+  const log = readTranscript(host.cfg.home, host.meetingId);
+  assert.match(log, /"kind":"speech"/);
+  assert.match(log, /purple giraffe/);
   assert.equal(typeof got.utterances[0].t_start, 'number');
   assert.ok(got.utterances[0].t_end >= got.utterances[0].t_start);
   const again = await host.utterances({ since: got.utterances[0].id, wait_ms: 0 });

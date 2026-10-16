@@ -48,7 +48,7 @@ export function createServer({ cfg, meetings, bot, voice, live, captions, botNam
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
     });
-    if (voice) voice.closed.delete(m.meeting_id);
+    if (voice && voice.openMeeting) voice.openMeeting(m.meeting_id);
     if (captions) await captions.start(updated);
     return updated;
   }

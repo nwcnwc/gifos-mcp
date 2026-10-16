@@ -80,6 +80,10 @@ export class MeetingVoice {
     return active;
   }
 
+  openMeeting(meetingId) {
+    this.closed.delete(meetingId);
+  }
+
   closeMeeting(meetingId) {
     this.closed.add(meetingId);
     this.missed.delete(meetingId);

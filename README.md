@@ -32,6 +32,13 @@ Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium (one p
   [control contract](https://github.com/nwcnwc/gifos-apps-source/blob/meet-bot/meeting-bot/CONTROL.md) (version 1)
   is the only interface this server relies on.
 
+**Meeting voice is a second, smaller model.** When you set `GIFOS_LLM_KEY`, a streaming chat model speaks in the
+meeting. It is any OpenAI-compatible `POST /chat/completions` endpoint (the suggested default is xAI Grok). The
+request is messages only: no tools and no function calls. It waits for a short pause, streams the reply, and
+plays the first short clause out loud before the rest of the sentence has arrived. Your own assistant is still
+the one that tails the live transcript (`gifos://meeting/{id}/transcript`, or `tail_transcript`) and can cut in
+with `say`. After the meeting, that assistant does the notes, mail, and calendar work. The speaking model cannot.
+
 **Grok Bot does the timing and the invites.** A Grok Bot routine calls `start_meeting` at meeting time. Invites
 go out through your own email or calendar connector in Grok Bot, and you approve each send. This server never
 sends email or calendar invites.
@@ -80,7 +87,8 @@ Add a local (stdio) MCP server in Grok Bot's MCP / connector settings. The confi
       "command": "npx",
       "args": ["-y", "github:nwcnwc/gifos-mcp"],
       "env": {
-        "GIFOS_URL": "https://gifos.app"
+        "GIFOS_URL": "https://gifos.app",
+        "GIFOS_LLM_KEY": "your-key"
       }
     }
   }
@@ -111,6 +119,14 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_MCP_LAZY` | `0` | `1` starts the browser on the first tool call instead of at launch. |
 | `GIFOS_MCP_DEBUG` | `0` | `1` logs the GifOS console to stderr and adds per-meeting caption state to `status`. |
 | `GIFOS_MCP_SHOTS` | none | A folder for screenshots of the bot's screens (for debugging). |
+| `GIFOS_LLM_KEY` | none | Your key for the speaking model. It is sent only as `Authorization: Bearer`. It is never logged and never put in a tool result. Leave it unset and the bot only transcribes. |
+| `GIFOS_LLM_URL` | `https://api.x.ai/v1` when a key is set | OpenAI-compatible base URL. Chat is `POST {url}/chat/completions` with `stream: true` and no tools. |
+| `GIFOS_LLM_MODEL` | `grok-4.20-0309-non-reasoning` on that host | Model name. That suggested model does not spend a reasoning pass before the first word. Set it yourself when the URL is not xAI. |
+| `GIFOS_VOICE` | on, when the URL and model are set | `0` turns the speaking model off. Tailing the transcript still works. |
+| `GIFOS_TURN_PAUSE_MS` | `700` | How long the room stays quiet before the model speaks. |
+| `GIFOS_TTS_URL` | same as `GIFOS_LLM_URL` | Speech host, when it is not the chat host. xAI uses `POST /tts`. Other hosts use `POST /audio/speech`. |
+| `GIFOS_TTS_VOICE` | `eve` on xAI, `alloy` otherwise | Voice name for speech synthesis. |
+| `GIFOS_TRANSCRIPT_POLL_MS` | `500` | How often captions are copied into the live transcript. |
 
 ## Tools
 
@@ -123,7 +139,11 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `unmute` | `meeting_id` | The bot transcribes again. |
 | `share_content` | `meeting_id`, `text` | Posts text or a link (up to 2000 characters) into the meeting chat as the bot. There is no screen sharing, because the bot has no screen. |
 | `get_transcript` | `meeting_id` | Plain text, one `speaker: words` line per caption. Works while the meeting is live and after `end_meeting`. |
-| `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Everyone else can stay, because GifOS meetings have no owner who can close them. |
+| `tail_transcript` | `meeting_id`, `since?` | New live lines since `since` (a `seq` from the previous tail). Each line is `{seq, ts, speaker, text, kind}` and `kind` is `speech`, `voice`, or `say`. Works while the meeting is live and after `end_meeting`. |
+| `say` | `meeting_id`, `text` | Speaks the text now and stops whatever the speaking model was saying. This is how your assistant interjects. |
+| `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. The speaking model stops. Everyone else can stay, because GifOS meetings have no owner who can close them. |
+
+The resource `gifos://meeting/{id}/transcript` is the same live transcript as `tail_transcript`, as newline-delimited JSON. A client can subscribe and receive `notifications/resources/updated`.
 | `list_meetings` | none | Every meeting this server created or joined, with its state (`scheduled`, `live` or `ended`). |
 | `status` | none | Browser state, bot name, the bot's live sessions, and its last heartbeat. |
 
@@ -140,8 +160,11 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 2. **Timing (a routine at 17:00).** Grok Bot calls `start_meeting({meeting_id})`. The bot joins and transcribes.
    `gifos-mcp` has to be running at this point.
 3. **Meeting (17:00 onward).** Alice and Bob open the link and see the 🤖 bot tile with the transcribing chip.
-   Grok Bot can `share_content` the agenda. When the meeting is over (a second routine, or the user saying so),
-   Grok Bot calls `end_meeting` and `get_transcript`, writes the summary, and drafts it to the user.
+   If `GIFOS_LLM_KEY` is set, the speaking model talks with them and has no tools. Grok Bot tails
+   `gifos://meeting/{id}/transcript` (or calls `tail_transcript`) and can `say` a line of its own. Grok Bot can
+   `share_content` the agenda. When the meeting is over (a second routine, or the user saying so),
+   Grok Bot calls `end_meeting` and reads the transcript, writes the summary, and drafts it to the user.
+   The speaking model is already stopped and cannot send that mail.
 
 ## Privacy and security
 
@@ -160,8 +183,11 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
   people you invite.
 - **Transcripts are stored** in `GIFOS_MCP_HOME/meetings.json` (mode 0600) so they survive restarts. Delete the
   file to forget them.
+- **The speaking model has no tools.** Its request body is `model`, `messages`, and `stream`. `GIFOS_LLM_KEY`
+  is read on this machine and sent only as an `Authorization` header to the endpoint you configured. It is not
+  written into the meeting page, the transcript, or tool results. Leave the key unset and nothing is called.
 - **No outgoing messages.** The server never sends email, calendar invites or anything else. Grok Bot does that
-  through your own connectors, and you approve each send.
+  through your own connectors, and you approve each send. Follow-up after the meeting is Grok Bot's job.
 - **HTTP mode** binds to 127.0.0.1, checks the `Host` header (DNS-rebinding protection), and can require a
   bearer token.
 
@@ -189,8 +215,8 @@ npm install
 npm test
 ```
 
-These run the ten tools over a real MCP client/server pair with a fake bot, plus the `--http` transport through
-the real binary.
+These run the tools over a real MCP client/server pair with a fake bot, plus the `--http` transport through
+the real binary. Meeting voice is tested against a local OpenAI-compatible streaming server, not a public API.
 
 **2. Try it live (needs GifOS 0.9.23 or newer on gifos.app).**
 

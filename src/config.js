@@ -9,6 +9,23 @@ import { machineProfile, piperIsAvailable, resolveTts } from './tts.js';
 export const DEFAULT_GIFOS_URL = 'https://gifos.app';
 export const DEFAULT_STT_APP = 'offline-stt-whisper';
 
+// Suggested speaking model: xAI Grok over its public OpenAI-compatible API.
+// grok-4.20-0309-non-reasoning answers without a reasoning pass, so the first
+// words of a meeting reply can stream immediately. GIFOS_LLM_MODEL overrides it.
+export const SUGGESTED_LLM_URL = 'https://api.x.ai/v1';
+export const SUGGESTED_LLM_MODEL = 'grok-4.20-0309-non-reasoning';
+
+function cleanBase(u, name) {
+  const s = String(u || '').trim().replace(/\/+$/, '');
+  if (!s) return '';
+  if (!/^https?:\/\/[^/\s]+/.test(s)) throw new Error(name + ' must be an http(s) URL, got: ' + JSON.stringify(u));
+  return s;
+}
+
+function hostOf(u) {
+  try { return new URL(u).host; } catch (e) { return ''; }
+}
+
 function cleanUrl(u) {
   const s = String(u || '').trim().replace(/\/+$/, '');
   if (!/^https?:\/\/[^/]+/.test(s)) throw new Error('GIFOS_URL must be an http(s) URL, got: ' + JSON.stringify(u));
@@ -53,6 +70,42 @@ export function loadConfig(env = process.env, opts = {}) {
     turnPauseMs: Number(env.GIFOS_TURN_PAUSE_MS) >= 0 && env.GIFOS_TURN_PAUSE_MS !== undefined && env.GIFOS_TURN_PAUSE_MS !== ''
       ? Number(env.GIFOS_TURN_PAUSE_MS) : 700,
   };
+}
+
+// The speaking model. A key with no URL uses the suggested xAI endpoint.
+// Any other OpenAI-compatible base URL works; the key is never given a default.
+export function voiceConfig(env = process.env) {
+  const key = String(env.GIFOS_LLM_KEY || '');
+  const url = env.GIFOS_LLM_URL === undefined || String(env.GIFOS_LLM_URL).trim() === ''
+    ? (key ? SUGGESTED_LLM_URL : '')
+    : cleanBase(env.GIFOS_LLM_URL, 'GIFOS_LLM_URL');
+  const xai = hostOf(url) === 'api.x.ai';
+  const model = String(env.GIFOS_LLM_MODEL || (xai ? SUGGESTED_LLM_MODEL : '')).trim();
+  const ttsUrl = env.GIFOS_TTS_URL === undefined || String(env.GIFOS_TTS_URL).trim() === ''
+    ? url
+    : cleanBase(env.GIFOS_TTS_URL, 'GIFOS_TTS_URL');
+  const ttsPath = String(env.GIFOS_TTS_PATH || (hostOf(ttsUrl) === 'api.x.ai' ? '/tts' : '/audio/speech')).trim();
+  const pauseRaw = env.GIFOS_TURN_PAUSE_MS;
+  const pauseMs = pauseRaw !== undefined && pauseRaw !== '' && Number(pauseRaw) >= 0 ? Number(pauseRaw) : 700;
+  const pollRaw = Number(env.GIFOS_TRANSCRIPT_POLL_MS);
+  return {
+    enabled: env.GIFOS_VOICE !== '0' && !!url && !!model,
+    url,
+    key,
+    model,
+    ttsUrl,
+    ttsPath: ttsPath.startsWith('/') ? ttsPath : '/' + ttsPath,
+    ttsVoice: String(env.GIFOS_TTS_VOICE || (hostOf(ttsUrl) === 'api.x.ai' ? 'eve' : 'alloy')).trim(),
+    ttsModel: String(env.GIFOS_TTS_MODEL || 'tts-1').trim(),
+    pauseMs,
+    pollMs: pollRaw > 0 ? pollRaw : 500,
+  };
+}
+
+// What a tool may say about the speaking model. No URL, no key.
+export function voicePublic(voice) {
+  if (!voice || !voice.enabled) return { speaking: false, model: null };
+  return { speaking: true, model: voice.model };
 }
 
 // Mirrors the Meeting Bot's own strength rule (protocol.js), so a pair we

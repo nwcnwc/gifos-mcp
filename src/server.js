@@ -66,7 +66,7 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
 
   // Wraps a handler: known meeting, readable errors.
   const guarded = (fn) => async (args) => {
-    try { return await fn(args); } catch (e) { return fail(String((e && e.message) || e)); }
+    try { return await fn(args); } catch (e) { return fail(scrub(String((e && e.message) || e), secret)); }
   };
   const need = (id) => {
     const m = meetings.get(id);
@@ -89,6 +89,9 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
     });
+    if (voice && voice.openMeeting) voice.openMeeting(m.meeting_id);
+    if (captions) await captions.start(updated);
+    return updated;
   }
 
   server.registerTool('create_meeting', {
@@ -187,6 +190,7 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
     if (m.state === 'live' && m.session_id) {
       const text = scrub(await bot.transcript(m.session_id), secret);
       meetings.update(m.meeting_id, { transcript: text });
+      transcript.ingestCaption(m.meeting_id, text, botName);
       return ok(text || '(no transcript lines yet)');
     }
     if (m.transcript != null) return ok(m.transcript || '(the transcript is empty)');
@@ -206,6 +210,8 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
       return ok({ ...publicView(meetings.get(m.meeting_id) || left), note: 'Left the meeting.' });
     }
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
+    if (voice) voice.closeMeeting(m.meeting_id);
+    if (captions) captions.stop(m.meeting_id);
     let text = m.transcript || '';
     try { text = scrub(await bot.transcript(m.session_id), secret); } catch (e) { /* keep the last copy */ }
     await bot.leave(m.session_id);
@@ -234,6 +240,7 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
       stt_app: cfg.sttApp || null,
       tts: ttsPublic(cfg.tts, info && info.tts),
       live_meetings: meetings.all().filter((m) => m.state === 'live').map((m) => m.meeting_id),
+      voice: voicePublic(cfg.voice),
       bot: info,
       participant: participant ? participant.info() : null,
       switches: turn.public(),

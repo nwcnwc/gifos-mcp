@@ -433,6 +433,54 @@ export class MeetingBotDriver {
     return this.announceProviders();
   }
 
+  // Meeting pages are iframes inside the Meeting Bot app. The mouth script
+  // installed on the browser context is what plays into them.
+  async workFrames() {
+    if (!this.bot || !this.bot.app) return [];
+    const ids = await this.bot.app.evaluate(() => {
+      const host = window.GifOS && window.GifOS.meetHost;
+      const list = host && host.list ? host.list() : [];
+      return list.filter((s) => s && !s.control).map((s) => s.meetingId);
+    }).catch(() => []);
+    const frames = [];
+    for (const id of ids || []) {
+      const el = await this.bot.app.$('iframe[data-gifos-meet="' + id + '"]');
+      if (!el) continue;
+      const frame = await el.contentFrame();
+      if (frame) frames.push(frame);
+    }
+    return frames;
+  }
+
+  async playEncoded(bytes) {
+    if (!bytes || !bytes.length) return false;
+    const frames = await this.workFrames().catch(() => []);
+    if (!frames.length) return false;
+    this.playGen += 1;
+    const gen = this.playGen;
+    const b64 = Buffer.from(bytes).toString('base64');
+    let played = false;
+    for (const frame of frames) {
+      const ok = await frame.evaluate((audio) => {
+        if (typeof window.__gifosPlayEncoded !== 'function') return false;
+        return window.__gifosPlayEncoded(audio);
+      }, b64).catch(() => false);
+      if (ok) played = true;
+    }
+    if (this.playGen === gen) await this.quiet().catch(() => {});
+    return played;
+  }
+
+  async quiet() {
+    this.playGen += 1;
+    const frames = await this.workFrames().catch(() => []);
+    for (const frame of frames) {
+      await frame.evaluate(() => {
+        if (typeof window.__gifosQuiet === 'function') window.__gifosQuiet();
+      }).catch(() => {});
+    }
+  }
+
   async info() {
     const out = {
       state: this.state, bot_name: this.creds.name, stt_ready: !!this.sttFileId,

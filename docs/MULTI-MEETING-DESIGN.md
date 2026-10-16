@@ -8,7 +8,7 @@ The public meeting network stays GifOS. This product joins rooms. It does not re
 
 A human asks Grok Bot to schedule a meeting with people X at time T on topic Y. Grok Bot does four steps. This process does two of them. It does not send mail, and it does not invent the room password.
 
-1. **Mint the room.** Grok Bot calls `create_meeting(name, admin_password)`. `name` is the room name (topic Y). `admin_password` is the human's password for that room. The response is the link. It is not an invite, and it does not contain either password.
+1. **Mint the room.** Grok Bot calls `create_meeting(name, admin_password)`. `name` is the room name (topic Y). `admin_password` comes from Grok Bot's secrets store for this call only. The response is the link. It is not an invite, and it does not contain either password. This process drops the admin password when the call returns. It is not written to disk or to a log.
 2. **Invite the people.** Grok Bot makes up a room password. It invites people X from its own email or from the human's email. The invite carries the link and that room password. It never carries the admin password. Room passwords may be sent freely to participants. The admin password may not.
 3. **Put the bot on the clock.** Grok Bot calls `schedule_meeting(link, room_password, start, end)`. `start` and `end` are time T. The room password is the one from the invite, so the bot can enter. This call does not join yet.
 4. **Join on time.** The clock in this process seats the Meet Bot one minute before `start`, with the stored room password. The bot listens in that room and in every other room it is already in. Each room has its own voice.
@@ -169,7 +169,11 @@ Every alert names the rooms and the queue. `affected` is who is seated or who is
 
 ### Persistence
 
-The schedule lives in `GIFOS_MCP_HOME/schedule.json`, written the same way as `meetings.json`: a temp file, mode 0600, then rename. It holds orders, rules, exceptions, `external_id`s, and the phase of each materialized occurrence. The room password sits in that file, mode 0600, so a restart can enter the room again. The admin password sits on the meeting row in `meetings.json`, same mode, and is not copied onto the schedule. Neither password is a list, status, or event field.
+Two stores, and they do not overlap.
+
+Meet Bot is a GifOS app. It keeps its own state in the headless browser's filesystem and IndexedDB: the rooms it is in, and the session state that belongs to the app. This process does not copy that state out as a second source of truth, and it does not put the admin password there.
+
+This process stores the schedule, which is the calendar. The file is `GIFOS_MCP_HOME/schedule.json`, written as a temp file, mode 0600, then rename. It holds orders, rules, exceptions, `external_id`s, the phase of each materialized occurrence, and each meeting's join password (the room password). That join password is how a restart enters the room again. The admin password is not a field on the schedule and is not a field anywhere else this process writes. A list, a status, or an event never includes either password.
 
 The line log is per `meeting_id`, so a restart does not mix last week's standup into this week's file. The series id is a field on the occurrence, which is how a report spans a series without sharing one transcript.
 
@@ -325,7 +329,7 @@ Per-meeting resources stay: `gifos://meeting/{id}/transcript` remains the speech
 
 These are the company list. They persist across restarts (section 2). They return the public order: times, zone, phase, topic, plain link, flags, `external_id`, capacity. They do not return the room password or the admin password.
 
-**`create_meeting(name, admin_password)`** mints one room and does nothing else. `name` is the room name. `admin_password` is the human's password for that room. The response is `{ link }`. No room password, no admin password, no invite text, no `start`, no `end`. The link is plain. Grok Bot writes the invite after this call, with a room password it made up.
+**`create_meeting(name, admin_password)`** mints one room and does nothing else. `name` is the room name. `admin_password` is the human's password for that room, passed from Grok Bot's secrets store on this call. The same rule covers every later admin action: the password arrives on that call, is used, and is dropped. The response is `{ link }`. No room password, no admin password, no invite text, no `start`, no `end`. The link is plain. Grok Bot writes the invite after this call, with a room password it made up.
 
 **`schedule_meeting(link, room_password, start, end?)`** stores the join order for that link. `room_password` is the one Grok Bot put in the invite. `start` and `end` are the window. A missing `end` is stored as `start` plus 8 hours. This call does not mint a room, does not send the invite, and does not join yet. The response is the public order plus `capacity`. Optional fields that do not change this flow: `timezone`, `recurrence`, `early_margin`, `external_id`. A second call with the same room and an overlapping window is the duplicate rule in section 2.
 
@@ -348,12 +352,12 @@ These are the company list. They persist across restarts (section 2). They retur
 
 ## 5. Passwords
 
-Three secrets exist. None of them is a log line, a status field, an event, a transcript line, or an error string.
+Four secrets exist. None of them is a log line, a status field, an event, a transcript line, or an error string. The admin password is also never a file.
 
 | Secret | Where it is allowed | Where it is refused |
 |---|---|---|
-| Room password (guests type this) | Grok Bot makes it up and may send it freely to participants, with the link, from its own email or the human's. The `schedule_meeting`, `import_schedule`, and `join_meeting` argument. A mode-0600 field in `meetings.json` and `schedule.json` so a restart can enter the room again. | The link. The admin password's place. `list_meetings`, `list_schedule`, `meeting_status`, `status`, events, line text, screenshots, and the bot's on-screen meeting row. stderr. `create_meeting` does not take it and does not return it. |
-| Admin password (the human's, for that room) | The `create_meeting` argument. A mode-0600 field on the meeting row. The human already knows it, because they gave it to Grok Bot. | Participants, invites, the link, every tool result including the `create_meeting` response, the management screen, events, logs, and stderr. |
+| Room password (guests type this; the join password) | Grok Bot makes it up and may send it freely to participants, with the link, from its own email or the human's. The `schedule_meeting`, `import_schedule`, and `join_meeting` argument. One field on the schedule, in `schedule.json` mode 0600, so a restart can enter the room again. | The link. A second copy in any other file this process writes. `list_meetings`, `list_schedule`, `meeting_status`, `status`, events, line text, screenshots, and the bot's on-screen meeting row. stderr. `create_meeting` does not take it and does not return it. |
+| Admin password (the human's, for that room) | Grok Bot's secrets store. It is passed on the call that needs it: `create_meeting`, and any later admin action. The call uses it and drops it. | Disk, logs, participants, invites, the link, every tool result including the `create_meeting` response, the schedule, the Meet Bot's browser store, the management screen, events, and stderr. This process never stores it. |
 | Bot password (derives the admin meeting) | `GIFOS_MCP_HOME/bot.json`, mode 0600, or the environment. This is the Meet Bot's own credential. It is not the room's admin password. | Every tool result, the management screen, the eyes view, invites, and the admin chat payload that gifos-mcp logs. |
 | Model key | This process, when it hosts `smartest`. | The page, Meet Bot, tool results, events, and logs. |
 
@@ -361,13 +365,13 @@ Rules for the implementation that follows:
 
 - `plainLink` stays as it is: `password`, `pw`, `p`, `room_password`, and `pass` are stripped from the query and the hash, and a link that still contains the password is rejected.
 - `publicView` stops copying `room_password` onto list and status results. Today it includes the field whenever one is stored. That is the echo this design removes.
-- Scrub runs on every tool error and every event string, for the room password and the admin password of every known meeting, the bot password, and the model key. A password of any non-empty length is scrubbed, not only a fixed pattern.
+- Scrub runs on every tool error and every event string before it is written. The join password of every scheduled meeting, the bot password, and the model key are scrubbed from those strings. The admin password from the current call is scrubbed the same way, and then forgotten. A password of any non-empty length is scrubbed, not only a fixed pattern. Nothing in the scrub list is a reason to keep the admin password after the call.
 - The Join control in the app clears the field after the call. The management list never interpolates it into a label.
 - Launch links are not a way to pass the room password. CONTROL.md already warns that a password in a URL lands in history and logs. The local API and MCP are the path.
 - A failed join says that the room could not be entered. It does not quote the password.
 - Eyes and snapshot images are of the meeting. They are not a place to overlay the password.
 
-Restart: the room password in the mode-0600 file is what lets the bot rejoin a room that is still inside its window when the process died. That store is required. The admin password is in the same kind of file and is not used as the guest password on rejoin.
+Restart: the join password on the schedule is what lets the bot rejoin a room that is still inside its window when the process died. Meet Bot restores its own session state from the browser's filesystem and IndexedDB. The admin password is not on disk. An admin action after a restart waits until Grok Bot passes that password again from its secrets store.
 
 ## 6. Path to a server fleet
 
@@ -400,7 +404,7 @@ Hundreds to thousands of concurrent rooms, and the form a company would run as a
 | Edge | The customer's MCP connection. Auth, the tool surface in section 4, no media. |
 | Directory | The company schedule, meeting index, line log, event cursor, which worker holds which meeting. Assigns a worker at join time. |
 | Worker | One Chromium, a budget of rooms, the Meet Bot, the per-meeting voice writer. Joins only on an assignment from the directory. |
-| Secret store | Room passwords, bot passwords, model keys. Workers receive a secret for one join and do not log it. |
+| Secret store | Join passwords on the schedule, bot passwords, model keys. Workers receive a join password for one join and do not log it. Admin passwords are not in this store. They arrive on the call from Grok Bot and are not written down. |
 | Transcript store | The JSON lines. Still the customer's data. |
 
 Isolation is a browser profile per customer, not per meeting. Two customers do not share a profile, a Kokoro cache if that cache can hold prompts, or a secret store. A worker crash marks that worker's meetings disconnected. Another worker rejoins with the stored room password. The password is not part of the assignment event that other customers could see.
@@ -415,7 +419,7 @@ Nothing in this design puts a private address, a customer name, or a real host i
 2. **Shared speech-to-text.** Decided. One engine for every room. Each clip is tagged with the meeting id.
 3. **Is the eyes tile the live session iframe, one meeting at a time?** That is the proposal. The alternative is a still image on demand and no live view.
 4. **Room passwords and participants.** Decided. Room passwords may be sent freely to participants. Grok Bot makes one up and puts it in the invite with the link. The admin password is never sent to participants. `create_meeting` returns the link only.
-5. **Room password on disk.** Decided. Store it in the mode-0600 meeting and schedule files so a restart can rejoin.
+5. **Where state and passwords live.** Decided. Meet Bot keeps its own state in the headless browser's filesystem and IndexedDB. This process stores the schedule, including each meeting's join (room) password, in `schedule.json` mode 0600. This process never stores the admin password. That password comes from Grok Bot's secrets store, is passed on the call that needs it (`create_meeting` and admin actions), and is never written to disk or logs.
 6. **One bot name in every room, or one name per worker once stage B exists?** A single name matches "the company's bot." Separate names make a stall in one worker obvious in the room.
 7. **Are voice switches still global?** The proposal keeps one conversation voice for the bot. Per-meeting voice (silent in one room, local in another) needs a `set_voice` that takes a `meeting_id`.
 8. **Who is allowed to call the management tools?** Today anyone who can reach the MCP socket can join a meeting and read every transcript. A company deployment needs a caller identity on the tools. Is that in scope for the first multi-meeting change, or only at stage C?
@@ -435,7 +439,7 @@ Nothing in this design puts a private address, a customer name, or a real host i
 
 | Repo | Change |
 |---|---|
-| gifos-mcp | One shared speech-to-text engine, clips tagged by meeting id. Queue Kokoro by meeting id. `create_meeting(name, admin_password)` returns `{ link }` only. `schedule_meeting(link, room_password, start, end)` stores the order. Keep the room password and the admin password in the mode-0600 files. Never put the admin password in a tool result. Add `meeting_status`, `tail_lines`, `meetings_report`, `tail_events`, and `capacity_status`, including `thinking`. Add the schedule file, the clock, `list_schedule`, `update_schedule`, `cancel_schedule`, and `import_schedule`. Raise `capacity.near`, `capacity.reached`, and `capacity.cleared` for a full room now and for a future clash. Enforce the cap once it has a measured default. The supervisor and the fleet are later. |
+| gifos-mcp | One shared speech-to-text engine, clips tagged by meeting id. Queue Kokoro by meeting id. `create_meeting(name, admin_password)` returns `{ link }` only and does not store `admin_password`. `schedule_meeting(link, room_password, start, end)` stores the order, including the join password, in the schedule file. Never write the admin password to disk or logs. Add `meeting_status`, `tail_lines`, `meetings_report`, `tail_events`, and `capacity_status`, including `thinking`. Add the schedule file, the clock, `list_schedule`, `update_schedule`, `cancel_schedule`, and `import_schedule`. Raise `capacity.near`, `capacity.reached`, and `capacity.cleared` for a full room now and for a future clash. Enforce the cap once it has a measured default. The supervisor and the fleet are later. |
 | gifos-app | Per-session voice generation and play target in `meet-host.js` / `host-voice.js`. A visible thinking animation on the bot's tile in the meeting that is composing a reply. Eyes: resize one session iframe. Chat events, if they are not already posted. |
 | gifos-apps-source | The RUN management screen: list, per-meeting status including thinking, the day's orders, paste link and password, leave, open eyes for one meeting. `interject` and conversation turns stay addressed by meeting id. |
 

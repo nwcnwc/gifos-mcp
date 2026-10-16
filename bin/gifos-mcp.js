@@ -18,6 +18,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
     '  gifos-mcp                 MCP over stdio\n' +
     '  gifos-mcp --http [port]   MCP over streamable HTTP on 127.0.0.1 (default 19520)\n\n' +
     'Environment: GIFOS_URL, GIFOS_RELAY, GIFOS_BOT_NAME, GIFOS_BOT_PASSWORD, GIFOS_STT_APP,\n' +
+    'GIFOS_TTS_ENGINE, GIFOS_TTS_VOICE, GIFOS_PIPER_BIN, GIFOS_PIPER_MODEL,\n' +
     'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN.\n' +
     'See https://github.com/nwcnwc/gifos-mcp#readme\n');
   process.exit(0);
@@ -30,7 +31,8 @@ const meetings = new MeetingStore(cfg.home);
 const reset = meetings.resetLive();
 if (reset) log(reset + ' meeting(s) were live in the last run; they are back to scheduled');
 const bot = new MeetingBotDriver(cfg, creds);
-log('gifos-mcp ' + VERSION + ' · GifOS ' + cfg.gifosUrl + ' · bot "' + creds.name + '" (' + creds.source + ') · data ' + cfg.home);
+const voice = cfg.tts.engine === 'none' ? 'off' : cfg.tts.engine + (cfg.tts.fallback ? ' fallback' : '');
+log('gifos-mcp ' + VERSION + ' · GifOS ' + cfg.gifosUrl + ' · bot "' + creds.name + '" (' + creds.source + ') · voice ' + voice + ' · data ' + cfg.home);
 
 let closing = false;
 async function shutdown(code) {

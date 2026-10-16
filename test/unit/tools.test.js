@@ -188,6 +188,9 @@ test('list_meetings and status', async () => {
   const s = json(await call('status'));
   assert.equal(s.gifos_url, 'http://127.0.0.1:19510');
   assert.equal(s.stt_app, 'offline-stt-whisper');
+  assert.equal(s.tts.requested, 'auto');
+  assert.ok(s.tts.engine === 'kokoro' || s.tts.engine === 'piper');
+  assert.equal(s.tts.ready, false);
   assert.deepEqual(s.live_meetings, [b.meeting_id]);
   assert.equal(s.bot.state, 'ready');
 });

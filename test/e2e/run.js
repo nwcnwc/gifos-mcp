@@ -134,6 +134,9 @@ async function main() {
       GIFOS_RELAY: relay,
       GIFOS_MCP_HOME: mcpHome,
       GIFOS_STT_APP: STT === 'synthetic' ? 'stt-synthetic' : 'offline-stt-whisper',
+      // This run checks transcription. Kokoro is the default voice and would
+      // download its weights on first use, so leave text-to-speech off here.
+      GIFOS_TTS_ENGINE: 'none',
       GIFOS_MCP_SHOTS: PROOF,
     },
     stderr: 'pipe',

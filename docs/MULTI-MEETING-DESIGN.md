@@ -47,7 +47,7 @@ A handful of simultaneous rooms on the machine that already runs Grok Bot is the
 
 ## 2. Scheduled joins
 
-The bot does not sit in a room all day. A join order has a start and an end. The process joins a little before the start, does the job, and leaves at the end unless the overrun rule says people are still talking. Grok Bot fills the schedule, including a bulk load from calendars. This process keeps the schedule and fires it. It does not read a calendar itself.
+The bot does not sit in a room all day. A join order has a start and an end. The process joins a little before the start, does the job, and after the end stays only while humans are still in the room and someone other than the bot has spoken or chatted within the last 10 minutes. Grok Bot fills the schedule, including a bulk load from calendars. This process keeps the schedule and fires it. It does not read a calendar itself.
 
 ### What a join order is
 
@@ -63,7 +63,7 @@ Fields stored with the order:
 | `start`, `end` | Instants. Absent `start` means now. Absent `end` means open-ended. |
 | `timezone` | IANA name, such as `America/Los_Angeles`. The instant is what the clock fires on. The name is how a weekly rule and a display stay in the company's zone. |
 | `early_margin` | How long before `start` the bot may join. Default is a small server margin (proposed: one minute), overridable per order. The bot is not in the room at the start of the work day. |
-| `overrun` | What to do when `end` arrives. See below. |
+| `overrun` | Decided. After `end`, leave when no human remains, or when speech and chat from anyone but the bot have been quiet for 10 minutes. Otherwise stay. There is no hard cap. |
 | `recurrence` | Empty for one occurrence. Otherwise a rule plus exceptions. |
 | `record`, `transcribe` | Turned on when the bot joins, off when it leaves. |
 | `commands`, `advice` | While this occurrence is live, the bot may take commands and offer advice. The first version uses the bot's global voice switches during that window. Per-order switches are an open question. |
@@ -77,13 +77,13 @@ A clock in this process, started after the browser is up, looks at orders whose 
 
 1. **Join.** Enter the room, then transcribe, and record if the order asked. Commands and advice follow the switches in force for that window. Emit `meeting.joined` with the `schedule_id`.
 2. **During.** The same per-meeting tools as a manual join: captions, chat, spoken lines, commands, advice. The bot is one participant. It does not hold the room open for people who have not arrived yet beyond the early margin. If nobody is there, it still stays until `end`, because the meeting may start late. It does not stay past the overrun rules.
-3. **End.** At `end`, apply `overrun`:
-   - `leave` — leave as the clock hits `end`.
-   - `while_talking` — proposed default. Stay only while someone other than the bot is still producing speech or chat. After a quiet gap with no such lines, leave. People sitting silent do not hold the bot. A hard cap (`end` plus `overrun_max`) leaves anyway, so a long conversation cannot keep the bot overnight.
-   - `until_empty` — stay until every participant other than the bot has gone, still under the same hard cap.
-4. **Leave.** Save the lines, drop the session, emit `meeting.left` with a reason: `end`, `quiet`, `empty`, `hard_cap`, `cancel`, or `manual`. Other participants stay. The next occurrence of a series is a new `meeting_id` and does not reuse this transcript.
+3. **End.** At `end`, the phase becomes `overrun` and the leave rule is fixed. There is no per-order choice and no hard cap.
+   - Leave as soon as no human remains in the room. The bot does not count as a human. Reason `empty`.
+   - Leave when speech and chat from anyone but the bot have been absent for 10 minutes. The bot's own voice and its own chat do not reset that timer. Reason `quiet`.
+   - Otherwise stay. Humans who are still in the room and have spoken or chatted within the last 10 minutes hold the seat, with no latest time.
+4. **Leave.** Save the lines, drop the session, emit `meeting.left` with a reason: `empty`, `quiet`, `cancel`, or `manual`. Other participants stay. The next occurrence of a series is a new `meeting_id` and does not reuse this transcript.
 
-A manual `leave_meeting` during the window sets `left_early`. The clock does not rejoin that occurrence. A crash is different from a manual leave: on startup, an order that was `live` or `overrun` and is still inside its window (through `end` plus `overrun_max`) is joined again. An order whose window has already finished becomes `missed` or `ended` and is not entered. An order still in the future stays `upcoming`.
+A manual `leave_meeting` during the window or during overrun sets `left_early`. The clock does not rejoin that occurrence. A crash is different from a manual leave: on startup, an order that was `live` and whose `end` is still ahead is joined again. An order that was `overrun`, or was `live` when the process died and whose `end` has since passed, is joined again, then the same rule runs (leave if no human remains, otherwise the 10 quiet minutes start from the rejoin, because the process could not hear the room while it was down). An order that never joined and whose `end` has passed is not entered. An order still in the future stays `upcoming`.
 
 Joining late: if the cap or a restart means the bot is not in the room at `start`, it still joins while `now` is before `end`, and the overrun rules are unchanged. If `now` is already at or past `end`, that occurrence is `missed` and is not entered for a leftover fragment. Section 7 asks whether late join should be stricter.
 
@@ -169,7 +169,7 @@ An occurrence uses the same `meeting_id` as `meeting_status`, `tail_lines`, and 
   "timezone": "America/Los_Angeles",
   "start": "2026-10-16T16:00:00.000Z",
   "end": "2026-10-16T16:30:00.000Z",
-  "overrun": "while_talking"
+  "overrun_quiet_minutes": 10
 }
 ```
 
@@ -182,7 +182,7 @@ Events, on the same stream as section 4, carry `schedule_id` and `meeting_id` wh
 | `schedule.created` / `schedule.updated` / `schedule.cancelled` | The order changed. Data is the public order, with no password. |
 | `schedule.due` | Join time has arrived. |
 | `schedule.waiting` | The cap blocked the join. |
-| `schedule.overrun` | `end` passed and the bot is staying under the overrun rule. Data includes the rule and the hard cap. |
+| `schedule.overrun` | `end` passed and the bot is staying. Data includes `overrun_quiet_minutes: 10`. There is no hard cap. |
 | `schedule.missed` | Reason `capacity`, `late`, or `restart_after_window`. |
 | `capacity.near` / `capacity.reached` / `capacity.cleared` | The human-facing capacity alerts. Payload is the one in the capacity section: `when`, `at`, `affected`, and `waiting`. |
 | `meeting.joined` / `meeting.left` | As in section 4. `meeting.left` adds `reason`. |
@@ -400,7 +400,7 @@ Nothing in this design puts a private address, a customer name, or a real host i
 9. **Chat lines.** Meet Bot's `transcript(id)` is captions. Chat is a different event. Is the meeting page already willing to emit chat to the host as a `meet-event`, or does that wait on gifos-app?
 10. **Cap policy when the machine is full.** The proposal does not drop a meeting that is still in its window. A manual join is refused. A scheduled join waits, then joins if the seat frees before `end`, or is `missed`. Is that the rule, or should a higher-priority order be able to displace a lower one?
 11. **Early margin.** The proposal is one minute, overridable per order. Is that the company default?
-12. **Overrun numbers.** The proposal for `while_talking` is: after `end`, stay while other people are still producing speech or chat, then leave after a quiet gap, and always leave at `end` plus a hard cap. What should the quiet gap and the hard cap be?
+12. **Overrun.** Decided. After `end`, leave as soon as no human remains in the room. Leave if speech and chat from anyone but the bot have been quiet for 10 minutes. Otherwise stay. No hard cap.
 13. **Late join.** The proposal still joins if the bot was late but `end` has not arrived. The alternative is to miss the occurrence unless it is seated by `start`.
 14. **Over capacity at schedule time.** The proposal stores the order and returns `over_by`. The alternative is to reject the write unless the caller forces it.
 15. **Recurrence shape.** The proposal is a small daily, weekly, or monthly rule, evaluated in the order's time zone, with exceptions. The alternative is to accept a calendar rule string that Grok Bot already has and store it opaquely.
@@ -416,4 +416,4 @@ Nothing in this design puts a private address, a customer name, or a real host i
 | gifos-app | Per-session voice generation and play target in `meet-host.js` / `host-voice.js`. Eyes: resize one session iframe. Chat events, if they are not already posted. |
 | gifos-apps-source | The RUN management screen: list, per-meeting status, the day's orders, paste link and password, leave, open eyes for one meeting. `interject` and conversation turns stay addressed by meeting id. |
 
-No code in those repos follows from this document until the open questions that block stage A are answered: 1, 2, 4, 5, 12, and 17.
+No code in those repos follows from this document until the open questions that block stage A are answered: 1, 2, 4, 5, and 17. Question 12 is decided. Question 17 (open-ended orders) is still open.

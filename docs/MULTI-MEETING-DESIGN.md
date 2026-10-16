@@ -4,6 +4,17 @@ Design only. This document does not change the server. It describes how one Meet
 
 The public meeting network stays GifOS. This product joins rooms. It does not replace the media path.
 
+## The main flow
+
+A human asks Grok Bot to schedule a meeting with people X at time T on topic Y. Grok Bot does four steps. This process does two of them. It does not send mail, and it does not invent the room password.
+
+1. **Mint the room.** Grok Bot calls `create_meeting(name, admin_password)`. `name` is the room name (topic Y). `admin_password` is the human's password for that room. The response is the link. It is not an invite, and it does not contain either password.
+2. **Invite the people.** Grok Bot makes up a room password. It invites people X from its own email or from the human's email. The invite carries the link and that room password. It never carries the admin password. Room passwords may be sent freely to participants. The admin password may not.
+3. **Put the bot on the clock.** Grok Bot calls `schedule_meeting(link, room_password, start, end)`. `start` and `end` are time T. The room password is the one from the invite, so the bot can enter. This call does not join yet.
+4. **Join on time.** The clock in this process seats the Meet Bot one minute before `start`, with the stored room password. The bot listens in that room and in every other room it is already in. Each room has its own voice.
+
+`end` may be omitted. The stored end is then `start` plus 8 hours, marked `end_defaulted`. After the stored end, the overrun rule applies.
+
 ## 1. What one host can do today
 
 ### Shape
@@ -22,16 +33,16 @@ These are the cost centers. None of them has a published meetings-per-machine nu
 |---|---|---|
 | Chromium profile and the Meeting Bot tab | One per gifos-mcp process | The base cost. A second meeting does not start a second browser. |
 | Work session | One `run.html` iframe per meeting, including the admin meeting | CPU and RAM per room: membership, audio receive, and whatever that document decodes. A 2 pixel frame still receives media. |
-| Whisper (default speech-to-text) | The store app is assigned once on the GifOS computer. Each session document is its own page and can mount its own provider | A captions engine per transcribing meeting, unless a later change serves `stt` once from this process and tags each clip with the meeting id. The Whisper download is on the order of 77 MB. Runtime RAM is not measured here. |
+| Whisper (default speech-to-text) | Decided. One shared engine, served from this process. Each clip is tagged with the meeting id. The page does not mount a captions engine per room. | The download is on the order of 77 MB, once. Runtime RAM is not measured here. A stall in the shared engine stalls captions in every room that is transcribing. |
 | Kokoro | One install under `GIFOS_MCP_HOME/kokoro`, one engine in this process, voice `af_heart`. The q8 weights are about 90 MB on disk. Every hosted `tts` call hits that engine | Disk and model RAM stay one. Two overlapping speaks contend for one inference. The page does not get a second Kokoro. |
 | Language model | One hosted `smartest` client in this process when no store app is set | One HTTP call at a time is what the host page asks for today. The key stays in this process. |
 | Voice writer | One `HostVoice` on the host page. One generation counter. One `speechId` | A speak or a conversation turn in meeting B sets `speechId` to B and interrupts the utterance aimed at A. Playback cannot overlap. |
 
-Listening scales better than speaking. Transcription, people, chat, hand, microphone, and camera are already per session id. Speaking is not.
+Listening is one shared speech-to-text engine. People, chat, hand, microphone, and camera stay per session id. Speaking is one writer per meeting.
 
-### One writer per voice, per meeting
+### One voice per meeting
 
-The rule to build toward:
+Decided. The bot listens in every meeting it is in. It can speak in more than one of them at the same time.
 
 - Inside one meeting, one voice has one writer. A new spoken line or a conversation turn in that meeting interrupts that meeting's current line. It does not play two clips into the same microphone.
 - Across meetings, writers are independent. Meeting A's audio is played only into A's session. Starting B does not cancel A.
@@ -39,11 +50,19 @@ The rule to build toward:
 - The model call for a conversation turn is tagged the same way. The reply is spoken into the meeting that heard the prompt.
 - The bot's own voice stays out of that meeting's caption feed, as it does today, so a room does not answer itself. The line is still recorded for the owner, under a separate kind (section 4).
 
+### Thinking, on that meeting's tile
+
+While the bot is working out a reply in a meeting, its tile in that meeting shows a visible thinking animation. Humans in the room need to see that the bot heard them and is composing. The animation is on the participant tile, not only on the operator's management screen.
+
+- It starts when that meeting requests a reply, including while the shared model is still busy with another room, and it stays up until the reply is spoken or the turn is dropped.
+- It is per meeting. Meeting A's tile does not think because meeting B is composing, and the other way around.
+- `meeting_status` and the `meeting.state` event carry `thinking: true` for that meeting during the same interval. The flag is how Grok Bot knows. The animation is how the people in the room know.
+
 Today's host page is the global form of this rule: one writer for every meeting. That is the first GifOS-side change on the way to a team deployment. It lives in `meet-host.js` and `host-voice.js` (a generation and a play target per session). gifos-mcp keeps serving one Kokoro and queues it. Meeting Bot keeps calling `interject(id, text)` and `converse` with an id. The app frame still does not fetch.
 
 ### What a team can expect before the fleet
 
-A handful of simultaneous rooms on the machine that already runs Grok Bot is the honest near-term shape: the browser, the bot, and the weights are already there. The ceiling is the N meeting documents and, if each one mounts Whisper, N caption engines. Kokoro is not that ceiling. Do not treat "it already joins a second meeting" as a capacity claim. The first code that follows this document should ship an explicit cap (`GIFOS_MAX_MEETINGS`) whose default is chosen after the measurement, and should refuse the next join with a clear tool error when the cap is reached.
+A handful of simultaneous rooms on the machine that already runs Grok Bot is the honest near-term shape: the browser, the bot, and the weights are already there. The ceiling is the N meeting documents. Speech-to-text is one shared engine, so it is not N caption engines. Kokoro is not that ceiling either. Do not treat "it already joins a second meeting" as a capacity claim. The first code that follows this document should ship an explicit cap (`GIFOS_MAX_MEETINGS`) whose default is chosen after the measurement, and should refuse the next join with a clear tool error when the cap is reached.
 
 ## 2. Scheduled joins
 
@@ -51,7 +70,7 @@ The bot does not sit in a room all day. A join order has a start and an end. The
 
 ### What a join order is
 
-`join_meeting` and `create_meeting` gain optional `start` and `end`. `schedule_meeting` is the same order when the caller is filling the company list rather than asking for an immediate seat. An order with no `start` joins now. An order may omit `end`. The stored end is then `start` plus 8 hours, and the order is marked `end_defaulted` so the owner can see the time was filled in. After that end, the overrun rule applies: leave when no human remains, or after 10 minutes of silence from anyone but the bot, and otherwise stay. An explicit `end` is kept as given and uses the same overrun rule. There is no separate open-ended stay.
+`create_meeting` only mints a room. It does not take a time and it does not join. `schedule_meeting` is the order that seats the bot. An order may omit `end`. The stored end is then `start` plus 8 hours, and the order is marked `end_defaulted` so the owner can see the time was filled in. After that end, the overrun rule applies: leave when no human remains, or after 10 minutes of silence from anyone but the bot, and otherwise stay. An explicit `end` is kept as given and uses the same overrun rule. There is no separate open-ended stay. `join_meeting(link, room_password)` is the immediate seat, for a room the bot should enter now. It is not the scheduled path.
 
 Fields stored with the order:
 
@@ -59,7 +78,7 @@ Fields stored with the order:
 |---|---|
 | `schedule_id` | Stable id of the order. A series uses one id. One occurrence uses `meeting_id` once it is concrete. |
 | `meeting_id` | Present once this occurrence has a row in the meeting store. Reports and events use it. |
-| `topic`, `link` | Plain link. A missing link means this process mints a room, the way `create_meeting` does today. |
+| `topic`, `link` | The room name from `create_meeting`, and the plain link that call returned. `schedule_meeting` requires the link. It does not mint a room. |
 | `start`, `end` | Instants. Absent `start` means now. Absent `end` is stored as `start` plus 8 hours, with `end_defaulted: true`. Overrun begins at the stored end. |
 | `timezone` | IANA name, such as `America/Los_Angeles`. The instant is what the clock fires on. The name is how a weekly rule and a display stay in the company's zone. |
 | `early_margin` | Decided. The bot joins one minute before `start`. An order may set a different margin. The bot is not in the room at the start of the work day. |
@@ -150,7 +169,7 @@ Every alert names the rooms and the queue. `affected` is who is seated or who is
 
 ### Persistence
 
-The schedule lives in `GIFOS_MCP_HOME/schedule.json`, written the same way as `meetings.json`: a temp file, mode 0600, then rename. It holds orders, rules, exceptions, `external_id`s, and the phase of each materialized occurrence. Room passwords sit in that file under the same rule as section 5: present on disk, absent from every later tool result.
+The schedule lives in `GIFOS_MCP_HOME/schedule.json`, written the same way as `meetings.json`: a temp file, mode 0600, then rename. It holds orders, rules, exceptions, `external_id`s, and the phase of each materialized occurrence. The room password sits in that file, mode 0600, so a restart can enter the room again. The admin password sits on the meeting row in `meetings.json`, same mode, and is not copied onto the schedule. Neither password is a list, status, or event field.
 
 The line log is per `meeting_id`, so a restart does not mix last week's standup into this week's file. The series id is a field on the occurrence, which is how a report spans a series without sharing one transcript.
 
@@ -197,7 +216,7 @@ What the RUN screen does today: `#run-meetings` is one text row per work meeting
 
 The management screen to add on the RUN side:
 
-1. **The list.** One row per work meeting. The admin meeting is absent. Each row shows topic or room, how many people, whether the bot is transcribing, whether it is speaking or listening in that room, and the last hand / mic / camera state. An error for that meeting stays on that row.
+1. **The list.** One row per work meeting. The admin meeting is absent. Each row shows topic or room, how many people, whether the bot is transcribing, whether it is thinking, speaking, or listening in that room, and the last hand / mic / camera state. Thinking on the row is the same interval as the animation on the bot's tile in that room. An error for that meeting stays on that row.
 2. **Status for one row.** Choosing a row shows that meeting's people, the recent speech lines, the recent chat lines, and the recent lines the bot spoke. It does not show another meeting's lines in the same list.
 3. **Join another.** A link field and a password field. The password field is masked. Join calls the same `join(link, password)` the local API already has. On success the password control is cleared. The new row shows the plain link and never the password. A bad password is a one-line error that does not repeat the password.
 4. **Leave.** One control on that row. The bot leaves that room. The other rows stay.
@@ -214,7 +233,7 @@ Tools already on this server that cover part of the job:
 
 | Tool | Role today |
 |---|---|
-| `join_meeting(link, password?, start?, end?)` | Joins another GifOS room and starts transcribing. A second call does not drop the first meeting. With `start` and `end`, this is a join order (section 2) and the bot waits for the window. |
+| `join_meeting(link, room_password?)` | Joins another GifOS room now and starts transcribing. A second call does not drop the first meeting. A time belongs on `schedule_meeting`, not here. |
 | `leave_meeting(meeting_id)` | The bot leaves that room. Others stay. `end_meeting` is the same leave. A GifOS room has no end-for-everyone. |
 | `list_meetings` | The server's rows, newest first, including scheduled and ended. |
 | `status` | The connector: browser up, which meetings are live, voice gap. It is not a per-meeting status. |
@@ -235,14 +254,14 @@ One meeting, one object. Fields:
 - `meeting_id`, `topic`, `state` (`scheduled`, `live`, `ended`)
 - `link` (plain link, no password query or hash)
 - `people`: `{ name, bot }` for each person the bot can see. No email, no account id, unless GifOS already exposes a display name
-- `transcribing`, `speaking`, `listening`
+- `transcribing`, `thinking`, `speaking`, `listening`
 - `hand`, `mic`, `camera` for the bot in that room
 - `eyes`: `true` only when this meeting is the one on the eyes tile
 - `counts`: how many speech, chat, and spoken lines are stored
 - `last_error`: a short string for this meeting, or empty
 - `started_at`, `ended_at`
 
-No room password, no bot password, no model key, no speech URL.
+No room password, no admin password, no bot password, no model key, no speech URL.
 
 **`tail_lines(meeting_id?, since?, kinds?)`**
 
@@ -292,7 +311,7 @@ One ordered stream for the whole connector, so a dashboard can update without po
 | `meeting.joined` | `topic`, `link`, `state` |
 | `meeting.left` | `state` |
 | `line.speech` / `line.chat` / `line.spoken` | the line fields |
-| `meeting.state` | `transcribing`, `speaking`, `listening`, `hand`, `mic`, `camera`, `people` |
+| `meeting.state` | `transcribing`, `thinking`, `speaking`, `listening`, `hand`, `mic`, `camera`, `people`. `thinking` is true while that meeting's tile shows the thinking animation. |
 | `meeting.error` | `text` (already scrubbed) |
 | `capacity.near` / `capacity.reached` / `capacity.cleared` | `when` (`live` or `scheduled`), `at`, `cap`, `near`, `seated`, `affected`, `waiting`. Raised for a full room now and for a clash the schedule already shows. |
 
@@ -304,9 +323,11 @@ Per-meeting resources stay: `gifos://meeting/{id}/transcript` remains the speech
 
 ### Schedule tools
 
-These are the company list. They persist across restarts (section 2). They return the public order: times, zone, phase, topic, plain link, flags, `external_id`, capacity. They do not return the room password.
+These are the company list. They persist across restarts (section 2). They return the public order: times, zone, phase, topic, plain link, flags, `external_id`, capacity. They do not return the room password or the admin password.
 
-**`schedule_meeting`** creates one order or one series. Arguments are the fields in section 2. A missing link mints a room and returns `invite_email` and `invite_calendar` once, the same way `create_meeting` does. The response includes `capacity`.
+**`create_meeting(name, admin_password)`** mints one room and does nothing else. `name` is the room name. `admin_password` is the human's password for that room. The response is `{ link }`. No room password, no admin password, no invite text, no `start`, no `end`. The link is plain. Grok Bot writes the invite after this call, with a room password it made up.
+
+**`schedule_meeting(link, room_password, start, end?)`** stores the join order for that link. `room_password` is the one Grok Bot put in the invite. `start` and `end` are the window. A missing `end` is stored as `start` plus 8 hours. This call does not mint a room, does not send the invite, and does not join yet. The response is the public order plus `capacity`. Optional fields that do not change this flow: `timezone`, `recurrence`, `early_margin`, `external_id`. A second call with the same room and an overlapping window is the duplicate rule in section 2.
 
 **`list_schedule(from?, to?, timezone?, phase?, flag_overlaps?)`** returns orders in that window, soonest first, plus `conflicts` when the cap is exceeded. Recurrence is expanded inside the window. Each row is one occurrence with its `meeting_id` if it has been materialized.
 
@@ -314,7 +335,7 @@ These are the company list. They persist across restarts (section 2). They retur
 
 **`cancel_schedule(schedule_id, occurrence?, leave_if_live?)`** cancels one occurrence or the series. The default also leaves if that occurrence is `live` or `overrun`.
 
-**`import_schedule(orders)`** is the bulk path. Grok Bot has already read the calendar. Each item is a `schedule_meeting` body plus `external_id`. Existing ids are updates. Unknown ids are creates. The response is `{ created, updated, unchanged, conflicts }` and does not echo passwords. This process does not call out to a calendar.
+**`import_schedule(orders)`** is the bulk path for calendars Grok Bot has already read. Each item is a `schedule_meeting` body (`link`, `room_password`, `start`, `end`) plus `external_id`. The link already exists. This call does not mint rooms and does not send invites. Existing ids are updates. Unknown ids are creates. The response is `{ created, updated, unchanged, conflicts }` and does not echo passwords. This process does not call out to a calendar.
 
 `meeting_status` and `meetings_report` accept `schedule_id` as well as `meeting_id`. A series report is one block per occurrence, each with the window and phase from section 2, and that occurrence's lines only.
 
@@ -331,21 +352,22 @@ Three secrets exist. None of them is a log line, a status field, an event, a tra
 
 | Secret | Where it is allowed | Where it is refused |
 |---|---|---|
-| Room password (guests type this) | The `join_meeting` / `create_meeting` / `schedule_meeting` / `import_schedule` argument. The invite text returned by the call that minted the room, as its own line beside the plain link, because the owner is about to send it. A mode-0600 field in `meetings.json` and `schedule.json` so a restart can enter the room again. | The link. `list_meetings`, `list_schedule`, `meeting_status`, `status`, events, line text, screenshots, and the bot's on-screen meeting row. Later tool calls. stderr. |
-| Bot password (derives the admin meeting) | `GIFOS_MCP_HOME/bot.json`, mode 0600, or the environment. | Every tool result, the management screen, the eyes view, and the admin chat payload that gifos-mcp logs. |
+| Room password (guests type this) | Grok Bot makes it up and may send it freely to participants, with the link, from its own email or the human's. The `schedule_meeting`, `import_schedule`, and `join_meeting` argument. A mode-0600 field in `meetings.json` and `schedule.json` so a restart can enter the room again. | The link. The admin password's place. `list_meetings`, `list_schedule`, `meeting_status`, `status`, events, line text, screenshots, and the bot's on-screen meeting row. stderr. `create_meeting` does not take it and does not return it. |
+| Admin password (the human's, for that room) | The `create_meeting` argument. A mode-0600 field on the meeting row. The human already knows it, because they gave it to Grok Bot. | Participants, invites, the link, every tool result including the `create_meeting` response, the management screen, events, logs, and stderr. |
+| Bot password (derives the admin meeting) | `GIFOS_MCP_HOME/bot.json`, mode 0600, or the environment. This is the Meet Bot's own credential. It is not the room's admin password. | Every tool result, the management screen, the eyes view, invites, and the admin chat payload that gifos-mcp logs. |
 | Model key | This process, when it hosts `smartest`. | The page, Meet Bot, tool results, events, and logs. |
 
 Rules for the implementation that follows:
 
 - `plainLink` stays as it is: `password`, `pw`, `p`, `room_password`, and `pass` are stripped from the query and the hash, and a link that still contains the password is rejected.
 - `publicView` stops copying `room_password` onto list and status results. Today it includes the field whenever one is stored. That is the echo this design removes.
-- Scrub runs on every tool error and every event string, for the room password of every known meeting, the bot password, and the model key. A password of any non-empty length is scrubbed, not only a fixed pattern.
+- Scrub runs on every tool error and every event string, for the room password and the admin password of every known meeting, the bot password, and the model key. A password of any non-empty length is scrubbed, not only a fixed pattern.
 - The Join control in the app clears the field after the call. The management list never interpolates it into a label.
 - Launch links are not a way to pass the room password. CONTROL.md already warns that a password in a URL lands in history and logs. The local API and MCP are the path.
 - A failed join says that the room could not be entered. It does not quote the password.
 - Eyes and snapshot images are of the meeting. They are not a place to overlay the password.
 
-Restart: the stored room password is what lets the bot rejoin a room that is still inside its window when the process died. If that retention is not acceptable, the restart leaves the order `upcoming` or `missed` and the owner passes the password to `join_meeting` again. Section 7 asks which of those two is required. Until that is decided, the design preference is to store it locally and never return it after the call that created the invite.
+Restart: the room password in the mode-0600 file is what lets the bot rejoin a room that is still inside its window when the process died. That store is required. The admin password is in the same kind of file and is not used as the guest password on rejoin.
 
 ## 6. Path to a server fleet
 
@@ -353,7 +375,7 @@ The media stays on GifOS. Scale means more bot workers, not a larger meeting pag
 
 ### Stage A — one machine, many rooms
 
-The team shape. One gifos-mcp, one Chromium, one Meeting Bot, N sessions, one Kokoro queue, one writer per meeting, and one schedule file the clock fires. The bot is seated only inside each order's window, plus the overrun rule. Speech-to-text is one shared engine with clips tagged by meeting id, so N rooms do not mean N Whisper mounts. The eyes tile is the only session displayed large. A cap refuses further joins and leaves the extra orders `waiting_for_capacity` or `missed`.
+The team shape. One gifos-mcp, one Chromium, one Meeting Bot, N sessions, one Kokoro queue, one voice writer per meeting, and one schedule file the clock fires. The bot listens in every room it has joined. The bot is seated only inside each order's window, plus the overrun rule. Speech-to-text is one shared engine with clips tagged by meeting id. While a reply is being worked out, that meeting's tile shows the thinking animation. The eyes tile is the only session displayed large on the operator screen. A cap refuses further joins and leaves the extra orders `waiting_for_capacity` or `missed`.
 
 Measurement before the cap's default is chosen, on a clean profile, transcription on, conversation voice off, then again with two overlapping speaks:
 
@@ -389,11 +411,11 @@ Nothing in this design puts a private address, a customer name, or a real host i
 
 ## 7. Open questions
 
-1. **One writer per meeting, or one speaker for the whole bot?** This document recommends a writer per meeting, with Kokoro queued behind them, so two rooms can hear the bot at the same time. The alternative is today's behavior: the bot talks in only one room at a time and still listens in all of them. Which one is the team requirement?
-2. **Shared speech-to-text, or one Whisper per meeting?** Sharing keeps N rooms from mounting N engines. A separate engine per meeting isolates a stall. Which failure is worse?
+1. **One voice per meeting.** Decided. One writer per meeting, so two rooms can hear the bot at the same time. The bot listens in all of them.
+2. **Shared speech-to-text.** Decided. One engine for every room. Each clip is tagged with the meeting id.
 3. **Is the eyes tile the live session iframe, one meeting at a time?** That is the proposal. The alternative is a still image on demand and no live view.
-4. **Does `create_meeting` still include the room password in `invite_email` and `invite_calendar`?** The proposal keeps it on that one response, because the owner is about to send the invite, and removes it from every later tool. The stricter rule is to omit it there too and let the caller remember the password they just supplied.
-5. **May the room password sit in `meetings.json` (mode 0600) for rejoin after a restart?** The proposal stores it and never returns it. The alternative is to drop it and require `join_meeting` again with the password.
+4. **Room passwords and participants.** Decided. Room passwords may be sent freely to participants. Grok Bot makes one up and puts it in the invite with the link. The admin password is never sent to participants. `create_meeting` returns the link only.
+5. **Room password on disk.** Decided. Store it in the mode-0600 meeting and schedule files so a restart can rejoin.
 6. **One bot name in every room, or one name per worker once stage B exists?** A single name matches "the company's bot." Separate names make a stall in one worker obvious in the room.
 7. **Are voice switches still global?** The proposal keeps one conversation voice for the bot. Per-meeting voice (silent in one room, local in another) needs a `set_voice` that takes a `meeting_id`.
 8. **Who is allowed to call the management tools?** Today anyone who can reach the MCP socket can join a meeting and read every transcript. A company deployment needs a caller identity on the tools. Is that in scope for the first multi-meeting change, or only at stage C?
@@ -407,13 +429,14 @@ Nothing in this design puts a private address, a customer name, or a real host i
 16. **Editing a series.** Decided. `update_schedule` with no occurrence changes the whole future series. An occurrence id changes only that one.
 17. **Open-ended orders.** Decided. An order may omit `end`. Every such meeting gets a scheduled end of 8 hours after `start`. After that end, the overrun rule applies: leave when no human remains, or after 10 minutes of silence from anyone but the bot, and otherwise stay.
 18. **Commands and advice on the order.** Decided. They follow the bot's global switches while the occurrence is live. An order does not carry its own.
+19. **Thinking on the tile.** Decided. While the bot is working out a reply in a meeting, that meeting shows a visible thinking animation on the bot's tile. Other meetings do not.
 
 ## Who changes what, when this leaves design
 
 | Repo | Change |
 |---|---|
-| gifos-mcp | Queue Kokoro by meeting id. Stop echoing the room password after the invite call. Add `meeting_status`, `tail_lines`, `meetings_report`, `tail_events`, and `capacity_status`. Add the schedule file, the clock, and `schedule_meeting`, `list_schedule`, `update_schedule`, `cancel_schedule`, and `import_schedule`. Raise `capacity.near`, `capacity.reached`, and `capacity.cleared` for a full room now and for a future clash. Enforce the cap once it has a measured default. The supervisor and the fleet are later. |
-| gifos-app | Per-session voice generation and play target in `meet-host.js` / `host-voice.js`. Eyes: resize one session iframe. Chat events, if they are not already posted. |
-| gifos-apps-source | The RUN management screen: list, per-meeting status, the day's orders, paste link and password, leave, open eyes for one meeting. `interject` and conversation turns stay addressed by meeting id. |
+| gifos-mcp | One shared speech-to-text engine, clips tagged by meeting id. Queue Kokoro by meeting id. `create_meeting(name, admin_password)` returns `{ link }` only. `schedule_meeting(link, room_password, start, end)` stores the order. Keep the room password and the admin password in the mode-0600 files. Never put the admin password in a tool result. Add `meeting_status`, `tail_lines`, `meetings_report`, `tail_events`, and `capacity_status`, including `thinking`. Add the schedule file, the clock, `list_schedule`, `update_schedule`, `cancel_schedule`, and `import_schedule`. Raise `capacity.near`, `capacity.reached`, and `capacity.cleared` for a full room now and for a future clash. Enforce the cap once it has a measured default. The supervisor and the fleet are later. |
+| gifos-app | Per-session voice generation and play target in `meet-host.js` / `host-voice.js`. A visible thinking animation on the bot's tile in the meeting that is composing a reply. Eyes: resize one session iframe. Chat events, if they are not already posted. |
+| gifos-apps-source | The RUN management screen: list, per-meeting status including thinking, the day's orders, paste link and password, leave, open eyes for one meeting. `interject` and conversation turns stay addressed by meeting id. |
 
-Questions 11, 12, 13, 14, 15, 16, 17, and 18 are decided. Stage A is still blocked on questions 1, 2, 4, and 5, which are pending with Nathan.
+Questions 1, 2, 4, 5, and 11 through 19 are decided. Stage A is unblocked. Questions 3, 6, 7, 8, 9, and 10 stay open and do not block it.

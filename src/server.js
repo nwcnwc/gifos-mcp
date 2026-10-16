@@ -1,26 +1,33 @@
 // The MCP tools. Everything that touches a browser goes through `bot` (the
 // MeetingBotDriver in driver.js, or a fake in the unit tests).
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
+import { voicePublic } from './config.js';
+import { LiveTranscript } from './voice/live.js';
+import { scrub } from './voice/llm.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
-function ok(obj) {
-  return { content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] };
-}
-function fail(message) {
-  return { isError: true, content: [{ type: 'text', text: message }] };
-}
-
-export function createServer({ cfg, meetings, bot }) {
+export function createServer({ cfg, meetings, bot, voice, live, captions, botName }) {
   const server = new McpServer({ name: 'gifos-mcp', version: VERSION });
+  const transcript = live || new LiveTranscript(cfg.home);
+  const secret = (cfg.voice && cfg.voice.key) || '';
+
+  function ok(obj) {
+    const raw = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+    return { content: [{ type: 'text', text: scrub(raw, secret) }] };
+  }
+  function fail(message) {
+    return { isError: true, content: [{ type: 'text', text: scrub(message, secret) }] };
+  }
 
   // Wraps a handler: known meeting, readable errors.
   const guarded = (fn) => async (args) => {
-    try { return await fn(args); } catch (e) { return fail(String((e && e.message) || e)); }
+    try { return await fn(args); } catch (e) { return fail(scrub(String((e && e.message) || e), secret)); }
   };
   const need = (id) => {
     const m = meetings.get(id);
@@ -37,10 +44,13 @@ export function createServer({ cfg, meetings, bot }) {
     await bot.ensureStarted();
     const sessionId = await bot.join(m.link, password || '');
     await bot.transcribe(sessionId, true);
-    return meetings.update(m.meeting_id, {
+    const updated = meetings.update(m.meeting_id, {
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
     });
+    if (voice) voice.closed.delete(m.meeting_id);
+    if (captions) await captions.start(updated);
+    return updated;
   }
 
   server.registerTool('create_meeting', {
@@ -126,6 +136,7 @@ export function createServer({ cfg, meetings, bot }) {
     if (m.state === 'live' && m.session_id) {
       const text = await bot.transcript(m.session_id);
       meetings.update(m.meeting_id, { transcript: text });
+      transcript.ingestCaption(m.meeting_id, text, botName);
       return ok(text || '(no transcript lines yet)');
     }
     if (m.transcript != null) return ok(m.transcript || '(the transcript is empty)');
@@ -139,8 +150,11 @@ export function createServer({ cfg, meetings, bot }) {
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
+    if (voice) voice.closeMeeting(m.meeting_id);
+    if (captions) captions.stop(m.meeting_id);
     let text = m.transcript || '';
     try { text = await bot.transcript(m.session_id); } catch (e) { /* keep the last copy */ }
+    transcript.ingestCaption(m.meeting_id, text, botName);
     await bot.leave(m.session_id);
     const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false,
       transcript: text, ended_at: new Date().toISOString() });
@@ -166,9 +180,84 @@ export function createServer({ cfg, meetings, bot }) {
       gifos_url: cfg.gifosUrl,
       stt_app: cfg.sttApp || null,
       live_meetings: meetings.all().filter((m) => m.state === 'live').map((m) => m.meeting_id),
+      voice: voicePublic(cfg.voice),
       bot: info,
     });
   }));
+
+  server.registerTool('tail_transcript', {
+    title: 'Tail the live transcript',
+    description: 'New lines since `since` (the seq from the previous tail, or 0). Each line is {seq, ts, speaker, text, kind}. kind is speech (someone in the room), voice (the speaking model), or say (an interjection from the say tool). Works while the meeting is live and after it ends. The same bytes are the gifos://meeting/{id}/transcript resource.',
+    inputSchema: {
+      meeting_id: meetingId,
+      since: z.number().int().min(0).optional().describe('Return lines with a seq greater than this. Omit or pass 0 to read from the start.'),
+    },
+  }, guarded(async ({ meeting_id, since }) => {
+    need(meeting_id);
+    return ok(transcript.tail(meeting_id, since || 0));
+  }));
+
+  server.registerTool('say', {
+    title: 'Speak in the meeting',
+    description: 'Says text out loud in a live meeting, ahead of the speaking model. The speaking model has no tools and only makes conversation. Use say to interject. After the meeting, handle notes, mail, and calendar yourself; this server does not.',
+    inputSchema: {
+      meeting_id: meetingId,
+      text: z.string().min(1).max(2000).describe('What to say, in one or two sentences.'),
+    },
+  }, guarded(async ({ meeting_id, text }) => {
+    const m = needLive(meeting_id);
+    if (!voice) throw new Error('Meeting voice is off. Set GIFOS_LLM_KEY to use xAI Grok, or set GIFOS_LLM_URL and GIFOS_LLM_MODEL for another OpenAI-compatible endpoint.');
+    return ok(await voice.say(m.meeting_id, text));
+  }));
+
+  const subs = new Set();
+  server.server.registerCapabilities({ resources: { subscribe: true } });
+  server.server.setRequestHandler(SubscribeRequestSchema, async (request) => {
+    if (request && request.params && request.params.uri) subs.add(String(request.params.uri));
+    return {};
+  });
+  server.server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
+    if (request && request.params && request.params.uri) subs.delete(String(request.params.uri));
+    return {};
+  });
+  const off = transcript.onLine((row) => {
+    if (!row || !row.meeting_id) return;
+    const uri = 'gifos://meeting/' + row.meeting_id + '/transcript';
+    if (!subs.has(uri)) return;
+    server.server.sendResourceUpdated({ uri }).catch(() => {});
+  });
+  const origClose = server.close.bind(server);
+  server.close = async () => { off(); return origClose(); };
+
+  server.registerResource(
+    'meeting-transcript',
+    new ResourceTemplate('gifos://meeting/{id}/transcript', {
+      list: async () => {
+        const ids = new Set(transcript.meetings());
+        for (const m of meetings.all()) {
+          if (m.state === 'live' || ids.has(m.meeting_id)) ids.add(m.meeting_id);
+        }
+        return {
+          resources: [...ids].filter((id) => /^m_[0-9a-f]+$/.test(id)).map((id) => ({
+            uri: 'gifos://meeting/' + id + '/transcript',
+            name: 'meeting-transcript',
+            mimeType: 'application/x-ndjson',
+          })),
+        };
+      },
+    }),
+    {
+      title: 'Live meeting transcript',
+      description: 'Newline-delimited JSON for one meeting. Each line is {seq, ts, speaker, text, kind}. kind is speech, voice, or say. Subscribe for updates while the meeting is live. After the meeting, read it and do the follow-up yourself.',
+      mimeType: 'application/x-ndjson',
+    },
+    async (uri, vars) => {
+      const id = vars && (vars.id || vars.meeting_id);
+      const m = id && meetings.get(String(id));
+      if (!m) throw new Error('Unknown meeting_id ' + JSON.stringify(id) + '.');
+      return { contents: [{ uri: String(uri), mimeType: 'application/x-ndjson', text: transcript.ndjson(m.meeting_id) }] };
+    },
+  );
 
   return server;
 }

@@ -33,10 +33,9 @@ test('streamable HTTP on 127.0.0.1 with a bearer token', async (t) => {
   const client = new Client({ name: 'http-test', version: '1' });
   await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: 'Bearer test-token-123' } } }));
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 22);
-  const { prompts } = await client.listPrompts();
-  assert.equal(prompts.length, 1);
-  assert.equal(prompts[0].name, 'meeting_participant_etiquette');
+  const names = tools.map((t) => t.name);
+  assert.equal(tools.length, 20);
+  assert.ok(names.includes('say') && names.includes('tail_transcript') && names.includes('set_voice'));
   const r = JSON.parse((await client.callTool({ name: 'create_meeting', arguments: { topic: 'Demo meeting' } })).content[0].text);
   assert.match(r.link, /^https:\/\/gifos\.app\/run\.html#v=[0-9a-z]{24}$/);
   const l = JSON.parse((await client.callTool({ name: 'list_meetings', arguments: {} })).content[0].text);

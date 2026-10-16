@@ -1,7 +1,6 @@
-// The live transcript the user's assistant tails. Speech comes from Meeting
-// Bot's captions. Voice lines are what the speaking model said. Say lines are
-// interjections from the assistant. The file is mode 0600 and never holds the
-// API key (callers scrub before append).
+// The live transcript the user's assistant tails. Lines are Meet Bot's
+// captions (MeetingBot.transcript), not a second listener. The file is mode
+// 0600. Callers scrub secrets before append.
 import fs from 'node:fs';
 import path from 'node:path';
 

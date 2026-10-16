@@ -2,10 +2,8 @@
 
 # gifos-mcp: GifOS Meet connector for Grok Bot
 
-`gifos-mcp` is an [MCP](https://modelcontextprotocol.io) server that lets an assistant create
+`gifos-mcp` is an [MCP](https://modelcontextprotocol.io) server that lets Grok Bot (or any MCP client) create
 [GifOS](https://gifos.app) meetings, put a note-taking bot in them, and read back the transcript.
-It can also join a meeting as a participant that hears and speaks. That mode is described in
-[docs/PARTICIPANT.md](docs/PARTICIPANT.md).
 
 It runs **on your own computer**. It starts a headless Chromium running GifOS, installs the **Meeting Bot** app
 from the GifOS app store, and drives it. Meetings stay peer to peer between the people in them. Transcripts stay
@@ -21,29 +19,30 @@ Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium (one p
                                          └─ GifOS desktop
                                               ├─ Meeting Bot, running as the bot (RUN mode)
                                               │    driven through its local control API, window.MeetingBot v1
-                                              ├─ Offline Captions (Whisper), the speech-to-text provider
-                                              └─ Kokoro, the text-to-speech provider
-                                                   Piper replaces Kokoro on a smaller machine, or if Kokoro cannot start
+                                              └─ Offline Captions (Whisper), the speech-to-text provider
 ```
 
 - `create_meeting` only mints a meeting link. Nothing joins yet.
 - `start_meeting` or `join_meeting` sends the bot into the meeting. Everyone in the meeting sees it as a tile
-  labelled **🤖 bot** with a **📝 transcribing** chip. The bot has no camera and never sends audio.
+  labelled **🤖 bot** with a **📝 transcribing** chip. The bot has no camera. This server does not play audio.
 - Speech is turned into text on your computer by the Offline Captions (Whisper) app from the GifOS store. The bot
   writes down each participant who is unmuted, credited by name. It never writes down its own machine's
   microphone.
-- The computer's voice is [Kokoro](#text-to-speech), installed from the store and assigned to Text → speech.
-  Piper is used only when this machine is too small for Kokoro, or when Kokoro cannot start.
 - `get_transcript` reads the transcript straight from the bot. Meeting Bot's
   [control contract](https://github.com/nwcnwc/gifos-apps-source/blob/meet-bot/meeting-bot/CONTROL.md) (version 1)
-  is the only interface this server relies on.
+  is the only interface this server relies on. The voice handoff is written up in
+  [docs/MEETBOT-BRIDGE.md](docs/MEETBOT-BRIDGE.md).
 
-**Meeting voice is a second, smaller model.** When you set `GIFOS_LLM_KEY`, a streaming chat model speaks in the
-meeting. It is any OpenAI-compatible `POST /chat/completions` endpoint (the suggested default is xAI Grok). The
-request is messages only: no tools and no function calls. It waits for a short pause, streams the reply, and
-plays the first short clause out loud before the rest of the sentence has arrived. Your own assistant is still
-the one that tails the live transcript (`gifos://meeting/{id}/transcript`, or `tail_transcript`) and can cut in
-with `say`. After the meeting, that assistant does the notes, mail, and calendar work. The speaking model cannot.
+**The only AI in the meeting is Meet Bot.** This server launches the signed Meeting Bot app from the GifOS store
+in a headless browser and passes commands through `window.MeetingBot`. It does not join as a second participant
+and it does not call a model. Meet Bot has two switches: respond to commands (on or off) and conversation voice
+(`none`, Grok Voice, or a local LLM with Kokoro). A local LLM is any OpenAI-compatible endpoint, with your own
+key. The suggested default is xAI Grok (`grok-4.20-0309-non-reasoning`). Those settings are handed to Meet Bot
+with `set_voice`. Until the app accepts them, the tool reports the gap and this server does not imitate speech.
+
+Your own assistant tails the live transcript (`gifos://meeting/{id}/transcript`, or `tail_transcript`) and can
+cut in with `say`, which Meet Bot speaks. After the meeting, that assistant does the notes, mail, and calendar
+work.
 
 **Grok Bot does the timing and the invites.** A Grok Bot routine calls `start_meeting` at meeting time. Invites
 go out through your own email or calendar connector in Grok Bot, and you approve each send. This server never
@@ -56,9 +55,7 @@ already runs Grok Bot is the best place.
 ## Install
 
 You need **Node.js 20 or newer**. The first start downloads Chromium for Playwright (about 150 MB), and the
-first transcription downloads the Whisper model (about 77 MB). The first time Kokoro speaks, GifOS downloads
-its voice weights (about 163 MB). Piper, the fallback voice, is a separate local program — see
-[Text to speech](#text-to-speech).
+first transcription downloads the Whisper model (about 77 MB).
 
 Run it straight from GitHub:
 
@@ -119,10 +116,6 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_RELAY` | GifOS default | A custom relay (`wss://…`) for self-hosted GifOS. It is added to meeting links. |
 | `GIFOS_BOT_NAME`, `GIFOS_BOT_PASSWORD` | generated | The Meeting Bot name and password. They derive the bot's secret admin meeting. The name is what participants see. If unset, a strong pair is generated once and kept in `GIFOS_MCP_HOME/bot.json` (mode 0600). |
 | `GIFOS_STT_APP` | `offline-stt-whisper` | The store app that turns speech into text. `none` turns transcription off. |
-| `GIFOS_TTS_ENGINE` | `auto` | `auto` uses Kokoro when the machine has at least 4 CPUs and 8 GiB of RAM, and Piper otherwise. `kokoro` or `piper` forces that engine. `none` turns text-to-speech off. |
-| `GIFOS_TTS_VOICE` | engine default | Kokoro default `af_heart`. Piper default `en_US-lessac-medium`. |
-| `GIFOS_PIPER_BIN` | `piper` | The Piper program. Used only when Piper is the selected engine. |
-| `GIFOS_PIPER_MODEL` | none | Path to a Piper `.onnx` voice file. Piper is not ready until this file exists. |
 | `GIFOS_MCP_HOME` | `~/.gifos-mcp` | The browser profile, the bot credential, and `meetings.json`. |
 | `GIFOS_HEADLESS` | `1` | `0` shows the browser windows, which helps when debugging. |
 | `GIFOS_CHROME` | Playwright's Chromium | Path to another Chromium or Chrome binary. |
@@ -131,64 +124,17 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_MCP_LAZY` | `0` | `1` starts the browser on the first tool call instead of at launch. |
 | `GIFOS_MCP_DEBUG` | `0` | `1` logs the GifOS console to stderr and adds per-meeting caption state to `status`. |
 | `GIFOS_MCP_SHOTS` | none | A folder for screenshots of the bot's screens (for debugging). |
-| `GIFOS_STT`, `GIFOS_STT_MODEL`, `GIFOS_STT_THREADS` | faster-whisper, `base.en`, 4 | Local speech-to-text. `tiny.en` or `small.en` change the model. `whisper.cpp` is optional. |
-| `GIFOS_TTS`, `GIFOS_TTS_VOICE` | Kokoro, `af_heart` | Local text-to-speech. `piper` and `espeak` are optional subprocesses. |
-| `GIFOS_STT_URL`, `GIFOS_TTS_URL` | empty | OpenAI-compatible HTTP stand-ins. See [docs/PARTICIPANT.md](docs/PARTICIPANT.md). |
-
-## Text to speech
-
-Kokoro is the default open-source voice for this connector. It is the GifOS store app **Offline Neural TTS
-(Kokoro)**, app id `offline-tts-kokoro`. On startup the connector installs that app into the bot's Providers
-folder and assigns it to **Text → speech**, the same way it assigns Whisper to speech → text. Kokoro runs
-inside GifOS, on this computer. It does not need an account or an API key. The weights are the app's pinned
-download (about 163 MB), fetched once by GifOS the first time the voice is used.
-
-`status` reports the choice under `tts`:
-
-| Field | Meaning |
-|---|---|
-| `engine` | `kokoro`, `piper`, or `none`. |
-| `requested` | The value of `GIFOS_TTS_ENGINE` (`auto` when unset). |
-| `voice` | The voice name in use. |
-| `fallback` | `true` when Piper was chosen because Kokoro was not. |
-| `reason` | `default`, `configured`, `weaker-machine`, `kokoro-unavailable`, `kokoro-failed`, or `disabled`. |
-| `app` | `offline-tts-kokoro` while Kokoro is the engine. |
-| `ready` | Kokoro is installed and assigned, or Piper's program and voice file are both present. |
-
-### Choosing the engine
-
-Leave `GIFOS_TTS_ENGINE` unset, or set it to `auto`.
-
-- A machine with **at least 4 CPUs and 8 GiB of RAM** gets Kokoro.
-- A machine under either of those limits gets Piper, with `tts.fallback` true and `tts.reason` `weaker-machine`.
-- `GIFOS_TTS_ENGINE=kokoro` asks for Kokoro even on a small machine. If the install then fails and Piper is
-  ready, the connector switches to Piper (`reason` `kokoro-failed`) and still finishes starting.
-- `GIFOS_TTS_ENGINE=piper` uses Piper on every machine.
-- `GIFOS_TTS_ENGINE=none` does not install a voice. Transcription is unchanged.
-
-Kokoro voices are `af_heart` (the default), `af_bella`, `af_nicole`, `af_sarah`, `am_michael`, `am_fenrir`,
-`bf_emma`, and `bm_george`. Set `GIFOS_TTS_VOICE` to one of them.
-
-### Piper setup
-
-Piper is the fast local fallback. Install it on the computer from the
-[Piper project](https://github.com/OHF-Voice/piper1-gpl) (`pip install piper-tts`, or a release binary) and
-download a voice. `en_US-lessac-medium` is the default name this connector uses; the project's
-[voice list](https://github.com/rhasspy/piper/blob/master/VOICES.md) has the other ids. Point
-`GIFOS_PIPER_MODEL` at that voice's `.onnx` file:
-
-```sh
-pip install piper-tts
-# Download en_US-lessac-medium.onnx (and its .onnx.json) from the Piper voice list, then:
-export GIFOS_PIPER_MODEL=/path/to/en_US-lessac-medium.onnx
-export GIFOS_PIPER_BIN=piper   # omit this when piper is already on PATH
-```
-
-In the Grok Bot MCP config, the same variables go in `env` next to `GIFOS_URL`. `tts.ready` is true once the
-model file and the program are both found. Until then the log says Piper is not ready. The connector still
-starts, and speech-to-text still runs. If Kokoro fails to install and Piper is absent, `status` keeps
-`engine` as `kokoro` with `ready` false. Once Piper's program and voice file are both present, that failure
-switches the engine to Piper.
+| `GIFOS_LLM_KEY` | none | Your key for Meet Bot's local LLM. It is not logged and not put in a tool result. It is sent into the page only when `MeetingBot.setVoice` exists. Leave it unset and conversation voice stays off unless you set `GIFOS_CONVERSATION_VOICE`. |
+| `GIFOS_LLM_URL` | `https://api.x.ai/v1` when a key is set | OpenAI-compatible base URL, handed to Meet Bot as its local-LLM setting. This server does not call it. |
+| `GIFOS_LLM_MODEL` | `grok-4.20-0309-non-reasoning` on that host | Model name handed to Meet Bot. That suggested model does not spend a reasoning pass before the first word. Required when the URL is not xAI and conversation voice is `local`. |
+| `GIFOS_CONVERSATION_VOICE` | `local` when a key or URL is set, otherwise `none` | `none`, `grok` (Grok Voice), or `local` (the configured LLM, then Kokoro). Meet Bot owns the voice. |
+| `GIFOS_RESPOND_TO_COMMAND` | on | `0` tells Meet Bot not to answer commands it hears. |
+| `GIFOS_VOICE` | follows the settings above | `0` forces conversation voice `none`. Tailing the transcript still works. |
+| `GIFOS_TRANSCRIPT_POLL_MS` | `500` | How often captions are copied from Meet Bot into the live transcript. |
+| `GIFOS_TTS_ENGINE` | `kokoro` | Passed to Meet Bot with local voice. `auto` and `kokoro` name the store app `offline-tts-kokoro` (voice `af_heart`). `none` turns that off. This server does not install or run it. |
+| `GIFOS_TTS_VOICE` | `af_heart` | Kokoro voice name, passed through with local voice. |
+| `GIFOS_TTS_URL` | empty | HTTP speech stand-in for Meet Bot's local voice. Replaces Kokoro in the setting. Not requested by this server. `GIFOS_TTS_ENGINE=none` wins. |
+| `GIFOS_STT_URL` | empty | HTTP caption stand-in passed to Meet Bot on `set_voice`. v1 transcription still uses `GIFOS_STT_APP`. Not requested by this server. |
 
 ## Tools
 
@@ -199,28 +145,23 @@ switches the engine to Piper.
 | `join_meeting` | `link`, `password?`, `topic?` | The bot joins someone else's GifOS meeting (`…/run.html#v=…` or `…/meet/…`). Returns a `meeting_id`. |
 | `mute` | `meeting_id` | The bot stops transcribing, and the transcribing chip goes away. The bot never sends audio, so this is the only mute it has. |
 | `unmute` | `meeting_id` | The bot transcribes again. |
-| `share_content` | `meeting_id`, `text` | Posts text or a link (up to 2000 characters) into the meeting chat as the bot. There is no screen sharing, because the bot has no screen. |
+| `share_content` | `meeting_id`, `text` | Posts text or a link (up to 2000 characters) into the meeting chat as the bot. There is no screen sharing, because the bot has no screen. This is chat, not speech. |
 | `get_transcript` | `meeting_id` | Plain text, one `speaker: words` line per caption. Works while the meeting is live and after `end_meeting`. |
-| `tail_transcript` | `meeting_id`, `since?` | New live lines since `since` (a `seq` from the previous tail). Each line is `{seq, ts, speaker, text, kind}` and `kind` is `speech`, `voice`, or `say`. Works while the meeting is live and after `end_meeting`. |
-| `say` | `meeting_id`, `text` | Speaks the text now and stops whatever the speaking model was saying. This is how your assistant interjects. |
-| `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. The speaking model stops. Everyone else can stay, because GifOS meetings have no owner who can close them. |
-
-The resource `gifos://meeting/{id}/transcript` is the same live transcript as `tail_transcript`, as newline-delimited JSON. A client can subscribe and receive `notifications/resources/updated`.
+| `tail_transcript` | `meeting_id`, `since?` | New caption lines since `since` (a `seq` from the previous tail). Each line is `{seq, ts, speaker, text, kind}` and `kind` is `speech`. Lines come from Meet Bot. Works while the meeting is live and after `end_meeting`. |
+| `set_voice` | `respond_to_command?`, `conversation_voice?` | Hands Meet Bot the two switches (`none`, `grok`, or `local`). The URL, model, and key always come from the environment. The key is not an argument and is not returned. |
+| `say` | `meeting_id`, `text` | Passes a spoken line to Meet Bot (`MeetingBot.interject`), ahead of conversation voice. This server does not synthesize it. Errors until Meet Bot grows that method. |
+| `send_chat` | `meeting_id`, `text` | Posts chat through Meet Bot (`MeetingBot.say`), the same channel as `share_content`. |
+| `raise_hand` | `meeting_id`, `on` | `MeetingBot.raiseHand`. Reports the gap on contract version 1. |
+| `set_mic` | `meeting_id`, `on` | `MeetingBot.setMic`. Reports the gap on contract version 1, which gives the bot no microphone. |
+| `set_camera` | `meeting_id`, `on` | `MeetingBot.setCamera`. Reports the gap on contract version 1, which gives the bot no camera. |
+| `get_meeting_state` | `meeting_id` | Who is here (`people`). Hand, microphone, and camera when Meet Bot reports them. |
+| `snapshot` | `meeting_id` | Read-only. People, plus a PNG of the Meet Bot page this server already runs. |
+| `leave_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Same outcome as `end_meeting`. |
+| `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Everyone else can stay, because GifOS meetings have no owner who can close them. |
 | `list_meetings` | none | Every meeting this server created or joined, with its state (`scheduled`, `live` or `ended`). |
-| `status` | none | Browser state, bot name, the bot's live sessions, and its last heartbeat. |
-| `join_meeting_as_participant` | `url`, `display_name`, `password?`, `avatar?` | Join as a person with a mic, a camera card, and a 🤖 badge. |
-| `get_new_utterances` | `since?`, `wait_ms?` | New per-speaker lines, plus `turn_hint`. |
-| `say` | `text`, `voice?`, `interruptible?` | Speak through the participant mic. |
-| `stop_speaking` | none | Cut the current line. |
-| `send_chat` | `text` | Post chat as the participant. |
-| `raise_hand` | `on` | Raise or lower the hand. |
-| `set_mic`, `set_camera` | `on` | Mute or show the camera. |
-| `get_meeting_state` | none | Who is here, who is talking, hand, mic, camera. |
-| `snapshot` | none | Read-only state plus a PNG of the current view, logged in the transcript. |
-| `leave_meeting` | none | Leave the participant session. |
-| `set_switches` | `respond_to_command?`, `conversation_voice?` | `respond_to_command` is on or off. `conversation_voice` is `none`, `grok` (Grok Voice), or `local` (local LLM plus Kokoro). Conversation voice yields while a command reply speaks. |
+| `status` | none | Browser state, bot name, the bot's live sessions, and whether the voice setting was handed over. The endpoint and the key are not included. |
 
-Participant mode has its own browser and a local voice sidecar (Kokoro and faster-whisper). The resource `gifos://meeting/<id>/transcript` is the live JSONL transcript. The prompt `meeting_participant_etiquette` splits the speaking loop (say, stop_speaking, snapshot) from the outer agent that watches the transcript and uses the other tools. Details are in [docs/PARTICIPANT.md](docs/PARTICIPANT.md). Benchmarks are in [docs/STT-BENCH.md](docs/STT-BENCH.md).
+The resource `gifos://meeting/{id}/transcript` is the same live transcript as `tail_transcript`, as newline-delimited JSON tailed from Meet Bot. A client can subscribe and receive `notifications/resources/updated`.
 
 Errors come back as MCP tool errors with a readable message, for example `Unknown meeting_id …` or
 `Meeting m_… is scheduled. Call start_meeting first.`
@@ -229,26 +170,23 @@ Errors come back as MCP tool errors with a readable message, for example `Unknow
 
 The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, take notes, and send me a summary."*
 
-1. **Invite (now).** Grok Bot calls `create_meeting({topic: "Demo meeting", start_time: "17:00", room_password: "..."})`
-   and gets a plain `link` plus `invite_email` and `invite_calendar`. The room password is a separate line the
-   guest types. It is not placed inside the link. The bot's admin password is not in that text. Grok Bot drafts
-   the calendar event from `invite_calendar` in the user's own calendar. The user approves the send. Paid
-   one-click links that would sign a guest in with the password already applied are not available.
+1. **Invite (now).** Grok Bot calls `create_meeting({topic: "Demo meeting", start_time: "17:00"})` and gets a
+   `link`. It drafts a calendar invite to Alice and Bob containing the link, in the user's own calendar. The
+   user approves the send.
 2. **Timing (a routine at 17:00).** Grok Bot calls `start_meeting({meeting_id})`. The bot joins and transcribes.
    `gifos-mcp` has to be running at this point.
 3. **Meeting (17:00 onward).** Alice and Bob open the link and see the 🤖 bot tile with the transcribing chip.
-   If `GIFOS_LLM_KEY` is set, the speaking model talks with them and has no tools. Grok Bot tails
+   If the voice setting was handed over, Meet Bot talks (Grok Voice, or the local LLM). Grok Bot tails
    `gifos://meeting/{id}/transcript` (or calls `tail_transcript`) and can `say` a line of its own. Grok Bot can
    `share_content` the agenda. When the meeting is over (a second routine, or the user saying so),
-   Grok Bot calls `end_meeting` and reads the transcript, writes the summary, and drafts it to the user.
-   The speaking model is already stopped and cannot send that mail.
+   Grok Bot calls `end_meeting`, reads the transcript, writes the summary, and drafts it to the user.
+   This server does not send that mail.
 
 ## Privacy and security
 
-- **Everything runs locally.** The browser, the bot, speech-to-text (Whisper runs inside the browser),
-  text-to-speech (Kokoro inside GifOS, or Piper as a local program), and the transcripts are all on your
-  machine. Media goes peer to peer between participants. GifOS's relay only helps peers find each other.
-  Neither voice needs an account or an API key.
+- **Everything runs locally.** The browser, the bot, speech-to-text (Whisper runs inside the browser) and the
+  transcripts are all on your machine. Media goes peer to peer between participants. GifOS's relay only helps
+  peers find each other.
 - **Consent is visible.** The bot is labelled 🤖 bot and shows 📝 transcribing whenever it listens. `mute`
   removes the chip.
 - **The bot never uses your microphone or camera.** It joins with no camera, Meeting Bot never transcribes its
@@ -258,19 +196,13 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
   `GIFOS_MCP_HOME/bot.json` private (it is mode 0600), or pass the pair through environment variables. Anyone
   with the pair can command the bot.
 - **Meeting links are capabilities.** Anyone with a link can join that meeting, so share links only with the
-  people you invite. A room password, when you set one, goes in the email or calendar text as its own line.
-  It is never written into the link. The bot admin password is never written into an email, an invite, a
-  transcript, or a tool result.
-- **Providers stay on this machine.** gifos-mcp registers Whisper speech-to-text, Kokoro speech, an
-  OpenAI-compatible conversation model, and Grok Bot say with Meet Bot. `GIFOS_LLM_KEY` is read here and is
-  not sent to the meeting, the bot's page, or tool results. Set `GIFOS_LLM_URL` to your own endpoint
-  (for example `https://api.x.ai/v1`) and `GIFOS_LLM_MODEL` to the model name. Leave them unset and the bot
-  stays agent-driven.
+  people you invite.
 - **Transcripts are stored** in `GIFOS_MCP_HOME/meetings.json` (mode 0600) so they survive restarts. Delete the
   file to forget them.
-- **The speaking model has no tools.** Its request body is `model`, `messages`, and `stream`. `GIFOS_LLM_KEY`
-  is read on this machine and sent only as an `Authorization` header to the endpoint you configured. It is not
-  written into the meeting page, the transcript, or tool results. Leave the key unset and nothing is called.
+- **This server does not call a model.** `GIFOS_LLM_KEY` is read on this machine and handed to Meet Bot only
+  when `MeetingBot.setVoice` already exists, and only for conversation voice `local`. It is not logged, not
+  written into a tool result, and not put in the page when that method is missing. Leave the key unset and
+  conversation voice stays `none` unless you ask for Grok Voice.
 - **No outgoing messages.** The server never sends email, calendar invites or anything else. Grok Bot does that
   through your own connectors, and you approve each send. Follow-up after the meeting is Grok Bot's job.
 - **HTTP mode** binds to 127.0.0.1, checks the `Host` header (DNS-rebinding protection), and can require a
@@ -281,8 +213,6 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 | Symptom | Fix |
 |---|---|
 | `The GifOS store at … has no "meeting-bot" app` | That GifOS is older than 0.9.23. Set `GIFOS_URL` to a 0.9.23 or newer site. |
-| Log says `Kokoro was not used` and names `offline-tts-kokoro` | That GifOS store has no Kokoro provider. The connector switches to Piper when Piper is ready. Otherwise set `GIFOS_TTS_ENGINE=none`, or point `GIFOS_URL` at a site whose store includes Kokoro. |
-| `status` shows `tts.engine` `piper` and `tts.ready` false | Piper was selected and is not set up. Install Piper and set `GIFOS_PIPER_MODEL`. See [Text to speech](#text-to-speech). |
 | `The store refused to install meeting-bot: Needs a newer GifOS` | Same cause: the site's build is older than the one Meeting Bot needs. |
 | `Meeting Bot did not start: A bot with this name and password is already running…` | Another `gifos-mcp` (or a Meeting Bot window) uses the same name and password. Stop it, or give this one its own `GIFOS_MCP_HOME` or `GIFOS_BOT_NAME`/`GIFOS_BOT_PASSWORD`. |
 | `get_transcript` stays at `(no transcript lines yet)` | Somebody has to speak with their mic on. The first transcription downloads the Whisper model (about 77 MB), which takes a minute. Run with `GIFOS_MCP_DEBUG=1` and call `status` to see each meeting's caption state. |
@@ -302,8 +232,9 @@ npm install
 npm test
 ```
 
-These run the tools over a real MCP client/server pair with a fake bot and a fake participant, plus the `--http` transport through
-the real binary. `npm run test:participant` is the live hearing and speaking check; it needs `GIFOS_URL`, `GIFOS_RELAY`, and `GIFOS_MCP_HOME`.
+These run the tools over a real MCP client/server pair with a fake bot, plus the `--http` transport through
+the real binary. Voice tests check that the local-LLM setting is handed to Meet Bot and that this process
+does not call a model.
 
 **2. Try it live (needs GifOS 0.9.23 or newer on gifos.app).**
 

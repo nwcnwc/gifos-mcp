@@ -1,31 +1,36 @@
 // The MCP tools. Everything that touches a browser goes through `bot` (the
 // MeetingBotDriver in driver.js, or a fake in the unit tests).
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
-import { etiquetteResult } from './participant/etiquette.js';
-import { withAiBadge } from './participant/names.js';
-import { formatInvite, plainLink, scrub, PASSWORD_LINK_NOTE } from './invite.js';
-import { providerPublic, providerRegistration } from './providers/registry.js';
-import { SpeechTurn } from './providers/speech.js';
+import { LiveTranscript } from './voice/live.js';
+import { CAMERA_GAP, CONTROLS_GAP, HAND_GAP, INTERJECT_GAP, MIC_GAP, SNAPSHOT_GAP, VOICE_GAP, scrub, voicePublic, voiceSettings } from './voice/settings.js';
 
 export const VERSION = '0.3.0';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
-const SubscribeRequestSchema = z.object({
-  method: z.literal('resources/subscribe'),
-  params: z.object({ uri: z.string() }).passthrough(),
-}).passthrough();
-const UnsubscribeRequestSchema = z.object({
-  method: z.literal('resources/unsubscribe'),
-  params: z.object({ uri: z.string() }).passthrough(),
-}).passthrough();
-
-export function createServer({ cfg, meetings, bot, participant, adminPassword, speech }) {
+export function createServer({ cfg, meetings, bot, live, captions, botName }) {
   const server = new McpServer({ name: 'gifos-mcp', version: VERSION });
-  const turn = speech || new SpeechTurn();
-  const secret = String(adminPassword || '');
+  const transcript = live || new LiveTranscript(cfg.home);
+  const secret = (cfg.voice && cfg.voice.key) || '';
+  const choice = {
+    respondToCommand: cfg.voice.respondToCommand,
+    conversationVoice: cfg.voice.conversationVoice,
+  };
+  let handed = null;
+  const currentVoice = () => ({ ...cfg.voice, respondToCommand: choice.respondToCommand, conversationVoice: choice.conversationVoice });
+  async function applyVoice() {
+    const settings = voiceSettings(currentVoice());
+    if (typeof bot.setVoice !== 'function') {
+      handed = { applied: false, gap: VOICE_GAP };
+      return handed;
+    }
+    handed = await bot.setVoice(settings);
+    return handed;
+  }
+
   function ok(obj) {
     const raw = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
     return { content: [{ type: 'text', text: scrub(raw, secret) }] };
@@ -33,36 +38,6 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
   function fail(message) {
     return { isError: true, content: [{ type: 'text', text: scrub(message, secret) }] };
   }
-  const subs = new Set();
-  server.server.registerCapabilities({ resources: { subscribe: true } });
-  server.server.setRequestHandler(SubscribeRequestSchema, async (request) => {
-    if (request && request.params && request.params.uri) subs.add(String(request.params.uri));
-    return {};
-  });
-  server.server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
-    if (request && request.params && request.params.uri) subs.delete(String(request.params.uri));
-    return {};
-  });
-  if (participant) {
-    participant._transcriptNotify = (entry) => {
-      if (!entry || !entry.meeting_id) return;
-      const uri = 'gifos://meeting/' + entry.meeting_id + '/transcript';
-      if (!subs.has(uri)) return;
-      server.server.sendResourceUpdated({ uri }).catch(() => {});
-    };
-    if (!participant._transcriptHooked) {
-      participant._transcriptHooked = true;
-      const prev = participant.onTranscript;
-      participant.onTranscript = (entry) => {
-        if (typeof prev === 'function') prev(entry);
-        if (typeof participant._transcriptNotify === 'function') participant._transcriptNotify(entry);
-      };
-    }
-  }
-  const part = () => {
-    if (!participant) throw new Error('Participant mode is not available in this process.');
-    return participant;
-  };
 
   // Wraps a handler: known meeting, readable errors.
   const guarded = (fn) => async (args) => {
@@ -83,13 +58,11 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
     await bot.ensureStarted();
     const sessionId = await bot.join(m.link, password || '');
     await bot.transcribe(sessionId, true);
-    if (typeof bot.registerProviders === 'function') await bot.registerProviders(providerRegistration());
-    if (typeof bot.setSwitches === 'function') await bot.setSwitches(turn.public());
-    return meetings.update(m.meeting_id, {
+    const updated = meetings.update(m.meeting_id, {
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
     });
-    if (voice && voice.openMeeting) voice.openMeeting(m.meeting_id);
+    await applyVoice();
     if (captions) await captions.start(updated);
     return updated;
   }
@@ -100,22 +73,12 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
     inputSchema: {
       topic: z.string().min(1).max(200).describe('What the meeting is about, e.g. "Demo meeting".'),
       start_time: z.string().max(64).optional().describe('When it should start, e.g. "2026-10-15T17:00:00-07:00". Informational only.'),
-      room_password: z.string().max(200).optional().describe('Room password guests type to join. It is returned beside the link, never inside it.'),
     },
-  }, guarded(async ({ topic, start_time, room_password }) => {
+  }, guarded(async ({ topic, start_time }) => {
     const room = newRoom();
-    const link = plainLink(linkFor(cfg.gifosUrl, room, cfg.relay), room_password || '');
-    const m = meetings.add({
-      topic, start_time: start_time || null, room, link,
-      room_password: room_password || '',
-    });
-    const invite = formatInvite({ topic, link: m.link, roomPassword: room_password || '', startTime: start_time || '' });
-    return ok({ meeting_id: m.meeting_id, link: invite.link, topic: m.topic, start_time: m.start_time,
-      room_password: room_password || '',
-      invite_email: invite.email,
-      invite_calendar: invite.calendar,
-      password_links: PASSWORD_LINK_NOTE,
-      note: 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then. Put invite_email in the email and invite_calendar in the calendar event. The link stays plain.' });
+    const m = meetings.add({ topic, start_time: start_time || null, room, link: linkFor(cfg.gifosUrl, room, cfg.relay) });
+    return ok({ meeting_id: m.meeting_id, link: m.link, topic: m.topic, start_time: m.start_time,
+      note: 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then.' });
   }));
 
   server.registerTool('start_meeting', {
@@ -124,7 +87,6 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
     inputSchema: { meeting_id: meetingId },
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
-    if (m.mode === 'participant') return fail('Meeting ' + meeting_id + ' is a participant session. Use leave_meeting to leave it.');
     if (m.state === 'live') return ok({ ...publicView(m), note: 'Already live.' });
     return ok(publicView(await enter(m)));
   }));
@@ -140,12 +102,10 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
   }, guarded(async ({ link, password, topic }) => {
     const room = roomFromLink(link);
     if (!room) return fail('That is not a GifOS meeting link (expected …/run.html#v=<room> or …/meet/<room>).');
-    const clean = plainLink(link, password || '');
     let m = meetings.byRoom(room);
     if (m && m.state === 'live') return ok({ ...publicView(m), note: 'Already in this meeting.' });
-    if (!m) m = meetings.add({ topic: topic || '', room, link: clean, room_password: password || '' });
-    else if (m.link !== clean) meetings.update(m.meeting_id, { link: clean });
-    return ok(publicView(await enter(meetings.get(m.meeting_id), password)));
+    if (!m) m = meetings.add({ topic: topic || '', room, link });
+    return ok(publicView(await enter(m, password)));
   }));
 
   server.registerTool('mute', {
@@ -188,7 +148,7 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
     if (m.state === 'live' && m.session_id) {
-      const text = scrub(await bot.transcript(m.session_id), secret);
+      const text = await bot.transcript(m.session_id);
       meetings.update(m.meeting_id, { transcript: text });
       transcript.ingestCaption(m.meeting_id, text, botName);
       return ok(text || '(no transcript lines yet)');
@@ -197,27 +157,26 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
     return fail('Meeting ' + meeting_id + ' has not started, so there is no transcript.');
   }));
 
+  async function depart(m) {
+    if (captions) captions.stop(m.meeting_id);
+    let text = m.transcript || '';
+    try { text = await bot.transcript(m.session_id); } catch (e) { /* keep the last copy */ }
+    transcript.ingestCaption(m.meeting_id, text, botName);
+    await bot.leave(m.session_id);
+    const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false,
+      transcript: text, ended_at: new Date().toISOString() });
+    return { done, lines: text ? text.split('\n').length : 0 };
+  }
+
   server.registerTool('end_meeting', {
     title: 'End the meeting for the bot',
     description: 'Saves the transcript, then the bot leaves. Other participants can stay; GifOS meetings have no owner who can close them for everyone.',
     inputSchema: { meeting_id: meetingId },
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
-    if (m.mode === 'participant') {
-      if (participant && participant.meetingId === m.meeting_id) await participant.leave();
-      const left = meetings.get(m.meeting_id) || m;
-      if (left.state === 'live') meetings.update(m.meeting_id, { state: 'ended', ended_at: new Date().toISOString(), session_id: null });
-      return ok({ ...publicView(meetings.get(m.meeting_id) || left), note: 'Left the meeting.' });
-    }
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
-    if (voice) voice.closeMeeting(m.meeting_id);
-    if (captions) captions.stop(m.meeting_id);
-    let text = m.transcript || '';
-    try { text = scrub(await bot.transcript(m.session_id), secret); } catch (e) { /* keep the last copy */ }
-    await bot.leave(m.session_id);
-    const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false,
-      transcript: text, ended_at: new Date().toISOString() });
-    return ok({ ...publicView(done), transcript_lines: text ? text.split('\n').length : 0 });
+    const left = await depart(m);
+    return ok({ ...publicView(left.done), transcript_lines: left.lines });
   }));
 
   server.registerTool('list_meetings', {
@@ -230,7 +189,7 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
 
   server.registerTool('status', {
     title: 'Connector status',
-    description: 'Is the headless GifOS browser up, which GifOS it uses, which text-to-speech engine is selected, and which meetings the bot is in right now.',
+    description: 'Is the headless GifOS browser up, which GifOS it uses, and which meetings the bot is in right now.',
     inputSchema: {},
   }, guarded(async () => {
     const info = await bot.info();
@@ -238,155 +197,227 @@ export function createServer({ cfg, meetings, bot, participant, adminPassword, s
       version: VERSION,
       gifos_url: cfg.gifosUrl,
       stt_app: cfg.sttApp || null,
-      tts: ttsPublic(cfg.tts, info && info.tts),
       live_meetings: meetings.all().filter((m) => m.state === 'live').map((m) => m.meeting_id),
-      voice: voicePublic(cfg.voice),
+      voice: voicePublic(currentVoice(), handed),
       bot: info,
-      participant: participant ? participant.info() : null,
-      switches: turn.public(),
-      providers: providerPublic(process.env),
     });
   }));
 
-  server.registerTool('set_switches', {
-    title: 'Set how the bot answers and speaks',
-    description: 'Two switches. respond_to_command turns replies to commands in the meeting on or off. conversation_voice is none, grok (Grok Voice, using your own key on this machine), or local (local LLM plus Kokoro). Conversation voice stops while a command reply is speaking.',
+  server.registerTool('set_voice', {
+    title: 'Hand Meet Bot its voice switches',
+    description: 'Passes respond_to_command and conversation_voice (none, grok, or local) through to Meet Bot. local uses the OpenAI-compatible endpoint configured in the environment. This server does not call the model. The key is not an argument and is not returned.',
     inputSchema: {
-      respond_to_command: z.boolean().optional().describe('When true, the bot answers commands it hears. When false, it stays quiet for those.'),
-      conversation_voice: z.enum(['none', 'grok', 'local']).optional().describe('none, grok (Grok Voice), or local (local LLM plus Kokoro).'),
+      respond_to_command: z.boolean().optional().describe('When true, Meet Bot may answer commands it hears. When false, it does not.'),
+      conversation_voice: z.enum(['none', 'grok', 'local']).optional().describe('none, grok (Grok Voice), or local (the configured LLM, then Kokoro).'),
     },
   }, guarded(async ({ respond_to_command, conversation_voice }) => {
-    const next = turn.set({ respond_to_command, conversation_voice });
-    if (typeof bot.setSwitches === 'function') await bot.setSwitches(next);
-    return ok(next);
+    if (conversation_voice === 'local' && (!cfg.voice.url || !cfg.voice.model)) {
+      throw new Error('conversation_voice local needs GIFOS_LLM_URL and GIFOS_LLM_MODEL. A GIFOS_LLM_KEY alone selects the suggested xAI endpoint.');
+    }
+    if (respond_to_command !== undefined) choice.respondToCommand = !!respond_to_command;
+    if (conversation_voice) choice.conversationVoice = conversation_voice;
+    return ok(voicePublic(currentVoice(), await applyVoice()));
   }));
 
-  const meetingUrl = z.string().url().max(2048).describe('The GifOS meeting link (…/run.html#v=… or …/meet/…).');
-
-  server.registerTool('join_meeting_as_participant', {
-    title: 'Join a GifOS meeting as a participant',
-    description: 'Joins the meeting as a real participant with a live microphone and a camera card. The display name always keeps a robot badge so people can see an AI is present. On the first other person, the server says in chat and out loud that it is an AI assistant, that it transcribes speech so it can take part, and that it is not recording.',
+  server.registerTool('tail_transcript', {
+    title: 'Tail the live transcript',
+    description: 'New caption lines since `since` (the seq from the previous tail, or 0). Each line is {seq, ts, speaker, text, kind} and kind is speech. Lines come from Meet Bot. Works while the meeting is live and after it ends. The same bytes are the gifos://meeting/{id}/transcript resource.',
     inputSchema: {
-      url: meetingUrl,
-      password: z.string().max(200).optional().describe('The meeting password, if the meeting has one.'),
-      display_name: z.string().min(1).max(80).describe('The name on the tile. A robot badge is added if you leave it off. GifOS keeps 40 characters.'),
-      avatar: z.string().max(2048).optional().describe('Image or GIF path or URL used as the camera. Default is a generated robot card.'),
+      meeting_id: meetingId,
+      since: z.number().int().min(0).optional().describe('Return lines with a seq greater than this. Omit or pass 0 to read from the start.'),
     },
-  }, guarded(async ({ url, password, display_name, avatar }) => {
-    const joined = await part().join({ url, password, display_name, avatar });
-    return ok({ ...joined, display_name: withAiBadge(joined.display_name || display_name) });
-  }));
-
-  server.registerTool('get_new_utterances', {
-    title: 'New things people said',
-    description: 'Transcript lines heard since the last call, one entry per speaker, plus who is talking now and turn_hint ("your_turn" or "wait"). Pass the last utterance id as since. wait_ms long-polls until a new line arrives or the wait ends (max 30000). The server listens to each remote person separately and does not transcribe its own voice.',
-    inputSchema: {
-      since: z.union([z.string().max(40), z.number()]).optional().describe('The last utterance id you have, or a timestamp in milliseconds. Omit it to read everything still buffered.'),
-      wait_ms: z.number().int().min(0).max(30000).optional().describe('How long to wait for a new line. 0 returns immediately.'),
-    },
-  }, guarded(async ({ since, wait_ms }) => {
-    return ok(await part().utterances({ since, wait_ms }));
+  }, guarded(async ({ meeting_id, since }) => {
+    need(meeting_id);
+    return ok(transcript.tail(meeting_id, since || 0));
   }));
 
   server.registerTool('say', {
     title: 'Speak in the meeting',
-    description: 'Speaks text through the participant microphone using the local text-to-speech engine. If interruptible is true (the default) and someone else starts talking, playback stops and the result is {interrupted: true, spoken_until_ms}.',
+    description: 'Passes a spoken line through to Meet Bot (MeetingBot.interject), ahead of conversation voice. This server does not synthesize speech. share_content remains chat. After the meeting, handle notes, mail, and calendar yourself.',
     inputSchema: {
-      text: z.string().min(1).max(2000).describe('What to say, kept short: one to three sentences.'),
-      voice: z.string().max(200).optional().describe('Voice name or a local model path. The default voice is used when this is omitted.'),
-      interruptible: z.boolean().optional().describe('Stop if a remote person starts talking. Default true.'),
+      meeting_id: meetingId,
+      text: z.string().min(1).max(2000).describe('What Meet Bot should say, in one or two sentences.'),
     },
-  }, guarded(async ({ text, voice, interruptible }) => {
-    const preempt = turn.beginCommand();
-    try {
-      const said = await part().say(text, voice, interruptible);
-      return ok(Object.assign({}, said, { voice_yielded: preempt.yielded }));
-    } finally {
-      turn.endCommand();
-    }
+  }, guarded(async ({ meeting_id, text }) => {
+    const m = needLive(meeting_id);
+    if (typeof bot.interject !== 'function') throw new Error(INTERJECT_GAP);
+    const said = await bot.interject(m.session_id, text);
+    if (!said || said.applied === false) throw new Error((said && said.gap) || INTERJECT_GAP);
+    return ok({ meeting_id: m.meeting_id, spoken: true });
   }));
 
-  server.registerTool('stop_speaking', {
-    title: 'Stop speaking',
-    description: 'Stops the current spoken line immediately.',
-    inputSchema: {},
-  }, guarded(async () => ok(await part().stop())));
+  async function control(name, gap, fn) {
+    if (typeof bot[name] !== 'function') throw new Error(gap);
+    const out = await fn();
+    if (!out || out.applied === false) throw new Error((out && out.gap) || gap);
+    return out;
+  }
 
   server.registerTool('send_chat', {
     title: 'Send a chat message',
-    description: 'Posts a chat line as the participant.',
+    description: 'Posts a chat line through Meet Bot (MeetingBot.say). This is the same chat channel as share_content. It does not speak.',
     inputSchema: {
-      text: z.string().min(1).max(2000).describe('The chat message.'),
+      meeting_id: meetingId,
+      text: z.string().min(1).max(2000).describe('The chat message, up to 2000 characters.'),
     },
-  }, guarded(async ({ text }) => ok(await part().chat(text))));
+  }, guarded(async ({ meeting_id, text }) => {
+    const m = needLive(meeting_id);
+    await bot.say(m.session_id, text);
+    return ok({ meeting_id: m.meeting_id, sent: true, chars: text.length });
+  }));
 
   server.registerTool('raise_hand', {
-    title: 'Raise or lower your hand',
-    description: 'Raises the participant hand when on is true, and lowers it when on is false.',
-    inputSchema: { on: z.boolean().describe('true to raise, false to lower.') },
-  }, guarded(async ({ on }) => ok(await part().hand(on))));
+    title: 'Raise or lower the bot hand',
+    description: 'Asks Meet Bot to raise its hand when on is true, and to lower it when on is false. Contract version 1 has no hand control, and then this reports the gap.',
+    inputSchema: {
+      meeting_id: meetingId,
+      on: z.boolean().describe('true to raise, false to lower.'),
+    },
+  }, guarded(async ({ meeting_id, on }) => {
+    const m = needLive(meeting_id);
+    const raised = await control('raiseHand', HAND_GAP, () => bot.raiseHand(m.session_id, on));
+    return ok({ meeting_id: m.meeting_id, hand: !!on, result: raised.result == null ? null : raised.result });
+  }));
 
   server.registerTool('set_mic', {
-    title: 'Turn the microphone on or off',
-    description: 'Unmutes the participant microphone when on is true. Muting stops the room hearing you; it does not stop you hearing them.',
-    inputSchema: { on: z.boolean() },
-  }, guarded(async ({ on }) => ok(await part().mic(on))));
+    title: 'Turn the Meet Bot microphone on or off',
+    description: 'Asks Meet Bot to unmute its microphone when on is true. Contract version 1 gives the bot no microphone, and then this reports the gap.',
+    inputSchema: {
+      meeting_id: meetingId,
+      on: z.boolean().describe('true to unmute, false to mute.'),
+    },
+  }, guarded(async ({ meeting_id, on }) => {
+    const m = needLive(meeting_id);
+    const mic = await control('setMic', MIC_GAP, () => bot.setMic(m.session_id, on));
+    return ok({ meeting_id: m.meeting_id, mic: !!on, result: mic.result == null ? null : mic.result });
+  }));
 
   server.registerTool('set_camera', {
-    title: 'Turn the camera on or off',
-    description: 'Shows the camera card when on is true, and turns it off when on is false.',
-    inputSchema: { on: z.boolean() },
-  }, guarded(async ({ on }) => ok(await part().cam(on))));
+    title: 'Turn the Meet Bot camera on or off',
+    description: 'Asks Meet Bot to show its camera when on is true, and to turn it off when on is false. Contract version 1 has no camera, and then this reports the gap.',
+    inputSchema: {
+      meeting_id: meetingId,
+      on: z.boolean().describe('true to show the camera, false to turn it off.'),
+    },
+  }, guarded(async ({ meeting_id, on }) => {
+    const m = needLive(meeting_id);
+    const cam = await control('setCamera', CAMERA_GAP, () => bot.setCamera(m.session_id, on));
+    return ok({ meeting_id: m.meeting_id, camera: !!on, result: cam.result == null ? null : cam.result });
+  }));
 
   server.registerTool('get_meeting_state', {
     title: 'Who is in the meeting',
-    description: 'Participants, who is talking, whether your hand, microphone, and camera are on, and whether the join disclosure has been spoken.',
-    inputSchema: {},
-  }, guarded(async () => ok(await part().meetingState())));
+    description: 'Participants from Meet Bot, plus hand, microphone, and camera when the app reports them. Contract version 1 returns the people list only.',
+    inputSchema: { meeting_id: meetingId },
+  }, guarded(async ({ meeting_id }) => {
+    const m = needLive(meeting_id);
+    const people = typeof bot.people === 'function' ? await bot.people(m.session_id) : null;
+    let hand = null;
+    let mic = null;
+    let camera = null;
+    let controls_gap = CONTROLS_GAP;
+    if (typeof bot.meetingState === 'function') {
+      const extra = await bot.meetingState(m.session_id);
+      if (extra && extra.applied && extra.result) {
+        const row = extra.result;
+        controls_gap = null;
+        if ('hand' in row) hand = !!row.hand;
+        if ('mic' in row) mic = !!row.mic;
+        if ('camera' in row) camera = !!row.camera;
+      } else {
+        controls_gap = (extra && extra.gap) || CONTROLS_GAP;
+      }
+    }
+    return ok({
+      meeting_id: m.meeting_id,
+      transcribing: !!m.transcribing,
+      muted: !!m.muted,
+      people,
+      hand,
+      mic,
+      camera,
+      controls_gap,
+    });
+  }));
 
   server.registerTool('snapshot', {
-    title: 'Snapshot of the meeting',
-    description: 'Read-only. Returns who is here, who is talking, the turn, and recent transcript lines, and saves a PNG of the current view into the meeting folder. The speaking loop may call this. It does not change the meeting.',
-    inputSchema: {},
-  }, guarded(async () => ok(await part().snapshot())));
+    title: 'Snapshot of the Meet Bot page',
+    description: 'Read-only. Returns who is in the meeting and, when the browser is up, a PNG of the Meet Bot page this server already runs. It does not join a second browser and it does not change the meeting.',
+    inputSchema: { meeting_id: meetingId },
+  }, guarded(async ({ meeting_id }) => {
+    const m = needLive(meeting_id);
+    const people = typeof bot.people === 'function' ? await bot.people(m.session_id) : null;
+    let png = null;
+    let gap = SNAPSHOT_GAP;
+    let shot = null;
+    if (typeof bot.snapshot === 'function') {
+      const taken = await bot.snapshot(m.session_id);
+      png = (taken && taken.png) || null;
+      gap = taken && taken.applied ? null : ((taken && taken.gap) || SNAPSHOT_GAP);
+      shot = taken && taken.applied ? (taken.result == null ? null : taken.result) : null;
+    }
+    return ok({ meeting_id: m.meeting_id, people, png, snapshot: shot, gap });
+  }));
 
   server.registerTool('leave_meeting', {
     title: 'Leave the meeting',
-    description: 'Leaves the meeting. Call this when someone asks you to leave.',
-    inputSchema: {},
-  }, guarded(async () => ok(await part().leave())));
+    description: 'Saves the transcript, then Meet Bot leaves. Call this when someone asks the bot to leave. Other participants can stay.',
+    inputSchema: { meeting_id: meetingId },
+  }, guarded(async ({ meeting_id }) => {
+    const m = need(meeting_id);
+    if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
+    const left = await depart(m);
+    return ok({ ...publicView(left.done), transcript_lines: left.lines });
+  }));
+
+  const subs = new Set();
+  server.server.registerCapabilities({ resources: { subscribe: true } });
+  server.server.setRequestHandler(SubscribeRequestSchema, async (request) => {
+    if (request && request.params && request.params.uri) subs.add(String(request.params.uri));
+    return {};
+  });
+  server.server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
+    if (request && request.params && request.params.uri) subs.delete(String(request.params.uri));
+    return {};
+  });
+  const off = transcript.onLine((row) => {
+    if (!row || !row.meeting_id) return;
+    const uri = 'gifos://meeting/' + row.meeting_id + '/transcript';
+    if (!subs.has(uri)) return;
+    server.server.sendResourceUpdated({ uri }).catch(() => {});
+  });
+  const origClose = server.close.bind(server);
+  server.close = async () => { off(); return origClose(); };
 
   server.registerResource(
     'meeting-transcript',
     new ResourceTemplate('gifos://meeting/{id}/transcript', {
       list: async () => {
-        const resources = [];
-        if (participant && participant.meetingId && /^m_[0-9a-f]+$/.test(participant.meetingId)) {
-          resources.push({
-            uri: 'gifos://meeting/' + participant.meetingId + '/transcript',
+        const ids = new Set(transcript.meetings());
+        for (const m of meetings.all()) {
+          if (m.state === 'live' || ids.has(m.meeting_id)) ids.add(m.meeting_id);
+        }
+        return {
+          resources: [...ids].filter((id) => /^m_[0-9a-f]+$/.test(id)).map((id) => ({
+            uri: 'gifos://meeting/' + id + '/transcript',
             name: 'meeting-transcript',
             mimeType: 'application/x-ndjson',
-          });
-        }
-        return { resources };
+          })),
+        };
       },
     }),
     {
-      title: 'Meeting transcript',
-      description: 'Live JSONL for one meeting. Each line is {seq, ts, speaker, text, kind} and kind is speech, chat, bot, snapshot, or event.',
+      title: 'Live meeting transcript',
+      description: 'Newline-delimited JSON for one meeting, tailed from Meet Bot. Each line is {seq, ts, speaker, text, kind}. Subscribe for updates while the meeting is live. After the meeting, read it and do the follow-up yourself.',
       mimeType: 'application/x-ndjson',
     },
     async (uri, vars) => {
-      const id = vars && vars.id;
-      const text = part().readTranscript(String(id || ''));
-      return { contents: [{ uri: String(uri), mimeType: 'application/x-ndjson', text }] };
+      const id = vars && (vars.id || vars.meeting_id);
+      const m = id && meetings.get(String(id));
+      if (!m) throw new Error('Unknown meeting_id ' + JSON.stringify(id) + '.');
+      return { contents: [{ uri: String(uri), mimeType: 'application/x-ndjson', text: transcript.ndjson(m.meeting_id) }] };
     },
   );
-
-  server.registerPrompt('meeting_participant_etiquette', {
-    title: 'Meeting participant etiquette',
-    description: 'How to take part in a GifOS meeting as an AI assistant: wait for pauses, keep replies short, identify as an AI, disclose transcription, keep the robot badge, and leave when asked.',
-  }, async () => etiquetteResult());
 
   return server;
 }

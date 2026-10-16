@@ -24,8 +24,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
     'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN,\n' +
     'GIFOS_LLM_URL, GIFOS_LLM_MODEL, GIFOS_LLM_APP, GIFOS_CONVERSATION_VOICE, GIFOS_RESPOND_TO_COMMAND,\n' +
     'GIFOS_VOICE, GIFOS_TRANSCRIPT_POLL_MS, GIFOS_TTS_ENGINE, GIFOS_TTS_APP, GIFOS_TTS_URL, GIFOS_TTS_VOICE, GIFOS_STT_URL.\n' +
-    'GIFOS_LLM_KEY is stored in the GifOS computer\'s Settings → AI models. It is not passed to Meet Bot and it is not printed.\n' +
-    'Kokoro (voice af_heart) is downloaded into GIFOS_MCP_HOME/kokoro on first start and registered as the tts role.\n' +
+    'GIFOS_LLM_KEY stays in this process. It is not passed to Meet Bot, not written into the page, and not printed.\n' +
+    'Kokoro (voice af_heart) is downloaded into GIFOS_MCP_HOME/kokoro on first start. This process injects itself as the tts, stt, and smartest provider. The page does not fetch those calls.\n' +
     'See https://github.com/nwcnwc/gifos-mcp#readme\n');
   process.exit(0);
 }

@@ -1,6 +1,6 @@
 # Meet Bot bridge
 
-gifos-mcp does not take part in a meeting. The only AI in the room is the signed **Meeting Bot** app from the GifOS app store, running in the headless browser this server already launches. This process starts that app, keeps it running, and passes commands through. It does not open a second participant, and it does not call a model.
+gifos-mcp does not take part in a meeting. The only AI in the room is the signed **Meeting Bot** app from the GifOS app store, running in the headless browser this server already launches. This process starts that app, keeps it running, and passes commands through. It does not open a second participant and it does not play audio into the meeting. It is the host that embeds that GifOS, so it answers the `tts`, `stt`, and `smartest` provider calls itself.
 
 The published pattern for "the real meeting page plus the app" is `js/meet-host.js` in [gifos-app](https://github.com/nwcnwc/gifos-app) (branch `meet-bot`). The host page fetches `run.html`, stamps `window.__gifosMb = "1"`, and loads that document in a same-origin session iframe. Meeting Bot never touches WebRTC. A search of the published gifos-app branch tips did not find `test/swarm/meet.js`. The host file above is the drive this server relies on.
 
@@ -13,8 +13,8 @@ These pieces were added on `cursor/meeting-voice-streaming` and repeat work that
 | Piece | What it did | Why it does not belong here |
 |---|---|---|
 | `src/voice/talk.js` | Waited out a pause, sent the transcript to a chat model, and decided when the bot speaks. | Turn-taking and conversation are Meet Bot modes. |
-| `src/voice/llm.js` | Called `POST /chat/completions` on an OpenAI-compatible host, with the user's key. | The server must hand that endpoint to Meet Bot as its local-LLM setting. It must not run the stream. |
-| `src/voice/speech.js` | Called `/audio/speech` or `/tts` and turned the reply into audio. | Speech synthesis is Meet Bot's voice (Grok Voice, or a local model plus Kokoro). |
+| `src/voice/llm.js` | Called `POST /chat/completions` on an OpenAI-compatible host, with the user's key, and decided the reply. | Turn-taking stays in Meet Bot. The host injection below answers a provider call. It does not choose when to speak. |
+| `src/voice/speech.js` | Called `/audio/speech` or `/tts` and played the reply into the meeting. | Playback stays in Meet Bot. Kokoro below only returns WAV bytes for the `tts` role. |
 | `src/voice/clauses.js` | Split the model stream so the first words could play early. | That is part of speaking, which this server does not do. |
 | `src/voice/mouth.js` | Replaced the meeting page microphone and played audio into the session. | The meeting page is driven by Meet Bot through `GifOS.meetHost`, not by a script this server injects. |
 | `MeetingBotDriver.playEncoded` / `quiet` | Pushed that audio into `iframe[data-gifos-meet]`. | Same duplication. The driver may only call `window.MeetingBot`. |
@@ -42,7 +42,7 @@ assistant  --MCP-->  gifos-mcp  --window.MeetingBot-->  Meeting Bot app
                                                        real run.html session
 ```
 
-The app frame is sandboxed. `connect-src 'none'` (see `APP_CSP` in gifos-app `js/runtime.js`). Meeting Bot's own tests refuse `fetch` and `WebSocket` in `app.js`. The app cannot call an LLM. The host page is the GifOS origin and is the only place a meeting, a model call, or Kokoro can run. gifos-mcp's Node process is neither of those.
+The app frame is sandboxed. `connect-src 'none'` (see `APP_CSP` in gifos-app `js/runtime.js`). Meeting Bot's own tests refuse `fetch` and `WebSocket` in `app.js`. The app cannot call an LLM. The meeting runs on the GifOS host page. This Node process embeds that page. Kokoro and the hosted model and caption calls run here, and the page receives the result through one Playwright binding. The page does not fetch them.
 
 ### 1. App to host (`gifos.meet`)
 
@@ -121,28 +121,38 @@ The signed providers in the store are Kokoro, Kitten, and eSpeak for `tts`; Whis
 
 Meet Bot's conversation text role is `smartest`. This server assigns the endpoint, or `GIFOS_LLM_APP`, to that row only. `cheapest` stays the row the offline models provide. `setVoice` names `llm: { provider: "smartest" }`.
 
-## Kokoro runs on this machine
+## The host injects itself
 
-Kokoro does not run inside a provider GIF. The GIF sandbox is `connect-src 'none'`, so a stand-in GIF cannot ask this process for audio. The smallest path that stays inside that rule:
+gifos-mcp is the program that embeds the headless GifOS, the same way a test harness embeds a page. It is not a provider GIF. A provider GIF is sandboxed with `connect-src 'none'`, so it cannot ask this process for audio, captions, or a model reply. `GifOS.providers.place` and `configure` are the wrong tool for that: a placed GIF still cannot reach this process, and an endpoint URL on an https page is mixed content.
 
-1. This process runs Kokoro (`kokoro-js`, q8 weights, voice `af_heart`). `installKokoro` downloads the weights and the voice into `GIFOS_MCP_HOME/kokoro` on first start. There is no manual step and no extra system package.
-2. The headless harness registers an MCP-owned provider on the host page, which is the page that already calls `GifOS.providers`. `assigned('tts')` returns `{ appId: "mcp-tts-kokoro", appName: "Kokoro (this computer)" }`. `call('tts', { text, voice })` returns `{ bytes, mime: "audio/wav" }`.
-3. The bytes cross in a Playwright binding (`__gifosMcpSpeak`). The host page does not fetch them. A provider GIF is not mounted for this role, so nothing in the sandbox learns a URL.
+The injection is one Playwright binding, `__gifosHostCall(role, json)`, installed with `exposeBinding` before the page loads. Route handlers were not used, because those would make the page fetch. The page does not fetch, and the key never enters the page.
 
-`GIFOS_TTS_APP` still installs a store provider and leaves this path off. `GIFOS_TTS_URL` is still an endpoint row. `GIFOS_TTS_ENGINE=none` installs nothing.
+`GifOS.providers.assigned(role)` for a hosted role returns `{ host: true, role, name: "gifos-mcp" }`. That is enough for `meet-host.js`, which only checks that `assigned('tts')` is set. There is no `fileId` and no GIF. `call(role, req)` sends the request to the binding. The binding returns JSON. Speech comes back as base64 WAV, which the page turns into `{ bytes, mime: "audio/wav" }`. Text comes back as `{ text }`.
 
-`setVoice` names the role:
+Which roles this process serves:
+
+| Role | When |
+|---|---|
+| `tts` | Default. Kokoro (`kokoro-js`, q8 weights, voice `af_heart`) runs in this process. `installKokoro` downloads the weights and the voice into `GIFOS_MCP_HOME/kokoro` on first start. There is no manual step and no extra system package. `GIFOS_TTS_URL` is also served here: this process fetches the stand-in and returns the WAV. |
+| `smartest` | `GIFOS_LLM_URL` or `GIFOS_LLM_KEY` is set, and `GIFOS_LLM_APP` is empty. This process posts one non-streaming chat completion. The page only sees `gifos-provider://smartest`. |
+| `stt` | `GIFOS_STT_URL` is set and `GIFOS_STT_APP=none`. This process posts the audio bytes to that URL. The default Whisper app stays in the browser, because this process does not run Whisper. |
+
+`GIFOS_TTS_APP` and `GIFOS_LLM_APP` install store providers and leave those roles off this path, so a synthetic provider in a test still runs inside GifOS. `GIFOS_TTS_ENGINE=none` does not serve speech.
+
+Hosted roles are not written into `gifos_ai_config`. If an older profile still has a URL or a key on that row, the init script deletes the row. `setVoice` still names the role and still carries no URL and no key:
 
 ```js
 tts: { provider: "tts", engine: "kokoro", app: "mcp-tts-kokoro", voice: "af_heart" }
 ```
 
+`mcp-tts-kokoro` is a label in that object. It is not an installed app. On the page, a hosted `tts` row is stored as engine `kokoro` with no URL, so `host-voice.js` calls `opts.tts` instead of fetching `tts.url`. The public status still reports the real engine (`kokoro` or `http`).
+
 ### GifOS changes this does not require
 
 No change in gifos-app or gifos-apps-source is required for the audio to flow.
 
-- **gifos-app.** `meet-host.js` already calls `GifOS.providers.call('tts')` when `assigned('tts')` is set, and plays `{ bytes, mime }`. Keep provider CSP at `connect-src 'none'`. Do not add `capabilities.network` to a TTS provider. `GifOS.providers.place` and `configure` are the wrong tool here: a placed GIF still cannot reach this process, and an endpoint URL on an https page is mixed content. The optional small API, if the wrap should become a real call, is `GifOS.providers.serve('tts', fn)` on the host page: it answers `call` and `assigned` without a GIF and without a network capability. Until that exists, the harness wraps those two methods.
-- **gifos-apps-source.** Meeting Bot should keep speaking through the `tts` role and should not download Kokoro weights. `setVoice` already forwards `tts.app`. When this server is the voice, that app id is `mcp-tts-kokoro`, not `offline-tts-kokoro`. CONTROL.md should say the app id is whoever is assigned to `tts`, and the store Kokoro GIF is not required. The app code does not need a change as long as it keeps forwarding `app` and `voice`.
+- **gifos-app.** `meet-host.js` already calls `GifOS.providers.call('tts')` when `assigned('tts')` is set, and plays `{ bytes, mime }`. Keep provider CSP at `connect-src 'none'`. Do not add `capabilities.network` to a TTS provider. The optional small API, if the wrap should become a real call, is `GifOS.providers.serve(role, fn)` on the host page: it answers `call` and `assigned` without a GIF and without a network capability. Until that exists, the harness wraps those two methods.
+- **gifos-apps-source.** Meeting Bot should keep speaking through the `tts` role and should not download Kokoro weights. `setVoice` already forwards `tts.app`. CONTROL.md should say the app id is whoever is assigned to `tts`, and the store Kokoro GIF is not required when this host answers the role. The app code does not need a change as long as it keeps forwarding `app` and `voice`.
 
 Registration is `gifos.provider.serve({ tts: fn, smartest: fn, ... })` in the app. When the computer calls that role, the runtime mounts the GIF in a hidden sandboxed iframe and posts `{ ns: "gifos", type: "provider-request", role, req }`. The handler is keyed by role. It returns `{ text }` for chat and speech-to-text, or `{ bytes, mime }` for speech. The iframe's CSP is `connect-src 'none'`. The mount refuses every bridge call except the provider request, asset reads, and `info`.
 
@@ -198,11 +208,13 @@ So "a provider that wraps an OpenAI-compatible endpoint" does not exist in this 
 
 ## What gifos-mcp can do today
 
-This server can install a slug the store already lists (`offline-stt-whisper`, or `GIFOS_TTS_APP` / `GIFOS_STT_APP` / `GIFOS_LLM_APP`) and call `assign`. Kokoro is not one of those slugs by default: this process runs it and the harness registers the `tts` role. It can also write an endpoint row into `gifos_ai_config` from `GIFOS_LLM_URL`, `GIFOS_LLM_MODEL`, `GIFOS_LLM_KEY`, `GIFOS_TTS_URL`, and `GIFOS_STT_URL`. That is selecting a published app, or typing into Settings. It is not creating a provider.
+This server can install a slug the store already lists (`offline-stt-whisper`, or `GIFOS_TTS_APP` / `GIFOS_STT_APP` / `GIFOS_LLM_APP`) and call `assign`. Kokoro is not one of those slugs. This process runs it and the host binding answers `tts`. A hosted `smartest` or `stt` endpoint is also answered here. The URL and the key are not written into `gifos_ai_config` for a role this process serves. That is host injection, not a published app and not a GIF this program composed.
 
-It does not synthesize speech and it does not call the model. Kokoro's first spoken line still waits on that app's own weight download.
+Kokoro's first spoken line waits on the weight download in this process, into `GIFOS_MCP_HOME/kokoro`. Later lines use the files already there.
 
 ## What is missing
+
+Hosting `tts`, `stt`, and `smartest` does not need a new GifOS call. This process wraps `assigned` and `call` because it embeds the page. The gap below is only for an outside program that wants to file a GIF it composed.
 
 There is no supported call that lets an outside program hand GifOS a provider it composed and have that provider filed into `sys_providers`.
 
@@ -229,7 +241,7 @@ GifOS.providers.configure(role, { url, key, model }) -> Promise<{ url, model }>
 
 It writes `{ url, key, model }` for that role, omitting empty fields, the way `saveAi` in `js/desktop.js` does. The key stays in `gifos_ai_config`. The return value omits the key. `configure` is how gifos-mcp would register an OpenAI-compatible LLM, an HTTP speech stand-in, or an HTTP caption stand-in. `place` is how it would register an engine it actually authored, once that engine can serve the role without a network.
 
-With those two calls, profile setup for an endpoint becomes: `configure('smartest', { url, key, model })` from `GIFOS_LLM_URL` / `GIFOS_LLM_MODEL` / `GIFOS_LLM_KEY`, and `configure('tts', { url })` when `GIFOS_TTS_URL` is set. Kokoro does not use either call. It runs in this process. `place` would still not let a GIF fetch Kokoro. Speech-to-text stays `install` plus `assign` for the signed store app. `MeetingBot.setVoice` keeps naming the roles.
+This server does not call `place` or `configure`. A hosted role never becomes a GIF, and the key never becomes a Settings field the page can read. `place` would still not let a GIF fetch Kokoro. Speech-to-text stays `install` plus `assign` for the signed store app, unless `GIFOS_STT_URL` is set with `GIFOS_STT_APP=none`, in which case this process serves `stt`. `MeetingBot.setVoice` keeps naming the roles.
 
 `MeetingBot.setVoice` receives roles, not addresses:
 
@@ -245,13 +257,14 @@ MeetingBot.setVoice({
 
 `llm` and `tts` are included only for `conversation_voice: "local"`. `stt` is included when a speech-to-text app or `GIFOS_STT_URL` is set. The object never includes `llm.url`, `llm.key`, `tts.url`, or `stt.url`. The key is written into `gifos_ai_config` on the GifOS origin, which is where a person types it in Settings. It is not a tool result and it is not an argument of `setVoice`.
 
-The published host (`js/host-voice.js` on gifos-app `cursor/meetbot-host-ops`) still stores a raw URL and fetches it from the host page. Meeting Bot v2 (`gifos-apps-source` `cursor/meetbot-voice-control`) copies `llm.url`, `llm.model`, and `llm.key` into the host and drops any other field. So the page would still have nothing to call if this server only assigned Settings. The driver adds an init script on the GifOS host page that wraps `HostVoice` after `host-voice.js` assigns it:
+The published host (`js/host-voice.js` on gifos-app `cursor/meetbot-host-ops`) still stores a raw URL and fetches it from the host page. Meeting Bot v2 (`gifos-apps-source` `cursor/meetbot-voice-control`) copies `llm.url`, `llm.model`, and `llm.key` into the host and drops any other field. The driver adds an init script on the GifOS host page that wraps `HostVoice` after `host-voice.js` assigns it, and that wraps `GifOS.providers` for the roles this process serves:
 
-- A provider app becomes `gifos-provider://smartest` (no key). The wrapped fetch calls `GifOS.providers.call` and hands back one server-sent-event chunk. The wrapped speech function calls `GifOS.providers.call('tts')`.
-- An endpoint is copied from `gifos_ai_config` into the host engine only.
-- An https page never fetches an http URL itself. That call goes to `https://cors-proxy.gifos.app/` with header `x-gifos-target`. An https endpoint is fetched directly, so a key for that host is not sent to the proxy. An http page talking to localhost stays direct.
+- A hosted `smartest` becomes `gifos-provider://smartest` with no key. The wrapped fetch calls `GifOS.providers.call`, which the binding answers. The reply is one server-sent-event chunk. The page does not post the chat completion.
+- A hosted `tts` is stored as engine `kokoro` with no URL, so speech goes through `providers.call('tts')` and the binding, not through `fetch(tts.url)`.
+- A store provider app stays on the original `call`. It becomes `gifos-provider://<role>` (no key). The synthetic apps used in the browser test take this path.
+- An https page never fetches an http URL itself. A call the page still makes goes to `https://cors-proxy.gifos.app/` with header `x-gifos-target`. An https endpoint is fetched directly. An http page talking to localhost stays direct. Hosted roles do not take this path, so their key does not transit the proxy.
 
-This script does not speak and does not contain a model client. Kokoro, or the assigned stand-in, does the speaking inside GifOS.
+The init script does not contain a model client. `src/voice/host.js` is the client, and it runs in this process.
 
 ## Voice settings to hand over
 
@@ -270,7 +283,7 @@ Local LLM settings, suggested default xAI Grok:
 | Model | `GIFOS_LLM_MODEL` | `grok-4.20-0309-non-reasoning` on that host. Set it yourself for any other host. |
 | Key | `GIFOS_LLM_KEY` | No default. The user's own key. |
 
-The chat call the host makes for an endpoint is streaming `POST {url}/chat/completions` with `model`, `messages`, and `stream: true`, and nothing else. No tools and no function calls. The key travels only as `Authorization: Bearer`, and only from the host page. Grok Voice (`"grok"`) is Meet Bot's own speech path. Kokoro is the default text-to-speech voice and it runs in this process: app `mcp-tts-kokoro`, voice `af_heart`. `GIFOS_TTS_APP` names a store provider instead. `GIFOS_TTS_URL` names an HTTP stand-in (`tts.engine` `"http"`, the URL stored in Settings, not in `setVoice`). `GIFOS_TTS_ENGINE=none` turns speech off. This server does not run Piper.
+The chat call this process makes for a hosted `smartest` is one `POST {url}/chat/completions` with `model`, `messages`, and `stream: false`. No tools and no function calls. The key travels only as `Authorization: Bearer`, and only from this process. The page sees one chunk of the reply. Grok Voice (`"grok"`) is Meet Bot's own speech path. Kokoro is the default text-to-speech voice and it runs in this process, voice `af_heart`. `GIFOS_TTS_APP` names a store provider instead. `GIFOS_TTS_URL` is an HTTP stand-in this process fetches. `setVoice` says `{ provider: "tts", engine: "http" }` and does not include the URL. `GIFOS_TTS_ENGINE=none` turns speech off. This server does not run Piper.
 
 The key is not logged and not written into a tool result. A missing `setVoice` is reported as a gap. The page is left untouched.
 
@@ -280,18 +293,18 @@ Spoken `say` from the assistant, distinct from chat `share_content`:
 MeetingBot.interject(meetingId, text) // Promise<{ id, spoken: true }>
 ```
 
-That line is the assistant cutting in. Meet Bot speaks it and it takes priority over conversation voice. This server does not synthesize it.
+That line is the assistant cutting in. Meet Bot speaks it and it takes priority over conversation voice. This server returns WAV only when Meet Bot asks the `tts` provider. It does not play the audio.
 
 `set_voice` on the MCP side only changes the two switches. The URL, model, key, Kokoro choice, and speech or caption stand-ins always come from the environment, so a tool call cannot carry the key. Tool results name the engine (`kokoro`, `http`, or `none`) and, for Kokoro, the voice. They do not include `llm.url`, `llm.key`, `tts.url`, or `stt.url`.
 
 | Env | Effect on the object above |
 |---|---|
-| `GIFOS_TTS_ENGINE` | `auto` or `kokoro` (the default) runs Kokoro in this process and registers it on `tts`. `none` assigns nothing for speech and wins over `GIFOS_TTS_URL`. Any other value is refused. |
-| `GIFOS_TTS_APP` | A store provider app for `tts`, instead of Kokoro in this process. |
+| `GIFOS_TTS_ENGINE` | `auto` or `kokoro` (the default) runs Kokoro in this process and the host binding answers `tts`. `none` does not serve speech and wins over `GIFOS_TTS_URL`. Any other value is refused. |
+| `GIFOS_TTS_APP` | A store provider app for `tts`, instead of Kokoro in this process. The host binding leaves `tts` alone. |
 | `GIFOS_TTS_VOICE` | Replaces `af_heart` when the engine is Kokoro. |
-| `GIFOS_TTS_URL` | An HTTP speech stand-in, stored as the `tts` endpoint in Settings. `setVoice` says `{ provider: "tts", engine: "http" }` and does not include the URL. |
-| `GIFOS_STT_URL` | An HTTP caption stand-in, stored as the `stt` endpoint in Settings, and only when `GIFOS_STT_APP=none`. `setVoice` says `{ provider: "stt" }` and does not include the URL. v1 transcription still uses the store app. |
-| `GIFOS_LLM_APP` | A store provider app assigned to `smartest`, instead of an OpenAI-compatible URL. Conversation voice `local` does not then require a URL. |
+| `GIFOS_TTS_URL` | An HTTP speech stand-in. This process fetches it when Meet Bot asks `tts`. `setVoice` says `{ provider: "tts", engine: "http" }` and does not include the URL. The URL is not written into Settings. |
+| `GIFOS_STT_URL` | An HTTP caption stand-in, served by this process, and only when `GIFOS_STT_APP=none`. `setVoice` says `{ provider: "stt" }` and does not include the URL. The default Whisper app stays a store install. |
+| `GIFOS_LLM_APP` | A store provider app assigned to `smartest`, instead of this process calling an OpenAI-compatible URL. Conversation voice `local` does not then require a URL. |
 
 ## Decisions
 
@@ -300,13 +313,13 @@ That line is the assistant cutting in. Meet Bot speaks it and it takes priority 
 
 ## Questions still open
 
-1. For an OpenAI-compatible URL, is `configure(role, { url, key, model })` the provider entry you want? A GIF that fetched that URL would be refused. The endpoint row is the wrap the broker already runs.
-2. Is `GifOS.providers.place(files)` the missing call, filed like `install` but with the caller's files instead of a store slug? The other small version is to teach `createAppFromFiles` to parent a network-less `provides.ai` app into `sys_providers` and put that function on `GifOS`.
-3. Kokoro and Whisper are signed store apps. Until `place` exists, this server installs those slugs. Should that stay, or should a generated provider be the only thing this server files?
-4. A dropped GIF runs unsigned. A seeded default must be signed by gifos.app. Which bar should `place` use?
-5. The AI broker fetches an endpoint directly. This server's host script sends an http endpoint through `https://cors-proxy.gifos.app` when the page is https, because mixed content blocks the call. An https endpoint is fetched directly. May an http endpoint's key transit that proxy?
+1. Decided. An OpenAI-compatible URL is not a `configure` row when this process hosts `smartest`. The key stays here. `configure` would put it in the page.
+2. Decided. `place` is not how this host adds `tts`, `stt`, or `smartest`. A placed GIF cannot reach this process. The binding is the injection.
+3. Decided. This server does not install the Kokoro store slug. It runs Kokoro. Whisper stays the store app unless `GIFOS_STT_URL` is set with `GIFOS_STT_APP=none`.
+4. Still open for a future `place`, which this server does not call. A dropped GIF runs unsigned. A seeded default must be signed by gifos.app.
+5. Hosted roles do not use the proxy, so their key does not transit it. A call the page still makes sends an http endpoint through `https://cors-proxy.gifos.app` when the page is https. An https endpoint is fetched directly. May an http endpoint's key transit that proxy when the role is not hosted?
 6. CONTROL.md v2 still documents raw URLs on `setVoice`, and `meet-host.js` still pushes an STT URL into the session. Should `cursor/meetbot-host-ops` read `gifos_ai_config` itself?
-7. The first `say` after a real Kokoro install waits on that app's weight download. Is that the expected pause?
+7. The first `say` after a fresh install waits on Kokoro's weight download in this process (`GIFOS_MCP_HOME/kokoro`), not on a provider GIF. Later starts reuse the files. Is that the expected pause?
 
 ## Gaps Meet Bot must gain
 
@@ -317,7 +330,7 @@ Contract v1 does not have these. Until it does, `set_voice` and `say` report the
 3. **Respond-to-commands switch.** When on, a command heard in the room is answered by Meet Bot. When off, conversation may continue but commands get no spoken reply. gifos-mcp does not decide what a command is.
 4. **Conversation voice `none`.** Meet Bot stays quiet. Transcription can still be on.
 5. **Conversation voice `grok`.** Grok Voice, inside the meeting page Meet Bot already hosts. Not a socket from this Node process.
-6. **Conversation voice `local`.** Stream the configured OpenAI-compatible chat model with no tools, then speak with Kokoro. The first audio should start from the first clause of the stream. The HTTP call cannot run inside the app frame (`connect-src 'none'`, and `meeting-bot/app.js` must not grow a `fetch`). It has to run on the GifOS host page, which already owns the session iframe, then play into that session. A new `gifos.meet` op (and the matching `gifos-meet` session op) is the place for "here is the voice setting" if the app must not see the key in its own heap. Either way the setting is Meet Bot's, not this server's loop.
+6. **Conversation voice `local`.** Meet Bot asks `smartest`, then speaks with the `tts` role. When this process hosts those roles, it performs the chat call and returns the WAV. The app frame still must not `fetch` (`connect-src 'none'`). The reply today is one chunk, not a token stream, so the first audio does not start mid-sentence. Playback stays in the meeting page Meet Bot already hosts.
 7. **Do not write the bot's own voice into the transcript.** v1 already refuses the bot machine's microphone. Spoken voice has to keep that property, or the model will answer itself.
 8. **Optional: push new transcript lines.** v1 only returns `transcript(id)` when asked. This server polls that. A `meet-event` of type `transcript` would remove the poll. It is not required for the handoff.
 9. **`raiseHand(id, on)`**, **`setMic(id, on)`**, **`setCamera(id, on)`**. These are the meeting-control capability, built in gifos-apps-source, not here. v1 has no hand, microphone, or camera. Until these exist, the matching tool reports the gap and does not click the meeting page.
@@ -328,7 +341,7 @@ No other voice stack should be added to gifos-mcp to paper over these gaps.
 
 ## What this branch removed
 
-Compared with `cc-mcp-participant`, this branch deletes the second participant and the voice pipeline this process used to run. That removal is the design: Meet Bot is the only participant, and this process does not speak.
+Compared with `cc-mcp-participant`, this branch deletes the second participant and the voice pipeline that played into the meeting. That removal is the design: Meet Bot is the only participant. This process answers provider calls. It does not play audio into the meeting.
 
 Kept, because they are management rather than participation: meeting links, `send_chat`, `raise_hand`, `set_mic`, `set_camera`, `get_meeting_state`, `snapshot`, and `leave_meeting`. `create_meeting` still mints the link. Its plain-link invite (`invite_email`, `invite_calendar`, room password beside the link) was deleted in the same pass and is restored. It was not part of the voice stack.
 

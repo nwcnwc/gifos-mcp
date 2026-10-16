@@ -11,7 +11,8 @@ export const DEFAULT_STT_APP = 'offline-stt-whisper';
 
 // Suggested local-LLM setting for Meet Bot: xAI Grok over its public
 // OpenAI-compatible API. grok-4.20-0309-non-reasoning answers without a
-// reasoning pass. This process does not call the endpoint. GIFOS_LLM_MODEL
+// reasoning pass. When this process hosts smartest, it calls that endpoint.
+// The page does not. GIFOS_LLM_MODEL
 // overrides the model name.
 export const SUGGESTED_LLM_URL = 'https://api.x.ai/v1';
 export const SUGGESTED_LLM_MODEL = 'grok-4.20-0309-non-reasoning';
@@ -58,7 +59,7 @@ export function loadConfig(env = process.env) {
 const VOICES = new Set(['none', 'grok', 'local']);
 
 // Settings Meet Bot will own. A key with no URL uses the suggested xAI
-// endpoint. This process never calls that endpoint.
+// endpoint. This process calls that endpoint only when it hosts smartest.
 export function voiceConfig(env = process.env) {
   const key = String(env.GIFOS_LLM_KEY || '');
   const llmApp = String(env.GIFOS_LLM_APP || '').trim();
@@ -92,8 +93,9 @@ export function voiceConfig(env = process.env) {
 }
 
 // Speech for Meet Bot's local mode. Default Kokoro runs in this process
-// (source "mcp") and is registered on the tts role by the headless harness.
-// GIFOS_TTS_APP names a store provider instead. GIFOS_TTS_URL is an endpoint row.
+// (source "mcp"). The headless harness injects this process as the tts
+// provider. GIFOS_TTS_APP names a store provider instead. GIFOS_TTS_URL is
+// fetched by this process, not by the page.
 const TTS_ENGINES = new Set(['', 'auto', 'kokoro', 'none']);
 
 function ttsConfig(env) {

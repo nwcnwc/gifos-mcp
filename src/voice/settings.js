@@ -10,7 +10,8 @@ export const CONTROLS_GAP = 'Meeting Bot has no meetingState method (contract ve
 export const SNAPSHOT_GAP = 'Meeting Bot has no snapshot method (contract version 1). A PNG of the Meet Bot page is saved when that page is open. See docs/MEETBOT-BRIDGE.md.';
 
 // The store app, used only when GIFOS_TTS_APP names one. The default voice
-// is Kokoro in this process, registered as MCP_TTS_APP on the tts role.
+// is Kokoro in this process. MCP_TTS_APP is the label setVoice carries.
+// The host answers the tts role. It does not mount that id as a GIF.
 export const KOKORO_APP = 'offline-tts-kokoro';
 export const MCP_TTS_APP = 'mcp-tts-kokoro';
 export const KOKORO_VOICE = 'af_heart';
@@ -29,7 +30,7 @@ export function scrub(text, secret) {
 }
 
 // Kokoro unless the environment names an HTTP stand-in or turns speech off.
-// The URL stays in Settings on the GifOS computer. Meet Bot only hears the role.
+// Meet Bot only hears the role. The URL stays in this process.
 function localTts(voice) {
   const t = (voice && voice.tts) || {};
   if (t.engine === 'http') return { provider: 'tts', engine: 'http' };
@@ -46,8 +47,9 @@ function ttsPublic(voice) {
 }
 
 // The object passed to MeetingBot.setVoice. It names GifOS providers.
-// It never includes llm.url, llm.key, tts.url, or stt.url. The host page
-// reads those from Settings (gifos_ai_config) when it speaks.
+// It never includes llm.url, llm.key, tts.url, or stt.url. When this
+// process hosts a role, it answers the call. A store app is still read
+// from Settings.
 export function voiceSettings(voice) {
   const settings = {
     respond_to_command: !!(voice && voice.respondToCommand),

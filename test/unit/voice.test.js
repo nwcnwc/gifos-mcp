@@ -1,5 +1,5 @@
-// Voice is a setting handed to Meet Bot. This process does not call a model
-// and does not play audio. No browser.
+// Voice is a setting handed to Meet Bot. The page script does not call a
+// model and this process does not play audio into the meeting. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,6 +15,7 @@ import { MeetingStore } from '../../src/meetings.js';
 import { MeetingBotDriver } from '../../src/driver.js';
 import { LiveTranscript, watchCaptions } from '../../src/voice/live.js';
 import { voiceSettings, scrub } from '../../src/voice/settings.js';
+import { bridgeScript } from '../../src/voice/providers.js';
 
 const KEY = 'sk-test-key-which-must-stay-here';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -40,6 +41,12 @@ test('src and bin do not call a chat model or play into the meeting', () => {
       assert.equal(src.includes(needle), false, path.relative(ROOT, file) + ' contains ' + needle);
     }
   }
+  const page = bridgeScript() + bridgeScript({ hostRoles: ['tts', 'smartest', 'stt'] });
+  for (const needle of forbidden) {
+    assert.equal(page.includes(needle), false, 'the page bridge contains ' + needle);
+  }
+  assert.equal(page.includes('__gifosHostCall'), true);
+  assert.equal(page.includes('__gifosMcpSpeak'), false);
   for (const rel of [
     'src/voice/talk.js', 'src/voice/llm.js', 'src/voice/speech.js', 'src/voice/clauses.js', 'src/voice/mouth.js',
     'src/voice/sidecar.py', 'src/voice/client.js', 'src/tts.js', 'src/participant/session.js',

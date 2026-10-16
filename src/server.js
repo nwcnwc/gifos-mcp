@@ -8,7 +8,7 @@ import { formatInvite, plainLink, PASSWORD_LINK_NOTE } from './invite.js';
 import { LiveTranscript } from './voice/live.js';
 import { CAMERA_GAP, CONTROLS_GAP, HAND_GAP, INTERJECT_GAP, MIC_GAP, SNAPSHOT_GAP, VOICE_GAP, scrub, voicePublic, voiceSettings } from './voice/settings.js';
 
-export const VERSION = '0.3.2';
+export const VERSION = '0.3.3';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
@@ -219,7 +219,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
 
   server.registerTool('set_voice', {
     title: 'Hand Meet Bot its voice switches',
-    description: 'Passes respond_to_command and conversation_voice (none, grok, or local) through to Meet Bot. local uses the OpenAI-compatible endpoint configured in the environment. This server does not call the model. The key is not an argument and is not returned.',
+    description: 'Passes respond_to_command and conversation_voice (none, grok, or local) through to Meet Bot. local names the smartest role. When this process hosts that role, it calls the model. The page does not. The key is not an argument and is not returned.',
     inputSchema: {
       respond_to_command: z.boolean().optional().describe('When true, Meet Bot may answer commands it hears. When false, it does not.'),
       conversation_voice: z.enum(['none', 'grok', 'local']).optional().describe('none, grok (Grok Voice), or local (the configured LLM, then Kokoro).'),
@@ -247,7 +247,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
 
   server.registerTool('say', {
     title: 'Speak in the meeting',
-    description: 'Passes a spoken line through to Meet Bot (MeetingBot.interject), ahead of conversation voice. This server does not synthesize speech. share_content remains chat. After the meeting, handle notes, mail, and calendar yourself.',
+    description: 'Passes a spoken line through to Meet Bot (MeetingBot.interject), ahead of conversation voice. Meet Bot asks the tts provider. When this process hosts that role, it returns the audio and does not play it into the meeting. share_content remains chat.',
     inputSchema: {
       meeting_id: meetingId,
       text: z.string().min(1).max(2000).describe('What Meet Bot should say, in one or two sentences.'),

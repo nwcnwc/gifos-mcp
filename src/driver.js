@@ -13,7 +13,8 @@ import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import { log } from './log.js';
 import { VOICE_GAP, INTERJECT_GAP, HAND_GAP, MIC_GAP, CAMERA_GAP, CONTROLS_GAP, SNAPSHOT_GAP } from './voice/settings.js';
-import { bridgeScript, installPlan, MCP_TTS_BINDING, speakAsTts } from './voice/providers.js';
+import { bridgeScript, hostRoles, HOST_BINDING, installPlan } from './voice/providers.js';
+import { packHostResult, serveHost } from './voice/host.js';
 import { installKokoro } from './voice/kokoro.js';
 
 const require = createRequire(import.meta.url);
@@ -91,20 +92,36 @@ export class MeetingBotDriver {
     });
     const init = { gifos_meet_bar: '0', gifos_name: this.creds.name };
     if (this.cfg.relay) init.gifos_relay = this.cfg.relay;
-    const mcpTts = !!(this.kokoro && this.cfg.voice.tts.source === 'mcp');
-    if (mcpTts) {
-      const engine = this.kokoro;
-      await ctx.exposeBinding(MCP_TTS_BINDING, async (_source, text, voice) => {
-        const out = await speakAsTts(engine, { text, voice });
-        return out.bytes.toString('base64');
+    const roles = hostRoles(this.cfg);
+    if (roles.length) {
+      await ctx.exposeBinding(HOST_BINDING, async (_source, role, payload) => {
+        let req = {};
+        try { req = JSON.parse(String(payload || '{}')); }
+        catch (e) { throw new Error('The host provider call was not a request.'); }
+        return packHostResult(await serveHost(this.hostServices(), String(role || ''), req));
       });
     }
     await ctx.addInitScript({ content: 'try{var o=' + JSON.stringify(init) + ';for(var k in o)localStorage.setItem(k,o[k]);}catch(e){}' });
-    // The host page reads Settings and calls GifOS.providers. Meet Bot's frame
-    // never sees a URL or a key. Kokoro audio, when this process owns it,
-    // arrives through the binding above. The page does not fetch it.
-    await ctx.addInitScript({ content: bridgeScript({ mcpTts }) });
+    // This process embeds the page, so provider calls for the roles it hosts
+    // come back through the binding above. The page does not fetch them.
+    // Meet Bot's frame never sees a URL or a key.
+    await ctx.addInitScript({ content: bridgeScript({ hostRoles: roles }) });
     return ctx;
+  }
+
+  // What the binding may use. The key stays in this object, on this side
+  // of the page. A store app is not listed here, so the page's own provider
+  // answers that role.
+  hostServices() {
+    const voice = this.cfg.voice || {};
+    const tts = voice.tts || {};
+    const roles = new Set(hostRoles(this.cfg));
+    return {
+      kokoro: tts.source === 'mcp' ? this.kokoro : null,
+      tts: tts.engine === 'http' ? { url: tts.url, voice: tts.voice || '' } : null,
+      llm: roles.has('smartest') ? { url: voice.url, key: voice.key, model: voice.model } : null,
+      stt: roles.has('stt') ? { url: voice.sttUrl } : null,
+    };
   }
 
   async desktop(ctx) {

@@ -36,8 +36,9 @@ const reset = meetings.resetLive();
 if (reset) log(reset + ' meeting(s) were live in the last run; they are back to scheduled');
 const bot = new MeetingBotDriver(cfg, creds);
 const live = new LiveTranscript(cfg.home);
-const captions = watchCaptions({ meetings, bot, live, intervalMs: cfg.voice.pollMs, botName: creds.name });
-const mcpArgs = { cfg, meetings, bot, live, captions, botName: creds.name };
+const hide = (text) => scrub(text, [cfg.voice.key, creds.password]);
+const captions = watchCaptions({ meetings, bot, live, intervalMs: cfg.voice.pollMs, botName: creds.name, scrubText: hide });
+const mcpArgs = { cfg, meetings, bot, live, captions, botName: creds.name, botPassword: creds.password };
 const voiceNote = cfg.voice.conversationVoice + (cfg.voice.conversationVoice === 'local' && cfg.voice.model ? ' (' + cfg.voice.model + ')' : '');
 log('gifos-mcp ' + VERSION + ' · GifOS ' + cfg.gifosUrl + ' · bot "' + creds.name + '" (' + creds.source + ') · voice ' +
   voiceNote + ' · commands ' + (cfg.voice.respondToCommand ? 'on' : 'off') + ' · data ' + cfg.home);
@@ -75,7 +76,7 @@ if (httpAt >= 0) {
       await server.connect(transport);
       await transport.handleRequest(req, res);
     } catch (e) {
-      log('http request failed: ' + scrub(e.message, cfg.voice.key));
+      log('http request failed: ' + hide(e.message));
       if (!res.headersSent) res.writeHead(500).end();
     }
   });

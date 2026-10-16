@@ -119,6 +119,8 @@ A provider is an ordinary App GIF whose manifest lists roles:
 
 The signed providers in the store are Kokoro, Kitten, and eSpeak for `tts`; Whisper for `stt`; and BitNet, Gemma, and Gemma 4 for `cheapest`. Each one runs the model inside the GIF. None of them declares `capabilities.network` or `capabilities.api`.
 
+Meet Bot's conversation text role is `smartest`. This server assigns the endpoint, or `GIFOS_LLM_APP`, to that row only. `cheapest` stays the row the offline models provide. `setVoice` names `llm: { provider: "smartest" }`.
+
 Registration is `gifos.provider.serve({ tts: fn, smartest: fn, ... })` in the app. When the computer calls that role, the runtime mounts the GIF in a hidden sandboxed iframe and posts `{ ns: "gifos", type: "provider-request", role, req }`. The handler is keyed by role. It returns `{ text }` for chat and speech-to-text, or `{ bytes, mime }` for speech. The iframe's CSP is `connect-src 'none'`. The mount refuses every bridge call except the provider request, asset reads, and `info`.
 
 Three checks, in `js/runtime.js`, decide whether that mount is allowed:
@@ -268,16 +270,20 @@ That line is the assistant cutting in. Meet Bot speaks it and it takes priority 
 | `GIFOS_STT_URL` | An HTTP caption stand-in, stored as the `stt` endpoint in Settings, and only when `GIFOS_STT_APP=none`. `setVoice` says `{ provider: "stt" }` and does not include the URL. v1 transcription still uses the store app. |
 | `GIFOS_LLM_APP` | A store provider app assigned to `smartest`, instead of an OpenAI-compatible URL. Conversation voice `local` does not then require a URL. |
 
+## Decisions
+
+- **Conversation text role is `smartest`.** Settings also has `cheapest`, which is what BitNet, Gemma, and Gemma 4 provide. Meet Bot's conversation uses `smartest` only. This server does not assign `cheapest`.
+- **Meeting control is a declared GifOS capability.** Hand, microphone, camera, and the rest of in-room control are built by the gifos-apps-source agent, on Meeting Bot. This repository does not declare that capability and does not implement it. `raise_hand`, `set_mic`, `set_camera`, `get_meeting_state`, and `snapshot` only forward `window.MeetingBot`. When the method is missing they report the gap and leave the meeting as it is.
+
 ## Questions still open
 
 1. For an OpenAI-compatible URL, is `configure(role, { url, key, model })` the provider entry you want? A GIF that fetched that URL would be refused. The endpoint row is the wrap the broker already runs.
 2. Is `GifOS.providers.place(files)` the missing call, filed like `install` but with the caller's files instead of a store slug? The other small version is to teach `createAppFromFiles` to parent a network-less `provides.ai` app into `sys_providers` and put that function on `GifOS`.
 3. Kokoro and Whisper are signed store apps. Until `place` exists, this server installs those slugs. Should that stay, or should a generated provider be the only thing this server files?
 4. A dropped GIF runs unsigned. A seeded default must be signed by gifos.app. Which bar should `place` use?
-5. The text role this server assigns is `smartest`. Settings also has `cheapest`, which is what the offline LLMs provide. Should Meet Bot use `smartest`, `cheapest`, or both?
-6. The AI broker fetches an endpoint directly. This server's host script sends an http endpoint through `https://cors-proxy.gifos.app` when the page is https, because mixed content blocks the call. An https endpoint is fetched directly. May an http endpoint's key transit that proxy?
-7. CONTROL.md v2 still documents raw URLs on `setVoice`, and `meet-host.js` still pushes an STT URL into the session. Should `cursor/meetbot-host-ops` read `gifos_ai_config` itself?
-8. The first `say` after a real Kokoro install waits on that app's weight download. Is that the expected pause?
+5. The AI broker fetches an endpoint directly. This server's host script sends an http endpoint through `https://cors-proxy.gifos.app` when the page is https, because mixed content blocks the call. An https endpoint is fetched directly. May an http endpoint's key transit that proxy?
+6. CONTROL.md v2 still documents raw URLs on `setVoice`, and `meet-host.js` still pushes an STT URL into the session. Should `cursor/meetbot-host-ops` read `gifos_ai_config` itself?
+7. The first `say` after a real Kokoro install waits on that app's weight download. Is that the expected pause?
 
 ## Gaps Meet Bot must gain
 
@@ -291,15 +297,35 @@ Contract v1 does not have these. Until it does, `set_voice` and `say` report the
 6. **Conversation voice `local`.** Stream the configured OpenAI-compatible chat model with no tools, then speak with Kokoro. The first audio should start from the first clause of the stream. The HTTP call cannot run inside the app frame (`connect-src 'none'`, and `meeting-bot/app.js` must not grow a `fetch`). It has to run on the GifOS host page, which already owns the session iframe, then play into that session. A new `gifos.meet` op (and the matching `gifos-meet` session op) is the place for "here is the voice setting" if the app must not see the key in its own heap. Either way the setting is Meet Bot's, not this server's loop.
 7. **Do not write the bot's own voice into the transcript.** v1 already refuses the bot machine's microphone. Spoken voice has to keep that property, or the model will answer itself.
 8. **Optional: push new transcript lines.** v1 only returns `transcript(id)` when asked. This server polls that. A `meet-event` of type `transcript` would remove the poll. It is not required for the handoff.
-9. **`raiseHand(id, on)`**, **`setMic(id, on)`**, **`setCamera(id, on)`**. v1 has no hand, microphone, or camera. Until these exist, the matching tool reports the gap and does not click the meeting page.
-10. **`meetingState(id)`** returning `{ hand, mic, camera }` (and people, if the app already has them). v1 `people(id)` still answers who is in the room.
-11. **`snapshot(id)`**. Optional. This server also saves a PNG of the Meet Bot page it already has open. It does not open a second browser to take the picture.
+9. **`raiseHand(id, on)`**, **`setMic(id, on)`**, **`setCamera(id, on)`**. These are the meeting-control capability, built in gifos-apps-source, not here. v1 has no hand, microphone, or camera. Until these exist, the matching tool reports the gap and does not click the meeting page.
+10. **`meetingState(id)`** returning `{ hand, mic, camera }` (and people, if the app already has them). Same capability. v1 `people(id)` still answers who is in the room.
+11. **`snapshot(id)`**. Same capability, optional. This server also saves a PNG of the Meet Bot page it already has open. It does not open a second browser to take the picture.
 
 No other voice stack should be added to gifos-mcp to paper over these gaps.
 
+## What this branch removed
+
+Compared with `cc-mcp-participant`, this branch deletes the second participant and the voice pipeline this process used to run. That removal is the design: Meet Bot is the only participant, and this process does not speak.
+
+Kept, because they are management rather than participation: meeting links, `send_chat`, `raise_hand`, `set_mic`, `set_camera`, `get_meeting_state`, `snapshot`, and `leave_meeting`. `create_meeting` still mints the link. Its plain-link invite (`invite_email`, `invite_calendar`, room password beside the link) was deleted in the same pass and is restored. It was not part of the voice stack.
+
+Dropped on purpose, and not restored:
+
+| Area | What it was |
+|---|---|
+| `src/participant/`, `test/participant/`, `docs/PARTICIPANT.md` | A second browser that joined as its own tile, with its own microphone. |
+| `join_meeting_as_participant`, `get_new_utterances` | The tools for that second tile. |
+| `src/audio/`, `src/providers/`, `src/voice/sidecar.py`, `src/voice/client.js`, `src/transcript/lanes.js`, `scripts/stt-bench.js` | In-process speech-to-text, text-to-speech, the chat model, and the Python sidecar. |
+| `src/admin/` | The `gb1` controller that drove Meet Bot from a second copy of the app. This server calls `window.MeetingBot` instead. |
+| `set_switches`, `stop_speaking` | Switches and barge-in for the voice pipeline this process no longer runs. `set_voice` is the handoff. Stopping speech belongs to the meeting-control capability. |
+| `docs/PROVIDERS.md`, `docs/STT-BENCH.md` | The old "this process is the provider machine" notes. |
+| `publicView` fields `mode` and `display_name` | Those marked a participant session. This server has no participant sessions. |
+
+`room_password` stays on the meeting record and on tool results, as its own field. It is not put back into the link.
+
 ## Non-voice tools
 
-These ride the same `window.MeetingBot` call. They do not open a participant browser, and they do not speak.
+These ride the same `window.MeetingBot` call. They do not open a participant browser, and they do not speak. Hand, microphone, camera, and snapshot of the room wait on the meeting-control capability. Until that capability lands, the tool reports the gap.
 
 | Tool | Meeting Bot | When the method is missing |
 |---|---|---|

@@ -134,8 +134,9 @@ async function main() {
       GIFOS_RELAY: relay,
       GIFOS_MCP_HOME: mcpHome,
       GIFOS_STT_APP: STT === 'synthetic' ? 'stt-synthetic' : 'offline-stt-whisper',
-      // This run checks transcription. Kokoro is the default voice and would
-      // download its weights on first use, so leave text-to-speech off here.
+      GIFOS_VOICE: '0',
+      GIFOS_LLM_KEY: '',
+      GIFOS_LLM_URL: '',
       GIFOS_TTS_ENGINE: 'none',
       GIFOS_MCP_SHOTS: PROOF,
     },
@@ -147,7 +148,8 @@ async function main() {
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
-    check('MCP server lists its tools over stdio', tools.length === 10, tools.map((t) => t.name).join(', '));
+    const names = tools.map((t) => t.name);
+    check('MCP server lists its tools over stdio', tools.length === 20 && names.includes('set_voice') && names.includes('say') && names.includes('send_chat') && names.includes('leave_meeting'), names.join(', '));
 
     const created = await client.callTool({ name: 'create_meeting', arguments: { topic: 'Demo meeting', start_time: '17:00' } }, undefined, CALL);
     const meeting = JSON.parse(text(created));

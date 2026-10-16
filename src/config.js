@@ -4,14 +4,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { machineProfile, piperIsAvailable, resolveTts } from './tts.js';
+import { KOKORO_APP, KOKORO_VOICE } from './voice/settings.js';
 
 export const DEFAULT_GIFOS_URL = 'https://gifos.app';
 export const DEFAULT_STT_APP = 'offline-stt-whisper';
 
-// Suggested speaking model: xAI Grok over its public OpenAI-compatible API.
-// grok-4.20-0309-non-reasoning answers without a reasoning pass, so the first
-// words of a meeting reply can stream immediately. GIFOS_LLM_MODEL overrides it.
+// Suggested local-LLM setting for Meet Bot: xAI Grok over its public
+// OpenAI-compatible API. grok-4.20-0309-non-reasoning answers without a
+// reasoning pass. This process does not call the endpoint. GIFOS_LLM_MODEL
+// overrides the model name.
 export const SUGGESTED_LLM_URL = 'https://api.x.ai/v1';
 export const SUGGESTED_LLM_MODEL = 'grok-4.20-0309-non-reasoning';
 
@@ -32,25 +33,9 @@ function cleanUrl(u) {
   return s;
 }
 
-export function loadConfig(env = process.env, opts = {}) {
+export function loadConfig(env = process.env) {
   const home = env.GIFOS_MCP_HOME || path.join(os.homedir(), '.gifos-mcp');
   const stt = env.GIFOS_STT_APP === undefined ? DEFAULT_STT_APP : String(env.GIFOS_STT_APP).trim();
-  const piperBin = String(env.GIFOS_PIPER_BIN || 'piper').trim() || 'piper';
-  const piperModel = String(env.GIFOS_PIPER_MODEL || '').trim();
-  const profile = opts.profile || machineProfile();
-  const piperAvailable = opts.piperAvailable != null
-    ? !!opts.piperAvailable
-    : piperIsAvailable({ bin: piperBin, model: piperModel });
-  const kokoroAvailable = opts.kokoroAvailable != null ? !!opts.kokoroAvailable : true;
-  const tts = resolveTts({
-    requested: env.GIFOS_TTS_ENGINE,
-    voice: env.GIFOS_TTS_VOICE,
-    profile,
-    kokoroAvailable,
-    piperAvailable,
-    piperBin,
-    piperModel,
-  });
   return {
     home,
     gifosUrl: cleanUrl(env.GIFOS_URL || DEFAULT_GIFOS_URL),
@@ -66,14 +51,14 @@ export function loadConfig(env = process.env, opts = {}) {
     autoInstallBrowser: env.GIFOS_MCP_NO_INSTALL !== '1',
     prewarm: env.GIFOS_MCP_LAZY !== '1',
     debug: env.GIFOS_MCP_DEBUG === '1',
-    vadEndMs: Number(env.GIFOS_VAD_END_MS) > 0 ? Number(env.GIFOS_VAD_END_MS) : 450,
-    turnPauseMs: Number(env.GIFOS_TURN_PAUSE_MS) >= 0 && env.GIFOS_TURN_PAUSE_MS !== undefined && env.GIFOS_TURN_PAUSE_MS !== ''
-      ? Number(env.GIFOS_TURN_PAUSE_MS) : 700,
+    voice: voiceConfig(env),
   };
 }
 
-// The speaking model. A key with no URL uses the suggested xAI endpoint.
-// Any other OpenAI-compatible base URL works; the key is never given a default.
+const VOICES = new Set(['none', 'grok', 'local']);
+
+// Settings Meet Bot will own. A key with no URL uses the suggested xAI
+// endpoint. This process never calls that endpoint.
 export function voiceConfig(env = process.env) {
   const key = String(env.GIFOS_LLM_KEY || '');
   const url = env.GIFOS_LLM_URL === undefined || String(env.GIFOS_LLM_URL).trim() === ''
@@ -81,31 +66,45 @@ export function voiceConfig(env = process.env) {
     : cleanBase(env.GIFOS_LLM_URL, 'GIFOS_LLM_URL');
   const xai = hostOf(url) === 'api.x.ai';
   const model = String(env.GIFOS_LLM_MODEL || (xai ? SUGGESTED_LLM_MODEL : '')).trim();
-  const ttsUrl = env.GIFOS_TTS_URL === undefined || String(env.GIFOS_TTS_URL).trim() === ''
-    ? url
-    : cleanBase(env.GIFOS_TTS_URL, 'GIFOS_TTS_URL');
-  const ttsPath = String(env.GIFOS_TTS_PATH || (hostOf(ttsUrl) === 'api.x.ai' ? '/tts' : '/audio/speech')).trim();
-  const pauseRaw = env.GIFOS_TURN_PAUSE_MS;
-  const pauseMs = pauseRaw !== undefined && pauseRaw !== '' && Number(pauseRaw) >= 0 ? Number(pauseRaw) : 700;
+  let conversationVoice = String(env.GIFOS_CONVERSATION_VOICE || '').trim().toLowerCase();
+  if (env.GIFOS_VOICE === '0') conversationVoice = 'none';
+  else if (!conversationVoice) conversationVoice = (key || url) ? 'local' : 'none';
+  if (!VOICES.has(conversationVoice)) throw new Error('GIFOS_CONVERSATION_VOICE must be none, grok, or local.');
+  if (conversationVoice === 'local') {
+    if (!url) throw new Error('GIFOS_LLM_URL or GIFOS_LLM_KEY is required when conversation voice is local.');
+    if (!model) throw new Error('GIFOS_LLM_MODEL is required for this GIFOS_LLM_URL.');
+  }
   const pollRaw = Number(env.GIFOS_TRANSCRIPT_POLL_MS);
   return {
-    enabled: env.GIFOS_VOICE !== '0' && !!url && !!model,
+    conversationVoice,
+    respondToCommand: env.GIFOS_RESPOND_TO_COMMAND !== '0',
     url,
     key,
     model,
-    ttsUrl,
-    ttsPath: ttsPath.startsWith('/') ? ttsPath : '/' + ttsPath,
-    ttsVoice: String(env.GIFOS_TTS_VOICE || (hostOf(ttsUrl) === 'api.x.ai' ? 'eve' : 'alloy')).trim(),
-    ttsModel: String(env.GIFOS_TTS_MODEL || 'tts-1').trim(),
-    pauseMs,
     pollMs: pollRaw > 0 ? pollRaw : 500,
+    tts: ttsConfig(env),
+    sttUrl: sttUrl(env),
   };
 }
 
-// What a tool may say about the speaking model. No URL, no key.
-export function voicePublic(voice) {
-  if (!voice || !voice.enabled) return { speaking: false, model: null };
-  return { speaking: true, model: voice.model };
+// Speech and captions for Meet Bot's local mode. Nothing here is fetched.
+const TTS_ENGINES = new Set(['', 'auto', 'kokoro', 'none']);
+
+function ttsConfig(env) {
+  const ask = String(env.GIFOS_TTS_ENGINE || '').trim().toLowerCase();
+  if (!TTS_ENGINES.has(ask)) {
+    throw new Error('GIFOS_TTS_ENGINE must be auto, kokoro, or none. This server does not run a speech engine.');
+  }
+  const named = String(env.GIFOS_TTS_VOICE || '').trim();
+  if (ask === 'none') return { engine: 'none' };
+  const url = String(env.GIFOS_TTS_URL || '').trim();
+  if (url) return { engine: 'http', url: cleanBase(url, 'GIFOS_TTS_URL') };
+  return { engine: 'kokoro', app: KOKORO_APP, voice: named || KOKORO_VOICE };
+}
+
+function sttUrl(env) {
+  const url = String(env.GIFOS_STT_URL || '').trim();
+  return url ? cleanBase(url, 'GIFOS_STT_URL') : '';
 }
 
 // Mirrors the Meeting Bot's own strength rule (protocol.js), so a pair we

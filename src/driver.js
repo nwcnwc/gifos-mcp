@@ -1,6 +1,7 @@
 // Drives the GifOS Meeting Bot store app in headless Chromium, through the
-// app's local control API (window.MeetingBot, contract version 1; see
-// CONTROL.md in gifos-apps-source/meeting-bot).
+// app's local control API (window.MeetingBot). Contract version 1 is the
+// published CONTROL.md. Version 2 methods (setVoice, interject, raiseHand,
+// setMic, setCamera, meetingState, snapshot) are called only when present.
 //
 // One browser profile under GIFOS_MCP_HOME/profile-bot: a GifOS desktop with
 // Meeting Bot and a speech-to-text provider app installed from the GifOS app
@@ -11,9 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import { log } from './log.js';
-import { AdminRoom } from './admin/room.js';
-import { providerRegistration } from './providers/registry.js';
-import { mouthInitScript } from './providers/mouth.js';
+import { VOICE_GAP, INTERJECT_GAP, HAND_GAP, MIC_GAP, CAMERA_GAP, CONTROLS_GAP, SNAPSHOT_GAP } from './voice/settings.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -38,14 +37,7 @@ export class MeetingBotDriver {
     this.error = '';
     this.starting = null;
     this.bot = null;      // { ctx, desk, app, frame, fileId }
-    this.control = null;  // second Meeting Bot page, CONTROL mode, admin room
-    this.room = null;      // AdminRoom over that page
     this.sttFileId = '';
-    this.providers = providerRegistration();
-    this.switches = { respond_to_command: true, conversation_voice: 'none' };
-    this.earTimer = null;
-    this.playGen = 0;
-    this.onLine = null;
   }
 
   ensureStarted() {
@@ -97,7 +89,6 @@ export class MeetingBotDriver {
     const init = { gifos_meet_bar: '0', gifos_name: this.creds.name };
     if (this.cfg.relay) init.gifos_relay = this.cfg.relay;
     await ctx.addInitScript({ content: 'try{var o=' + JSON.stringify(init) + ';for(var k in o)localStorage.setItem(k,o[k]);}catch(e){}' });
-    await ctx.addInitScript({ content: mouthInitScript() });
     return ctx;
   }
 
@@ -179,19 +170,6 @@ export class MeetingBotDriver {
     }, { fileId, appId });
   }
 
-  async useAsTextToSpeech(desk, fileId, appId) {
-    if (await this.placedParent(desk, fileId) !== 'sys_providers') {
-      throw new Error('The ' + appId + ' app is installed but not in the Providers folder of the bot desktop. Remove ' +
-        this.cfg.home + '/profile-bot and restart to reinstall it.');
-    }
-    await desk.evaluate(({ fileId, appId }) => {
-      const cfg = JSON.parse(localStorage.getItem('gifos_ai_config') || '{}') || {};
-      if (cfg.tts && cfg.tts.app === fileId) return;
-      cfg.tts = { app: fileId, appId, appName: appId };
-      localStorage.setItem('gifos_ai_config', JSON.stringify(cfg));
-    }, { fileId, appId });
-  }
-
   async openApp(ctx, fileId) {
     const app = await ctx.newPage();
     app.on('pageerror', (e) => log('[app] ' + e.message));
@@ -238,111 +216,13 @@ export class MeetingBotDriver {
       this.sttFileId = await this.installFromStore(desk, this.cfg.sttApp);
       await this.useAsSpeechToText(desk, this.sttFileId, this.cfg.sttApp);
     }
-    await this.startVoice(desk);
     this.bot.fileId = await this.installFromStore(desk, 'meeting-bot');
     await this.shot(desk, 'bot-desktop.png');
     Object.assign(this.bot, await this.openApp(ctx, this.bot.fileId));
     await this.startRun();
-    await this.openControl();
-    await this.announceProviders();
-    await this.armEars();
     await this.shot(this.bot.app, 'bot-running.png');
     this.state = 'ready';
-    log('ready: Meeting Bot "' + this.creds.name + '" is running, controlled from its admin room');
-  }
-
-  // CONTROL mode of the same signed store app. Commands after boot go
-  // through the admin meeting, not through window.MeetingBot on the RUN page.
-  async openControl() {
-    const opened = await this.openApp(this.bot.ctx, this.bot.fileId);
-    this.control = opened;
-    const r = await opened.frame.evaluate((c) => window.MeetingBot.start({ mode: 'control', name: c.name, password: c.password })
-      .then((s) => ({ ok: true, s }), (e) => ({ ok: false, error: String((e && e.message) || e) })), this.creds);
-    if (!r.ok) throw new Error('Meeting Bot control did not start: ' + r.error);
-    const t0 = Date.now();
-    while (Date.now() - t0 < this.cfg.timeoutMs) {
-      const st = await opened.frame.evaluate(() => window.MeetingBot.status());
-      if (st.phase === 'control' && st.connected) {
-        this.room = new AdminRoom((msg) => this.deliver(msg));
-        return st;
-      }
-      await sleep(300);
-    }
-    throw new Error('Meeting Bot control never joined its admin meeting.');
-  }
-
-  // One controller message in, one bot reply out. The bot password is not
-  // part of the message. A room password, when join needs one, is a field
-  // the guest already has; it is not the admin password.
-  async deliver(msg) {
-    const timeout = this.cfg.timeoutMs;
-    return await this.control.frame.evaluate(async ({ msg, timeout }) => {
-      const list = await gifos.meet.list();
-      const admin = (list || []).find((s) => s.control) || (list || [])[0];
-      if (!admin || !admin.meetingId) throw new Error('The control session has no admin meeting.');
-      let fileText = '';
-      const reply = await new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('The admin room did not answer.')), timeout);
-        gifos.meet.onXfer((ev) => {
-          try {
-            const bytes = ev && ev.bytes ? new Uint8Array(ev.bytes) : new Uint8Array(0);
-            fileText = new TextDecoder().decode(bytes);
-          } catch (e) { fileText = ''; }
-        });
-        gifos.meet.onChat((ev) => {
-          let decoded = null;
-          try { decoded = window.BotProto.decode(String((ev && ev.text) || '')); } catch (e) { decoded = null; }
-          if (!decoded || decoded.ref !== msg.id) return;
-          clearTimeout(t);
-          if (fileText) decoded.fileText = fileText;
-          resolve(decoded);
-        });
-        gifos.meet.sendChat(admin.meetingId, window.BotProto.encode(msg)).catch((e) => {
-          clearTimeout(t);
-          reject(e);
-        });
-      });
-      return reply;
-    }, { msg, timeout });
-  }
-
-  async announceProviders() {
-    if (!this.room) return { accepted: false };
-    try {
-      await this.room.call('providers', { roles: this.providers.roles });
-      return { accepted: true };
-    } catch (e) {
-      if (e && e.unknown) return { accepted: false, reason: 'bot-ignored' };
-      throw e;
-    }
-  }
-
-  // Kokoro is installed from the store and assigned to Text → speech. If that
-  // fails, Piper is the voice instead, and startup continues either way.
-  async startVoice(desk) {
-    const plan = this.cfg.tts;
-    if (!plan || plan.engine === 'none') {
-      this.tts = plan || null;
-      return;
-    }
-    const piperAvailable = piperIsAvailable({ bin: plan.piperBin, model: plan.piperModel });
-    this.tts = await activateTts(plan, {
-      piperAvailable,
-      installKokoro: async (app) => {
-        const fileId = await this.installFromStore(desk, app);
-        await this.useAsTextToSpeech(desk, fileId, app);
-        return fileId;
-      },
-    });
-    if (this.tts.engine === 'kokoro' && this.tts.ready) {
-      log('text-to-speech: Kokoro (' + (this.tts.voice || 'default') + ')');
-    } else if (this.tts.engine === 'piper') {
-      const why = this.tts.fallback ? 'fallback, ' + this.tts.reason : 'selected';
-      log('text-to-speech: Piper (' + why + ')' + (this.tts.ready ? '' : ', not ready — set GIFOS_PIPER_MODEL'));
-      if (this.tts.error) log('Kokoro was not used: ' + this.tts.error);
-    } else if (this.tts.error) {
-      log('text-to-speech: Kokoro is not ready: ' + this.tts.error);
-    }
+    log('ready: Meeting Bot "' + this.creds.name + '" is running');
   }
 
   // RUN first listens ~5 s for a bot with the same name and password. A copy
@@ -377,117 +257,100 @@ export class MeetingBotDriver {
   }
 
   async join(link, password) {
-    await this.ensureStarted();
-    const reply = await this.room.call('join', { link, password: password || '' });
+    const r = await this.call('join', link, password || '');
     await this.shot(this.bot.app, 'bot-joined.png');
-    if (!reply.meetingId) throw new Error('The admin room join did not return a meeting.');
-    return reply.meetingId;
+    return r.id;
   }
 
-  async leave(sessionId) {
+  async leave(sessionId) { await this.call('end', sessionId); }
+  async transcribe(sessionId, on) { await this.call('transcribe', sessionId, !!on); }
+  async say(sessionId, text) { await this.call('say', sessionId, String(text)); }
+  async people(sessionId) { return this.call('people', sessionId); }
+  async list() { return this.call('list'); }
+  async transcript(sessionId) { return (await this.call('transcript', sessionId)).text || ''; }
+
+  // The check passes no arguments, so a missing method never receives a payload.
+  async whenMethod(check, gap, invoke) {
     await this.ensureStarted();
-    await this.room.call('leave', { meetingId: sessionId });
+    const has = await this.bot.frame.evaluate(check);
+    if (!has) return { applied: false, gap };
+    const result = await invoke();
+    return { applied: true, result: result == null ? null : result };
   }
 
-  async transcribe(sessionId, on) {
-    await this.ensureStarted();
-    const reply = await this.room.call('transcribe', { meetingId: sessionId, on: !!on });
-    const row = (reply.items || []).find((m) => m.id === sessionId);
-    if (on && row && row.cc === false) throw new Error('Transcribing did not show on the bot tile.');
+  // Hands the local-LLM setting to the app. The key is not evaluated into the
+  // page unless MeetingBot.setVoice already exists.
+  async setVoice(settings) {
+    return this.whenMethod(
+      () => typeof (window.MeetingBot && window.MeetingBot.setVoice) === 'function',
+      VOICE_GAP,
+      () => this.bot.frame.evaluate((s) => window.MeetingBot.setVoice(s), settings),
+    );
   }
 
-  async say(sessionId, text) {
-    await this.ensureStarted();
-    await this.room.call('say', { meetingId: sessionId, text: String(text) });
+  // Spoken interjection from the assistant. Chat stays on say().
+  async interject(sessionId, text) {
+    return this.whenMethod(
+      () => typeof (window.MeetingBot && window.MeetingBot.interject) === 'function',
+      INTERJECT_GAP,
+      () => this.bot.frame.evaluate(
+        ({ id, text }) => window.MeetingBot.interject(id, text),
+        { id: sessionId, text: String(text) },
+      ),
+    );
   }
 
-  async list() {
-    await this.ensureStarted();
-    const reply = await this.room.call('list', {});
-    return reply.items || reply.meetings || [];
+  async raiseHand(sessionId, on) {
+    return this.whenMethod(
+      () => typeof (window.MeetingBot && window.MeetingBot.raiseHand) === 'function',
+      HAND_GAP,
+      () => this.bot.frame.evaluate(({ id, on }) => window.MeetingBot.raiseHand(id, on), { id: sessionId, on: !!on }),
+    );
   }
 
-  async transcript(sessionId) {
-    await this.ensureStarted();
-    const reply = await this.room.call('transcript', { meetingId: sessionId });
-    return reply.fileText || '';
+  async setMic(sessionId, on) {
+    return this.whenMethod(
+      () => typeof (window.MeetingBot && window.MeetingBot.setMic) === 'function',
+      MIC_GAP,
+      () => this.bot.frame.evaluate(({ id, on }) => window.MeetingBot.setMic(id, on), { id: sessionId, on: !!on }),
+    );
   }
 
-  async setSwitches(switches) {
-    this.switches = {
-      respond_to_command: !!switches.respond_to_command,
-      conversation_voice: switches.conversation_voice || 'none',
-    };
-    if (!this.room) return { accepted: false };
-    try {
-      await this.room.call('switches', this.switches);
-      return { accepted: true };
-    } catch (e) {
-      if (e && e.unknown) return { accepted: false, reason: 'bot-ignored' };
-      throw e;
+  async setCamera(sessionId, on) {
+    return this.whenMethod(
+      () => typeof (window.MeetingBot && window.MeetingBot.setCamera) === 'function',
+      CAMERA_GAP,
+      () => this.bot.frame.evaluate(({ id, on }) => window.MeetingBot.setCamera(id, on), { id: sessionId, on: !!on }),
+    );
+  }
+
+  async meetingState(sessionId) {
+    return this.whenMethod(
+      () => typeof (window.MeetingBot && window.MeetingBot.meetingState) === 'function',
+      CONTROLS_GAP,
+      () => this.bot.frame.evaluate((id) => window.MeetingBot.meetingState(id), sessionId),
+    );
+  }
+
+  // Read-only. The PNG is the Meet Bot page this browser already has open.
+  async snapshot(sessionId) {
+    const taken = await this.whenMethod(
+      () => typeof (window.MeetingBot && window.MeetingBot.snapshot) === 'function',
+      SNAPSHOT_GAP,
+      () => this.bot.frame.evaluate((id) => window.MeetingBot.snapshot(id), sessionId),
+    );
+    let png = '';
+    if (this.bot && this.bot.app && typeof this.bot.app.screenshot === 'function') {
+      const dir = this.cfg.shotsDir || path.join(this.cfg.home, 'shots');
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      png = path.join(dir, 'snapshot-' + String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '') + '.png');
+      try { await this.bot.app.screenshot({ path: png }); } catch (e) { png = ''; }
     }
-  }
-
-  async registerProviders(reg) {
-    if (reg && reg.roles) this.providers = { v: 1, op: 'providers', roles: reg.roles };
-    return this.announceProviders();
-  }
-
-  // Meeting pages are iframes inside the Meeting Bot app. The mouth script
-  // installed on the browser context is what plays into them.
-  async workFrames() {
-    if (!this.bot || !this.bot.app) return [];
-    const ids = await this.bot.app.evaluate(() => {
-      const host = window.GifOS && window.GifOS.meetHost;
-      const list = host && host.list ? host.list() : [];
-      return list.filter((s) => s && !s.control).map((s) => s.meetingId);
-    }).catch(() => []);
-    const frames = [];
-    for (const id of ids || []) {
-      const el = await this.bot.app.$('iframe[data-gifos-meet="' + id + '"]');
-      if (!el) continue;
-      const frame = await el.contentFrame();
-      if (frame) frames.push(frame);
-    }
-    return frames;
-  }
-
-  async playEncoded(bytes) {
-    if (!bytes || !bytes.length) return false;
-    const frames = await this.workFrames().catch(() => []);
-    if (!frames.length) return false;
-    this.playGen += 1;
-    const gen = this.playGen;
-    const b64 = Buffer.from(bytes).toString('base64');
-    let played = false;
-    for (const frame of frames) {
-      const ok = await frame.evaluate((audio) => {
-        if (typeof window.__gifosPlayEncoded !== 'function') return false;
-        return window.__gifosPlayEncoded(audio);
-      }, b64).catch(() => false);
-      if (ok) played = true;
-    }
-    if (this.playGen === gen) await this.quiet().catch(() => {});
-    return played;
-  }
-
-  async quiet() {
-    this.playGen += 1;
-    const frames = await this.workFrames().catch(() => []);
-    for (const frame of frames) {
-      await frame.evaluate(() => {
-        if (typeof window.__gifosQuiet === 'function') window.__gifosQuiet();
-      }).catch(() => {});
-    }
+    return { applied: taken.applied, gap: taken.gap || null, png, result: taken.result == null ? null : taken.result };
   }
 
   async info() {
-    const out = {
-      state: this.state, bot_name: this.creds.name, stt_ready: !!this.sttFileId,
-      control: this.room ? 'admin-room' : 'starting',
-      providers: this.providers.roles,
-      switches: this.switches,
-    };
+    const out = { state: this.state, bot_name: this.creds.name, stt_ready: !!this.sttFileId };
     if (this.error) out.error = this.error;
     if (this.state === 'ready') {
       try {
@@ -510,107 +373,9 @@ export class MeetingBotDriver {
     return out;
   }
 
-  // The RUN page hears caption lines. They are kept only for meetings whose
-  // tile is transcribing. The admin meeting is not one of those lines.
-  async armEars() {
-    if (!this.bot || !this.bot.frame) return;
-    await this.bot.frame.evaluate(() => {
-      if (!window.gifos || !gifos.meet || typeof gifos.meet.onTranscriptLine !== 'function') return;
-      if (window.__gifosEar) return;
-      window.__gifosEar = true;
-      window.__gifosHeard = [];
-      gifos.meet.onTranscriptLine((ev) => {
-        const line = ev && ev.line;
-        if (!line || !ev.meetingId) return;
-        window.__gifosHeard.push({
-          meetingId: String(ev.meetingId),
-          speaker: String(line.by || ''),
-          text: String(line.text || ''),
-          at: line.at || Date.now(),
-        });
-      });
-    });
-    if (this.earTimer) clearInterval(this.earTimer);
-    this.earTimer = setInterval(() => {
-      this.drainEars().catch((e) => log('ears: ' + (e && e.message || e)));
-    }, 500);
-    if (this.earTimer.unref) this.earTimer.unref();
-  }
-
-  async drainEars() {
-    if (!this.bot || !this.bot.frame || typeof this.onLine !== 'function') return;
-    const pack = await this.bot.frame.evaluate(() => {
-      let cc = [];
-      try {
-        const st = window.MeetingBot && window.MeetingBot.status ? window.MeetingBot.status() : null;
-        cc = ((st && st.meetings) || []).filter((m) => m && m.cc).map((m) => m.id);
-      } catch (e) { cc = []; }
-      const xs = window.__gifosHeard || [];
-      window.__gifosHeard = [];
-      return { cc, xs };
-    });
-    const open = new Set(pack.cc || []);
-    for (const line of pack.xs || []) {
-      if (!line || !line.text || !open.has(line.meetingId)) continue;
-      Promise.resolve(this.onLine(line)).catch((e) => log('converse: ' + (e && e.message || e)));
-    }
-  }
-
-  async workFrames() {
-    if (!this.bot || !this.bot.app) return [];
-    const ids = await this.bot.app.evaluate(() => {
-      const host = window.GifOS && window.GifOS.meetHost;
-      const list = host && host.list ? host.list() : [];
-      return list.filter((s) => s && !s.control).map((s) => s.meetingId);
-    });
-    const frames = [];
-    for (const id of ids || []) {
-      const el = await this.bot.app.$('iframe[data-gifos-meet="' + id + '"]');
-      if (!el) continue;
-      const frame = await el.contentFrame();
-      if (frame) frames.push(frame);
-    }
-    return frames;
-  }
-
-  // Plays one encoded clip (wav or anything decodeAudioData accepts) into
-  // every work meeting. Returns false when the bot is not in one.
-  async playEncoded(bytes) {
-    if (!bytes || !bytes.length) return false;
-    const frames = await this.workFrames().catch(() => []);
-    if (!frames.length) return false;
-    this.playGen += 1;
-    const gen = this.playGen;
-    const b64 = Buffer.from(bytes).toString('base64');
-    let ok = false;
-    for (const frame of frames) {
-      const played = await frame.evaluate((audio) => {
-        if (typeof window.__gifosPlayEncoded !== 'function') return false;
-        return window.__gifosPlayEncoded(audio);
-      }, b64).catch(() => false);
-      if (played) ok = true;
-    }
-    if (this.playGen === gen) await this.quiet().catch(() => {});
-    return ok;
-  }
-
-  async quiet() {
-    this.playGen += 1;
-    const frames = await this.workFrames().catch(() => []);
-    for (const frame of frames) {
-      await frame.evaluate(() => {
-        if (typeof window.__gifosQuiet === 'function') window.__gifosQuiet();
-      }).catch(() => {});
-    }
-  }
-
   async close() {
-    if (this.earTimer) clearInterval(this.earTimer);
-    this.earTimer = null;
     if (this.bot && this.bot.ctx) await this.bot.ctx.close().catch(() => {});
     this.bot = null;
-    this.control = null;
-    this.room = null;
     this.state = 'stopped';
   }
 }

@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import { log } from './log.js';
+import { activateTts, piperIsAvailable } from './tts.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -36,6 +37,7 @@ export class MeetingBotDriver {
     this.starting = null;
     this.bot = null;      // { ctx, desk, app, frame, fileId }
     this.sttFileId = '';
+    this.tts = null;
   }
 
   ensureStarted() {
@@ -168,6 +170,19 @@ export class MeetingBotDriver {
     }, { fileId, appId });
   }
 
+  async useAsTextToSpeech(desk, fileId, appId) {
+    if (await this.placedParent(desk, fileId) !== 'sys_providers') {
+      throw new Error('The ' + appId + ' app is installed but not in the Providers folder of the bot desktop. Remove ' +
+        this.cfg.home + '/profile-bot and restart to reinstall it.');
+    }
+    await desk.evaluate(({ fileId, appId }) => {
+      const cfg = JSON.parse(localStorage.getItem('gifos_ai_config') || '{}') || {};
+      if (cfg.tts && cfg.tts.app === fileId) return;
+      cfg.tts = { app: fileId, appId, appName: appId };
+      localStorage.setItem('gifos_ai_config', JSON.stringify(cfg));
+    }, { fileId, appId });
+  }
+
   async openApp(ctx, fileId) {
     const app = await ctx.newPage();
     app.on('pageerror', (e) => log('[app] ' + e.message));
@@ -214,6 +229,7 @@ export class MeetingBotDriver {
       this.sttFileId = await this.installFromStore(desk, this.cfg.sttApp);
       await this.useAsSpeechToText(desk, this.sttFileId, this.cfg.sttApp);
     }
+    await this.startVoice(desk);
     this.bot.fileId = await this.installFromStore(desk, 'meeting-bot');
     await this.shot(desk, 'bot-desktop.png');
     Object.assign(this.bot, await this.openApp(ctx, this.bot.fileId));
@@ -221,6 +237,34 @@ export class MeetingBotDriver {
     await this.shot(this.bot.app, 'bot-running.png');
     this.state = 'ready';
     log('ready: Meeting Bot "' + this.creds.name + '" is running');
+  }
+
+  // Kokoro is installed from the store and assigned to Text → speech. If that
+  // fails, Piper is the voice instead, and startup continues either way.
+  async startVoice(desk) {
+    const plan = this.cfg.tts;
+    if (!plan || plan.engine === 'none') {
+      this.tts = plan || null;
+      return;
+    }
+    const piperAvailable = piperIsAvailable({ bin: plan.piperBin, model: plan.piperModel });
+    this.tts = await activateTts(plan, {
+      piperAvailable,
+      installKokoro: async (app) => {
+        const fileId = await this.installFromStore(desk, app);
+        await this.useAsTextToSpeech(desk, fileId, app);
+        return fileId;
+      },
+    });
+    if (this.tts.engine === 'kokoro' && this.tts.ready) {
+      log('text-to-speech: Kokoro (' + (this.tts.voice || 'default') + ')');
+    } else if (this.tts.engine === 'piper') {
+      const why = this.tts.fallback ? 'fallback, ' + this.tts.reason : 'selected';
+      log('text-to-speech: Piper (' + why + ')' + (this.tts.ready ? '' : ', not ready — set GIFOS_PIPER_MODEL'));
+      if (this.tts.error) log('Kokoro was not used: ' + this.tts.error);
+    } else if (this.tts.error) {
+      log('text-to-speech: Kokoro is not ready: ' + this.tts.error);
+    }
   }
 
   // RUN first listens ~5 s for a bot with the same name and password. A copy
@@ -268,6 +312,17 @@ export class MeetingBotDriver {
 
   async info() {
     const out = { state: this.state, bot_name: this.creds.name, stt_ready: !!this.sttFileId };
+    if (this.tts) {
+      out.tts = {
+        engine: this.tts.engine,
+        requested: this.tts.requested,
+        voice: this.tts.voice || '',
+        fallback: !!this.tts.fallback,
+        reason: this.tts.reason || '',
+        app: this.tts.app || '',
+        ready: !!this.tts.ready,
+      };
+    }
     if (this.error) out.error = this.error;
     if (this.state === 'ready') {
       try {

@@ -20,7 +20,7 @@
   },
   "scripts": {
     "start": "node bin/gifos-mcp.js",
-    "test": "node --test test/unit/config.test.js test/unit/tools.test.js test/unit/http.test.js",
+    "test": "node --test test/unit/config.test.js test/unit/tts.test.js test/unit/tools.test.js test/unit/http.test.js",
     "test:e2e": "node test/e2e/run.js"
   },
   "keywords": [

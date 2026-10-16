@@ -12,6 +12,9 @@ test('defaults', () => {
   const c = loadConfig({ GIFOS_MCP_HOME: '/x' });
   assert.equal(c.gifosUrl, DEFAULT_GIFOS_URL);
   assert.equal(c.sttApp, 'offline-stt-whisper');
+  assert.equal(c.tts.requested, 'auto');
+  assert.ok(c.tts.engine === 'kokoro' || c.tts.engine === 'piper');
+  assert.equal(c.tts.ready, false);
   assert.equal(c.headless, true);
   assert.equal(c.relay, '');
   assert.equal(c.timeoutMs, 120000);

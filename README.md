@@ -19,7 +19,9 @@ Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium (one p
                                          └─ GifOS desktop
                                               ├─ Meeting Bot, running as the bot (RUN mode)
                                               │    driven through its local control API, window.MeetingBot v1
-                                              └─ Offline Captions (Whisper), the speech-to-text provider
+                                              ├─ Offline Captions (Whisper), the speech-to-text provider
+                                              └─ Kokoro, the text-to-speech provider
+                                                   Piper replaces Kokoro on a smaller machine, or if Kokoro cannot start
 ```
 
 - `create_meeting` only mints a meeting link. Nothing joins yet.
@@ -28,6 +30,8 @@ Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium (one p
 - Speech is turned into text on your computer by the Offline Captions (Whisper) app from the GifOS store. The bot
   writes down each participant who is unmuted, credited by name. It never writes down its own machine's
   microphone.
+- The computer's voice is [Kokoro](#text-to-speech), installed from the store and assigned to Text → speech.
+  Piper is used only when this machine is too small for Kokoro, or when Kokoro cannot start.
 - `get_transcript` reads the transcript straight from the bot. Meeting Bot's
   [control contract](https://github.com/nwcnwc/gifos-apps-source/blob/meet-bot/meeting-bot/CONTROL.md) (version 1)
   is the only interface this server relies on.
@@ -43,7 +47,9 @@ already runs Grok Bot is the best place.
 ## Install
 
 You need **Node.js 20 or newer**. The first start downloads Chromium for Playwright (about 150 MB), and the
-first transcription downloads the Whisper model (about 77 MB).
+first transcription downloads the Whisper model (about 77 MB). The first time Kokoro speaks, GifOS downloads
+its voice weights (about 163 MB). Piper, the fallback voice, is a separate local program — see
+[Text to speech](#text-to-speech).
 
 Run it straight from GitHub:
 
@@ -103,6 +109,10 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_RELAY` | GifOS default | A custom relay (`wss://…`) for self-hosted GifOS. It is added to meeting links. |
 | `GIFOS_BOT_NAME`, `GIFOS_BOT_PASSWORD` | generated | The Meeting Bot name and password. They derive the bot's secret admin meeting. The name is what participants see. If unset, a strong pair is generated once and kept in `GIFOS_MCP_HOME/bot.json` (mode 0600). |
 | `GIFOS_STT_APP` | `offline-stt-whisper` | The store app that turns speech into text. `none` turns transcription off. |
+| `GIFOS_TTS_ENGINE` | `auto` | `auto` uses Kokoro when the machine has at least 4 CPUs and 8 GiB of RAM, and Piper otherwise. `kokoro` or `piper` forces that engine. `none` turns text-to-speech off. |
+| `GIFOS_TTS_VOICE` | engine default | Kokoro default `af_heart`. Piper default `en_US-lessac-medium`. |
+| `GIFOS_PIPER_BIN` | `piper` | The Piper program. Used only when Piper is the selected engine. |
+| `GIFOS_PIPER_MODEL` | none | Path to a Piper `.onnx` voice file. Piper is not ready until this file exists. |
 | `GIFOS_MCP_HOME` | `~/.gifos-mcp` | The browser profile, the bot credential, and `meetings.json`. |
 | `GIFOS_HEADLESS` | `1` | `0` shows the browser windows, which helps when debugging. |
 | `GIFOS_CHROME` | Playwright's Chromium | Path to another Chromium or Chrome binary. |
@@ -111,6 +121,61 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_MCP_LAZY` | `0` | `1` starts the browser on the first tool call instead of at launch. |
 | `GIFOS_MCP_DEBUG` | `0` | `1` logs the GifOS console to stderr and adds per-meeting caption state to `status`. |
 | `GIFOS_MCP_SHOTS` | none | A folder for screenshots of the bot's screens (for debugging). |
+
+## Text to speech
+
+Kokoro is the default open-source voice for this connector. It is the GifOS store app **Offline Neural TTS
+(Kokoro)**, app id `offline-tts-kokoro`. On startup the connector installs that app into the bot's Providers
+folder and assigns it to **Text → speech**, the same way it assigns Whisper to speech → text. Kokoro runs
+inside GifOS, on this computer. It does not need an account or an API key. The weights are the app's pinned
+download (about 163 MB), fetched once by GifOS the first time the voice is used.
+
+`status` reports the choice under `tts`:
+
+| Field | Meaning |
+|---|---|
+| `engine` | `kokoro`, `piper`, or `none`. |
+| `requested` | The value of `GIFOS_TTS_ENGINE` (`auto` when unset). |
+| `voice` | The voice name in use. |
+| `fallback` | `true` when Piper was chosen because Kokoro was not. |
+| `reason` | `default`, `configured`, `weaker-machine`, `kokoro-unavailable`, `kokoro-failed`, or `disabled`. |
+| `app` | `offline-tts-kokoro` while Kokoro is the engine. |
+| `ready` | Kokoro is installed and assigned, or Piper's program and voice file are both present. |
+
+### Choosing the engine
+
+Leave `GIFOS_TTS_ENGINE` unset, or set it to `auto`.
+
+- A machine with **at least 4 CPUs and 8 GiB of RAM** gets Kokoro.
+- A machine under either of those limits gets Piper, with `tts.fallback` true and `tts.reason` `weaker-machine`.
+- `GIFOS_TTS_ENGINE=kokoro` asks for Kokoro even on a small machine. If the install then fails and Piper is
+  ready, the connector switches to Piper (`reason` `kokoro-failed`) and still finishes starting.
+- `GIFOS_TTS_ENGINE=piper` uses Piper on every machine.
+- `GIFOS_TTS_ENGINE=none` does not install a voice. Transcription is unchanged.
+
+Kokoro voices are `af_heart` (the default), `af_bella`, `af_nicole`, `af_sarah`, `am_michael`, `am_fenrir`,
+`bf_emma`, and `bm_george`. Set `GIFOS_TTS_VOICE` to one of them.
+
+### Piper setup
+
+Piper is the fast local fallback. Install it on the computer from the
+[Piper project](https://github.com/OHF-Voice/piper1-gpl) (`pip install piper-tts`, or a release binary) and
+download a voice. `en_US-lessac-medium` is the default name this connector uses; the project's
+[voice list](https://github.com/rhasspy/piper/blob/master/VOICES.md) has the other ids. Point
+`GIFOS_PIPER_MODEL` at that voice's `.onnx` file:
+
+```sh
+pip install piper-tts
+# Download en_US-lessac-medium.onnx (and its .onnx.json) from the Piper voice list, then:
+export GIFOS_PIPER_MODEL=/path/to/en_US-lessac-medium.onnx
+export GIFOS_PIPER_BIN=piper   # omit this when piper is already on PATH
+```
+
+In the Grok Bot MCP config, the same variables go in `env` next to `GIFOS_URL`. `tts.ready` is true once the
+model file and the program are both found. Until then the log says Piper is not ready. The connector still
+starts, and speech-to-text still runs. If Kokoro fails to install and Piper is absent, `status` keeps
+`engine` as `kokoro` with `ready` false. Once Piper's program and voice file are both present, that failure
+switches the engine to Piper.
 
 ## Tools
 
@@ -145,9 +210,10 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 
 ## Privacy and security
 
-- **Everything runs locally.** The browser, the bot, speech-to-text (Whisper runs inside the browser) and the
-  transcripts are all on your machine. Media goes peer to peer between participants. GifOS's relay only helps
-  peers find each other.
+- **Everything runs locally.** The browser, the bot, speech-to-text (Whisper runs inside the browser),
+  text-to-speech (Kokoro inside GifOS, or Piper as a local program), and the transcripts are all on your
+  machine. Media goes peer to peer between participants. GifOS's relay only helps peers find each other.
+  Neither voice needs an account or an API key.
 - **Consent is visible.** The bot is labelled 🤖 bot and shows 📝 transcribing whenever it listens. `mute`
   removes the chip.
 - **The bot never uses your microphone or camera.** It joins with no camera, Meeting Bot never transcribes its
@@ -170,6 +236,8 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 | Symptom | Fix |
 |---|---|
 | `The GifOS store at … has no "meeting-bot" app` | That GifOS is older than 0.9.23. Set `GIFOS_URL` to a 0.9.23 or newer site. |
+| Log says `Kokoro was not used` and names `offline-tts-kokoro` | That GifOS store has no Kokoro provider. The connector switches to Piper when Piper is ready. Otherwise set `GIFOS_TTS_ENGINE=none`, or point `GIFOS_URL` at a site whose store includes Kokoro. |
+| `status` shows `tts.engine` `piper` and `tts.ready` false | Piper was selected and is not set up. Install Piper and set `GIFOS_PIPER_MODEL`. See [Text to speech](#text-to-speech). |
 | `The store refused to install meeting-bot: Needs a newer GifOS` | Same cause: the site's build is older than the one Meeting Bot needs. |
 | `Meeting Bot did not start: A bot with this name and password is already running…` | Another `gifos-mcp` (or a Meeting Bot window) uses the same name and password. Stop it, or give this one its own `GIFOS_MCP_HOME` or `GIFOS_BOT_NAME`/`GIFOS_BOT_PASSWORD`. |
 | `get_transcript` stays at `(no transcript lines yet)` | Somebody has to speak with their mic on. The first transcription downloads the Whisper model (about 77 MB), which takes a minute. Run with `GIFOS_MCP_DEBUG=1` and call `status` to see each meeting's caption state. |

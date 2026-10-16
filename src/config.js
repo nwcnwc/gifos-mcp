@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { machineProfile, piperIsAvailable, resolveTts } from './tts.js';
 
 export const DEFAULT_GIFOS_URL = 'https://gifos.app';
 export const DEFAULT_STT_APP = 'offline-stt-whisper';
@@ -14,9 +15,25 @@ function cleanUrl(u) {
   return s;
 }
 
-export function loadConfig(env = process.env) {
+export function loadConfig(env = process.env, opts = {}) {
   const home = env.GIFOS_MCP_HOME || path.join(os.homedir(), '.gifos-mcp');
   const stt = env.GIFOS_STT_APP === undefined ? DEFAULT_STT_APP : String(env.GIFOS_STT_APP).trim();
+  const piperBin = String(env.GIFOS_PIPER_BIN || 'piper').trim() || 'piper';
+  const piperModel = String(env.GIFOS_PIPER_MODEL || '').trim();
+  const profile = opts.profile || machineProfile();
+  const piperAvailable = opts.piperAvailable != null
+    ? !!opts.piperAvailable
+    : piperIsAvailable({ bin: piperBin, model: piperModel });
+  const kokoroAvailable = opts.kokoroAvailable != null ? !!opts.kokoroAvailable : true;
+  const tts = resolveTts({
+    requested: env.GIFOS_TTS_ENGINE,
+    voice: env.GIFOS_TTS_VOICE,
+    profile,
+    kokoroAvailable,
+    piperAvailable,
+    piperBin,
+    piperModel,
+  });
   return {
     home,
     gifosUrl: cleanUrl(env.GIFOS_URL || DEFAULT_GIFOS_URL),
@@ -32,6 +49,7 @@ export function loadConfig(env = process.env) {
     autoInstallBrowser: env.GIFOS_MCP_NO_INSTALL !== '1',
     prewarm: env.GIFOS_MCP_LAZY !== '1',
     debug: env.GIFOS_MCP_DEBUG === '1',
+    tts,
   };
 }
 

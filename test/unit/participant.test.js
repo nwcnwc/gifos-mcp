@@ -23,7 +23,8 @@ function frame(amp, ms) {
 }
 
 class FakeSession {
-  constructor() { this.chats = []; this.plays = []; this.participants = []; this.hand = false; this.mic = true; this.cam = true; }
+  constructor() { this.chats = []; this.plays = []; this.participants = []; this.hand = false; this.mic = true; this.cam = true; this.labelOn = true; }
+  async transcribingLabel() { return this.labelOn !== false; }
   async join() { return { coord: '0/0.0' }; }
   async play(_b64, allow) {
     this.plays.push(allow);
@@ -45,26 +46,30 @@ class FakeSession {
   async close() { this.closed = true; }
 }
 
-function setup(heard) {
+function setup(heard, opts) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-part-'));
   const cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:9', GIFOS_TURN_PAUSE_MS: '50' });
   const meetings = new MeetingStore(home);
   let session;
   const stt = { id: 'fake', async transcribe(wav) { heard.push(wav); return { text: heard.text || 'the purple giraffe reads seven books', ms: 1 }; }, async close() {} };
   const tts = { async synthesize() { return wavFromPcm(new Int16Array(160), 16000, 1); } };
-  const host = new ParticipantHost(cfg, meetings, () => (session = new FakeSession()), { stt: () => stt, tts: () => tts });
+  const host = new ParticipantHost(cfg, meetings, () => {
+    session = new FakeSession();
+    if (opts && opts.labelOn === false) session.labelOn = false;
+    return session;
+  }, { stt: () => stt, tts: () => tts });
   return { host, meetings, get session() { return session; }, stt };
 }
 
-async function speak(host, name, streamId) {
+async function speak(host, name, streamId, lane) {
   let t = Date.now();
   for (let i = 0; i < 4; i++) {
     t += 100;
-    host.onFrame({ streamId, name, b64: frame(0.2, 100) });
+    host.onFrame({ streamId, name, b64: frame(0.2, 100), lane });
   }
   for (let i = 0; i < 5; i++) {
     t += 100;
-    host.onFrame({ streamId, name, b64: frame(0, 100) });
+    host.onFrame({ streamId, name, b64: frame(0, 100), lane });
   }
 }
 
@@ -117,6 +122,31 @@ test('say can be interrupted, and stop_speaking asks the page to cut playback', 
   assert.ok(said.spoken_until_ms < 800);
   assert.equal(env.session.plays[0], true);
   await env.host.leave();
+});
+
+test('without the transcribing label, speech is not written down', async () => {
+  const heard = [];
+  const { host } = setup(heard, { labelOn: false });
+  await host.join({ url: 'https://gifos.app/run.html#v=room-quiet', display_name: 'Helper' });
+  await speak(host, 'Ada', 'stream-ada', 'stadium');
+  const got = await host.utterances({ wait_ms: 200 });
+  assert.equal(got.utterances.length, 0);
+  const log = readTranscript(host.cfg.home, host.meetingId);
+  assert.equal(/purple giraffe/.test(log), false);
+  await host.leave();
+});
+
+test('a stadium stream is kept, labelled, when the transcribing label is on', async () => {
+  const heard = [];
+  const { host } = setup(heard);
+  await host.join({ url: 'https://gifos.app/run.html#v=room-stad', display_name: 'Helper' });
+  await speak(host, 'Ada', 'stream-ada', 'stadium');
+  const got = await host.utterances({ wait_ms: 1000 });
+  assert.equal(got.utterances.length, 1);
+  assert.equal(got.utterances[0].lane, 'stadium');
+  const log = readTranscript(host.cfg.home, host.meetingId);
+  assert.match(log, /"lane":"stadium"/);
+  await host.leave();
 });
 
 test('leave ends the meeting record and closes the page', async () => {

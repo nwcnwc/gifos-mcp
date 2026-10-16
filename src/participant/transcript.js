@@ -40,7 +40,7 @@ export class TranscriptLog {
     }
   }
 
-  append({ speaker, text, kind, ts }) {
+  append({ speaker, text, kind, ts, lane }) {
     if (!KINDS.has(kind)) throw new Error('bad transcript kind');
     this.seq += 1;
     const entry = {
@@ -50,6 +50,7 @@ export class TranscriptLog {
       text: String(text || ''),
       kind,
     };
+    if (lane === 'stage' || lane === 'row' || lane === 'stadium') entry.lane = lane;
     fs.appendFileSync(this.jsonl, JSON.stringify(entry) + '\n', { mode: 0o600 });
     fs.appendFileSync(this.txt, entry.kind + '\t' + entry.speaker + ': ' + entry.text + '\n', { mode: 0o600 });
     return entry;

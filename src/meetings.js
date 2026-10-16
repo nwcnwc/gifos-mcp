@@ -107,6 +107,7 @@ export function publicView(m) {
     transcribing: !!m.transcribing,
     muted: !!m.muted,
     ...(m.display_name ? { display_name: m.display_name } : {}),
+    ...(m.room_password ? { room_password: m.room_password } : {}),
     created_at: m.created_at,
     started_at: m.started_at,
     ended_at: m.ended_at,

@@ -104,7 +104,7 @@ test('lists every tool with an input schema', async () => {
   assert.deepEqual(names, [
     'create_meeting', 'end_meeting', 'get_meeting_state', 'get_new_utterances', 'get_transcript',
     'join_meeting', 'join_meeting_as_participant', 'leave_meeting', 'list_meetings', 'mute',
-    'raise_hand', 'say', 'send_chat', 'set_camera', 'set_mic', 'share_content', 'snapshot', 'start_meeting',
+    'raise_hand', 'say', 'send_chat', 'set_camera', 'set_mic', 'set_switches', 'share_content', 'snapshot', 'start_meeting',
     'status', 'stop_speaking', 'unmute',
   ]);
   for (const t of tools) {

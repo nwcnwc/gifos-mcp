@@ -37,7 +37,9 @@ The server does not transcribe its own voice. It also drops the short filler lin
 
 Each remote participant's audio track is tapped on its own. The track is the one on that person's tile, and the name is the name on that tile. A mixed room bus is not used, because a mix cannot be split back into speakers.
 
-In a two-person meeting, and among people who are direct peers, that is the real microphone of each person. In a large room, someone who is only present inside a stadium or stage mix is not separated here. Their voice is skipped rather than assigned to the wrong name. That is the gap this server does not close without a change to GifOS itself.
+The ear taps three buses: each row tile (`.tile[data-peer] video`), the stage (`#stagefeed video` and `video.stageface`), and the stadium (`#stadium .rowtile video`). A line is stored with `lane` set to `row`, `stage`, or `stadium`. The bot's own microphone is not tapped.
+
+Lines are kept only while the transcribing label is showing. `transcribingLabel()` turns captions on and reads the tile. If the label never appears, speech is dropped.
 
 `turn_hint` stays `wait` while anyone is talking (including you), while a transcript line is still being recognized, or while the room has been quiet for less than `GIFOS_TURN_PAUSE_MS` (default 700). It becomes `your_turn` after that pause. Speak then, not before.
 

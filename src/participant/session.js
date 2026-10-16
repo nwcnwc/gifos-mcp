@@ -131,6 +131,28 @@ export class ParticipantSession {
     return { url: target, room, coord: seated.coord };
   }
 
+  // The bot tile has to show the transcribing label before lines are kept.
+  // Turns captions on, then reads the tile. False means do not write speech down.
+  async transcribingLabel() {
+    if (!this.page) return false;
+    const deadline = Date.now() + Math.min(8000, this.cfg.timeoutMs);
+    while (Date.now() < deadline) {
+      const on = await this.page.evaluate(() => {
+        const btn = document.getElementById('ccbtn');
+        if (btn && btn.getAttribute('aria-pressed') !== 'true' && !btn.classList.contains('on')) {
+          try { btn.click(); } catch (e) {}
+        }
+        const me = document.querySelector('.tile.me');
+        const mine = me ? (me.innerText || '') : '';
+        const body = document.body ? (document.body.innerText || '') : '';
+        return /transcribing/i.test(mine) || /transcribing/i.test(body);
+      }).catch(() => false);
+      if (on) return true;
+      await sleep(300);
+    }
+    return false;
+  }
+
   async play(b64, allowBarge) {
     if (!this.page) throw new Error('Not in a meeting.');
     return await this.page.evaluate(async ({ b64, allowBarge }) => {

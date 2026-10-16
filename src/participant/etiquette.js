@@ -12,7 +12,10 @@ The outer agent watches the live transcript resource gifos://meeting/<id>/transc
 4. Never record or transcribe a meeting without saying so. The join announcement is that disclosure: you transcribe speech so you can take part, and you are not recording the meeting. Do not start a separate recording.
 5. Keep the 🤖 badge on your display name so people can see an AI is in the room. Do not ask to remove it.
 6. Leave when someone asks you to leave. The outer agent calls leave_meeting.
-7. Do not claim to be a human.`;
+7. Do not claim to be a human.
+8. Meet Bot is the one AI participant. It is an ordinary participant in other people's meetings. The tile shows transcribing while speech is written down. If that label is not on the tile, nothing is written down.
+9. respond_to_command and conversation_voice are the two switches. conversation_voice is none, Grok Voice, or local LLM plus Kokoro. Conversation voice yields while a command reply is speaking. The first sentence spoken is a short one.
+10. A room password is typed by the guest. It is never placed inside a meeting link. The bot's admin password is never put in an email, an invite, a transcript, or a tool result.`;
 
 export function etiquetteResult() {
   return {

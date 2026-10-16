@@ -5,8 +5,11 @@ import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
 import { etiquetteResult } from './participant/etiquette.js';
 import { withAiBadge } from './participant/names.js';
+import { formatInvite, plainLink, scrub, PASSWORD_LINK_NOTE } from './invite.js';
+import { providerPublic, providerRegistration } from './providers/registry.js';
+import { SpeechTurn } from './providers/speech.js';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
@@ -19,15 +22,17 @@ const UnsubscribeRequestSchema = z.object({
   params: z.object({ uri: z.string() }).passthrough(),
 }).passthrough();
 
-function ok(obj) {
-  return { content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] };
-}
-function fail(message) {
-  return { isError: true, content: [{ type: 'text', text: message }] };
-}
-
-export function createServer({ cfg, meetings, bot, participant }) {
+export function createServer({ cfg, meetings, bot, participant, adminPassword, speech }) {
   const server = new McpServer({ name: 'gifos-mcp', version: VERSION });
+  const turn = speech || new SpeechTurn();
+  const secret = String(adminPassword || '');
+  function ok(obj) {
+    const raw = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+    return { content: [{ type: 'text', text: scrub(raw, secret) }] };
+  }
+  function fail(message) {
+    return { isError: true, content: [{ type: 'text', text: scrub(message, secret) }] };
+  }
   const subs = new Set();
   server.server.registerCapabilities({ resources: { subscribe: true } });
   server.server.setRequestHandler(SubscribeRequestSchema, async (request) => {
@@ -78,6 +83,8 @@ export function createServer({ cfg, meetings, bot, participant }) {
     await bot.ensureStarted();
     const sessionId = await bot.join(m.link, password || '');
     await bot.transcribe(sessionId, true);
+    if (typeof bot.registerProviders === 'function') await bot.registerProviders(providerRegistration());
+    if (typeof bot.setSwitches === 'function') await bot.setSwitches(turn.public());
     return meetings.update(m.meeting_id, {
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
@@ -90,12 +97,22 @@ export function createServer({ cfg, meetings, bot, participant }) {
     inputSchema: {
       topic: z.string().min(1).max(200).describe('What the meeting is about, e.g. "Demo meeting".'),
       start_time: z.string().max(64).optional().describe('When it should start, e.g. "2026-10-15T17:00:00-07:00". Informational only.'),
+      room_password: z.string().max(200).optional().describe('Room password guests type to join. It is returned beside the link, never inside it.'),
     },
-  }, guarded(async ({ topic, start_time }) => {
+  }, guarded(async ({ topic, start_time, room_password }) => {
     const room = newRoom();
-    const m = meetings.add({ topic, start_time: start_time || null, room, link: linkFor(cfg.gifosUrl, room, cfg.relay) });
-    return ok({ meeting_id: m.meeting_id, link: m.link, topic: m.topic, start_time: m.start_time,
-      note: 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then.' });
+    const link = plainLink(linkFor(cfg.gifosUrl, room, cfg.relay), room_password || '');
+    const m = meetings.add({
+      topic, start_time: start_time || null, room, link,
+      room_password: room_password || '',
+    });
+    const invite = formatInvite({ topic, link: m.link, roomPassword: room_password || '', startTime: start_time || '' });
+    return ok({ meeting_id: m.meeting_id, link: invite.link, topic: m.topic, start_time: m.start_time,
+      room_password: room_password || '',
+      invite_email: invite.email,
+      invite_calendar: invite.calendar,
+      password_links: PASSWORD_LINK_NOTE,
+      note: 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then. Put invite_email in the email and invite_calendar in the calendar event. The link stays plain.' });
   }));
 
   server.registerTool('start_meeting', {
@@ -120,10 +137,12 @@ export function createServer({ cfg, meetings, bot, participant }) {
   }, guarded(async ({ link, password, topic }) => {
     const room = roomFromLink(link);
     if (!room) return fail('That is not a GifOS meeting link (expected …/run.html#v=<room> or …/meet/<room>).');
+    const clean = plainLink(link, password || '');
     let m = meetings.byRoom(room);
     if (m && m.state === 'live') return ok({ ...publicView(m), note: 'Already in this meeting.' });
-    if (!m) m = meetings.add({ topic: topic || '', room, link });
-    return ok(publicView(await enter(m, password)));
+    if (!m) m = meetings.add({ topic: topic || '', room, link: clean, room_password: password || '' });
+    else if (m.link !== clean) meetings.update(m.meeting_id, { link: clean });
+    return ok(publicView(await enter(meetings.get(m.meeting_id), password)));
   }));
 
   server.registerTool('mute', {
@@ -166,7 +185,7 @@ export function createServer({ cfg, meetings, bot, participant }) {
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
     if (m.state === 'live' && m.session_id) {
-      const text = await bot.transcript(m.session_id);
+      const text = scrub(await bot.transcript(m.session_id), secret);
       meetings.update(m.meeting_id, { transcript: text });
       return ok(text || '(no transcript lines yet)');
     }
@@ -188,7 +207,7 @@ export function createServer({ cfg, meetings, bot, participant }) {
     }
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
     let text = m.transcript || '';
-    try { text = await bot.transcript(m.session_id); } catch (e) { /* keep the last copy */ }
+    try { text = scrub(await bot.transcript(m.session_id), secret); } catch (e) { /* keep the last copy */ }
     await bot.leave(m.session_id);
     const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false,
       transcript: text, ended_at: new Date().toISOString() });
@@ -216,7 +235,22 @@ export function createServer({ cfg, meetings, bot, participant }) {
       live_meetings: meetings.all().filter((m) => m.state === 'live').map((m) => m.meeting_id),
       bot: info,
       participant: participant ? participant.info() : null,
+      switches: turn.public(),
+      providers: providerPublic(process.env),
     });
+  }));
+
+  server.registerTool('set_switches', {
+    title: 'Set how the bot answers and speaks',
+    description: 'Two switches. respond_to_command turns replies to commands in the meeting on or off. conversation_voice is none, grok (Grok Voice, using your own key on this machine), or local (local LLM plus Kokoro). Conversation voice stops while a command reply is speaking.',
+    inputSchema: {
+      respond_to_command: z.boolean().optional().describe('When true, the bot answers commands it hears. When false, it stays quiet for those.'),
+      conversation_voice: z.enum(['none', 'grok', 'local']).optional().describe('none, grok (Grok Voice), or local (local LLM plus Kokoro).'),
+    },
+  }, guarded(async ({ respond_to_command, conversation_voice }) => {
+    const next = turn.set({ respond_to_command, conversation_voice });
+    if (typeof bot.setSwitches === 'function') await bot.setSwitches(next);
+    return ok(next);
   }));
 
   const meetingUrl = z.string().url().max(2048).describe('The GifOS meeting link (…/run.html#v=… or …/meet/…).');
@@ -255,7 +289,13 @@ export function createServer({ cfg, meetings, bot, participant }) {
       interruptible: z.boolean().optional().describe('Stop if a remote person starts talking. Default true.'),
     },
   }, guarded(async ({ text, voice, interruptible }) => {
-    return ok(await part().say(text, voice, interruptible));
+    const preempt = turn.beginCommand();
+    try {
+      const said = await part().say(text, voice, interruptible);
+      return ok(Object.assign({}, said, { voice_yielded: preempt.yielded }));
+    } finally {
+      turn.endCommand();
+    }
   }));
 
   server.registerTool('stop_speaking', {

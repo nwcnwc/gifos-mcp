@@ -33,7 +33,7 @@ test('streamable HTTP on 127.0.0.1 with a bearer token', async (t) => {
   const client = new Client({ name: 'http-test', version: '1' });
   await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: 'Bearer test-token-123' } } }));
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 21);
+  assert.equal(tools.length, 22);
   const { prompts } = await client.listPrompts();
   assert.equal(prompts.length, 1);
   assert.equal(prompts[0].name, 'meeting_participant_etiquette');

@@ -4,11 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '../log.js';
 import { roomFromLink } from '../meetings.js';
+import { plainLink } from '../invite.js';
 import { createVad, isHallucination, rms, turnHint } from '../audio/vad.js';
 import { f32FromI16, i16FromB64, wavFromPcm } from '../audio/wav.js';
 import { requestBuf } from '../audio/net.js';
 import { sharedVoice } from '../voice/client.js';
 import { isSelfName, withAiBadge } from './names.js';
+import { lineAllowed, normalizeLane } from '../transcript/lanes.js';
 import { ParticipantSession } from './session.js';
 import { readTranscript, TranscriptLog } from './transcript.js';
 
@@ -80,6 +82,7 @@ export class ParticipantHost {
     this.announceTimer = null;
     this.voice = null;
     this.transcript = null;
+    this.consent = false;
     this.onTranscript = null;
     this.sttQueues = new Map();
     this.quietMs = new Map();
@@ -118,8 +121,9 @@ export class ParticipantHost {
   }
 
   async join({ url, password, display_name, avatar }) {
-    const link = String(url || '').trim();
-    if (!roomFromLink(link)) throw new Error('That is not a GifOS meeting link (expected …/run.html#v=<room> or …/meet/<room>).');
+    const raw = String(url || '').trim();
+    if (!roomFromLink(raw)) throw new Error('That is not a GifOS meeting link (expected …/run.html#v=<room> or …/meet/<room>).');
+    const link = plainLink(raw, password || '');
     if (this.session) await this.leave();
     await this.ensureVoice();
     const gen = ++this.gen;
@@ -162,6 +166,7 @@ export class ParticipantHost {
       started_at: new Date().toISOString(),
     });
     this.meetingId = m.meeting_id;
+    this.consent = typeof session.transcribingLabel === 'function' ? !!(await session.transcribingLabel()) : false;
     this.transcript = new TranscriptLog(this.cfg.home, m.meeting_id);
     this.appendLine({ kind: 'event', speaker: name, text: 'joined', ts: Date.now() });
     this.watchRoom(gen);
@@ -211,6 +216,7 @@ export class ParticipantHost {
   onFrame(frame) {
     try {
       if (!frame || !frame.b64) return this.stopRequested ? { stop: true } : undefined;
+      if (!this.consent) return this.stopRequested ? { stop: true } : undefined;
       const name = String(frame.name || '').trim();
       if (/\(you\)\s*$/.test(name) || isSelfName(name, this.displayName)) {
         return this.stopRequested ? { stop: true } : undefined;
@@ -219,10 +225,12 @@ export class ParticipantHost {
       if (!i16.length) return this.stopRequested ? { stop: true } : undefined;
       const id = String(frame.streamId || name || 'remote');
       let slot = this.vads.get(id);
+      const lane = normalizeLane(frame.lane);
       if (!slot) {
-        slot = { vad: createVad({ vadEndMs: this.cfg.vadEndMs || 450 }), name: name || 'speaker' };
+        slot = { vad: createVad({ vadEndMs: this.cfg.vadEndMs || 450 }), name: name || 'speaker', lane };
         this.vads.set(id, slot);
       }
+      if (lane) slot.lane = lane;
       if (name && name !== 'speaker' && name !== '…') slot.name = name;
       const now = Date.now();
       if (this.voice) {
@@ -248,6 +256,7 @@ export class ParticipantHost {
         this.pending++;
         const speaker = slot.name;
         const utter = r.utterance;
+        utter.lane = slot.lane || '';
         this.transcribe(speaker, utter).catch((e) => log('stt failed: ' + (e && e.message || e)));
       }
       this.poke();
@@ -267,6 +276,8 @@ export class ParticipantHost {
         log('stt drop ' + speaker + ' ' + (out.ms || 0) + 'ms');
         return;
       }
+      if (!lineAllowed(this.consent, text)) return;
+      const lane = utter.lane || '';
       const entry = {
         id: 'u' + (this.nextId++),
         speaker,
@@ -274,10 +285,11 @@ export class ParticipantHost {
         t_start: utter.tStart,
         t_end: utter.tEnd,
       };
+      if (lane) entry.lane = lane;
       this.heard.push(entry);
       if (this.heard.length > 400) this.heard.splice(0, this.heard.length - 400);
       this.lastSpeechEnd = Math.max(this.lastSpeechEnd, utter.tEnd);
-      this.appendLine({ kind: 'speech', speaker, text, ts: utter.tEnd });
+      this.appendLine({ kind: 'speech', speaker, text, ts: utter.tEnd, lane });
       log('stt ' + speaker + ' ' + (out.ms || 0) + 'ms ' + text.length + ' chars');
     } finally {
       this.pending = Math.max(0, this.pending - 1);

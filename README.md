@@ -141,6 +141,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `get_meeting_state` | none | Who is here, who is talking, hand, mic, camera. |
 | `snapshot` | none | Read-only state plus a PNG of the current view, logged in the transcript. |
 | `leave_meeting` | none | Leave the participant session. |
+| `set_switches` | `respond_to_command?`, `conversation_voice?` | `respond_to_command` is on or off. `conversation_voice` is `none`, `grok` (Grok Voice), or `local` (local LLM plus Kokoro). Conversation voice yields while a command reply speaks. |
 
 Participant mode has its own browser and a local voice sidecar (Kokoro and faster-whisper). The resource `gifos://meeting/<id>/transcript` is the live JSONL transcript. The prompt `meeting_participant_etiquette` splits the speaking loop (say, stop_speaking, snapshot) from the outer agent that watches the transcript and uses the other tools. Details are in [docs/PARTICIPANT.md](docs/PARTICIPANT.md). Benchmarks are in [docs/STT-BENCH.md](docs/STT-BENCH.md).
 
@@ -151,9 +152,11 @@ Errors come back as MCP tool errors with a readable message, for example `Unknow
 
 The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, take notes, and send me a summary."*
 
-1. **Invite (now).** Grok Bot calls `create_meeting({topic: "Demo meeting", start_time: "17:00"})` and gets a
-   `link`. It drafts a calendar invite to Alice and Bob containing the link, in the user's own calendar. The
-   user approves the send.
+1. **Invite (now).** Grok Bot calls `create_meeting({topic: "Demo meeting", start_time: "17:00", room_password: "..."})`
+   and gets a plain `link` plus `invite_email` and `invite_calendar`. The room password is a separate line the
+   guest types. It is not placed inside the link. The bot's admin password is not in that text. Grok Bot drafts
+   the calendar event from `invite_calendar` in the user's own calendar. The user approves the send. Paid
+   one-click links that would sign a guest in with the password already applied are not available.
 2. **Timing (a routine at 17:00).** Grok Bot calls `start_meeting({meeting_id})`. The bot joins and transcribes.
    `gifos-mcp` has to be running at this point.
 3. **Meeting (17:00 onward).** Alice and Bob open the link and see the 🤖 bot tile with the transcribing chip.
@@ -174,7 +177,14 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
   `GIFOS_MCP_HOME/bot.json` private (it is mode 0600), or pass the pair through environment variables. Anyone
   with the pair can command the bot.
 - **Meeting links are capabilities.** Anyone with a link can join that meeting, so share links only with the
-  people you invite.
+  people you invite. A room password, when you set one, goes in the email or calendar text as its own line.
+  It is never written into the link. The bot admin password is never written into an email, an invite, a
+  transcript, or a tool result.
+- **Providers stay on this machine.** gifos-mcp registers Whisper speech-to-text, Kokoro speech, an
+  OpenAI-compatible conversation model, and Grok Bot say with Meet Bot. `GIFOS_LLM_KEY` is read here and is
+  not sent to the meeting, the bot's page, or tool results. Set `GIFOS_LLM_URL` to your own endpoint
+  (for example `https://api.x.ai/v1`) and `GIFOS_LLM_MODEL` to the model name. Leave them unset and the bot
+  stays agent-driven.
 - **Transcripts are stored** in `GIFOS_MCP_HOME/meetings.json` (mode 0600) so they survive restarts. Delete the
   file to forget them.
 - **No outgoing messages.** The server never sends email, calendar invites or anything else. Grok Bot does that

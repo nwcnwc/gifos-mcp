@@ -5,6 +5,8 @@
 // (test/swarm/voicebot/page.js in the GifOS repo, same author, MIT).
 // Two changes: each remote participant's stream is tapped on its own
 // (named from that person's tile), and playback can be stopped mid-sentence.
+// Stage, row, and stadium videos are all tapped. The bot's own mic is not.
+import { captureSelectors } from '../transcript/lanes.js';
 
 export function seedScript({ name, relay, room, password, av }) {
   const items = { gifos_name: name, gifos_meet_bar: '0' };
@@ -15,7 +17,9 @@ export function seedScript({ name, relay, room, password, av }) {
 
 export function voiceInitScript(opts = {}) {
   const vadEnd = Math.max(1, Math.round(Number(opts.vadEndMs) || 450));
+  const selectors = JSON.stringify(captureSelectors());
   return `(() => {
+    const LANE_SELECTORS = ${selectors};
     const VAD_END = ${vadEnd};
     const TARGET = 16000;
     window.__vbStats = { streams: 0, rms: 0, peak: 0, frames: 0, err: '' };
@@ -308,6 +312,7 @@ export function voiceInitScript(opts = {}) {
     let cap = null, procRate = TARGET;
     const ears = new Map();
     const names = new Map();
+    const lanes = new Map();
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       try { cap = new AC({ sampleRate: TARGET }); } catch (e) { cap = new AC(); }
@@ -328,22 +333,28 @@ export function voiceInitScript(opts = {}) {
     function scan() {
       const want = new Map();
       try {
-        const tiles = document.querySelectorAll('.tile[data-peer]');
-        for (let i = 0; i < tiles.length; i++) {
-          const tile = tiles[i];
-          if (tile.classList.contains('me')) continue;
-          const vid = tile.querySelector('video');
-          const st = vid && vid.srcObject;
-          if (!st || ourStream(st) || !liveAudio(st)) continue;
-          const nameEl = tile.querySelector('.name');
-          const name = nameEl ? String(nameEl.textContent || '').replace(/\\s+/g, ' ').trim() : '';
-          want.set(st.id, { stream: st, name: name || 'speaker' });
+        for (let s = 0; s < LANE_SELECTORS.length; s++) {
+          const spec = LANE_SELECTORS[s];
+          const nodes = document.querySelectorAll(spec.selector);
+          for (let i = 0; i < nodes.length; i++) {
+            const node = nodes[i];
+            const vid = node.tagName === 'VIDEO' ? node : node.querySelector('video');
+            const root = (node.closest && (node.closest('.tile') || node.closest('.rowtile'))) || node;
+            if (root.classList && root.classList.contains('me')) continue;
+            const st = vid && vid.srcObject;
+            if (!st || ourStream(st) || !liveAudio(st) || want.has(st.id)) continue;
+            const nameEl = root.querySelector ? root.querySelector('.name') : null;
+            const name = nameEl ? String(nameEl.textContent || '').replace(/\\s+/g, ' ').trim() : '';
+            want.set(st.id, { stream: st, name: name || spec.lane, lane: spec.lane });
+          }
         }
       } catch (e) { note(e); }
       return want;
     }
-    function attach(id, stream, name) {
-      if (!cap || ears.has(id)) { names.set(id, name); return; }
+    function attach(id, stream, name, lane) {
+      names.set(id, name);
+      lanes.set(id, lane || 'row');
+      if (!cap || ears.has(id)) return;
       try {
         const src = cap.createMediaStreamSource(stream);
         const proc = cap.createScriptProcessor(2048, 1, 1);
@@ -382,7 +393,7 @@ export function voiceInitScript(opts = {}) {
             window.__vbStats.frames++;
             const fn = window.__vbFrame;
             if (typeof fn !== 'function') return;
-            const p = fn({ streamId: id, name: names.get(id) || name || 'speaker', b64: b64FromI16(all) });
+            const p = fn({ streamId: id, name: names.get(id) || name || 'speaker', lane: lanes.get(id) || 'row', b64: b64FromI16(all) });
             if (p && typeof p.then === 'function') p.then((r) => { if (r && r.stop) { try { window.__vbStop(); } catch (e) {} } }).catch(() => {});
           } catch (err) { note(err); }
         };
@@ -398,12 +409,13 @@ export function voiceInitScript(opts = {}) {
       try { h.mute.disconnect(); } catch (e) {}
       ears.delete(id);
       names.delete(id);
+      lanes.delete(id);
     }
     function sync() {
       try {
         if (cap && cap.state === 'suspended') cap.resume().catch(() => {});
         const want = scan();
-        for (const [id, info] of want) attach(id, info.stream, info.name);
+        for (const [id, info] of want) attach(id, info.stream, info.name, info.lane);
         for (const id of [...ears.keys()]) if (!want.has(id)) detach(id);
         window.__vbStats.streams = ears.size;
       } catch (e) { note(e); }

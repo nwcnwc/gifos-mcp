@@ -11,6 +11,8 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import { log } from './log.js';
+import { AdminRoom } from './admin/room.js';
+import { providerRegistration } from './providers/registry.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -35,7 +37,11 @@ export class MeetingBotDriver {
     this.error = '';
     this.starting = null;
     this.bot = null;      // { ctx, desk, app, frame, fileId }
+    this.control = null;  // second Meeting Bot page, CONTROL mode, admin room
+    this.room = null;      // AdminRoom over that page
     this.sttFileId = '';
+    this.providers = providerRegistration();
+    this.switches = { respond_to_command: true, conversation_voice: 'none' };
   }
 
   ensureStarted() {
@@ -218,9 +224,77 @@ export class MeetingBotDriver {
     await this.shot(desk, 'bot-desktop.png');
     Object.assign(this.bot, await this.openApp(ctx, this.bot.fileId));
     await this.startRun();
+    await this.openControl();
+    await this.announceProviders();
     await this.shot(this.bot.app, 'bot-running.png');
     this.state = 'ready';
-    log('ready: Meeting Bot "' + this.creds.name + '" is running');
+    log('ready: Meeting Bot "' + this.creds.name + '" is running, controlled from its admin room');
+  }
+
+  // CONTROL mode of the same signed store app. Commands after boot go
+  // through the admin meeting, not through window.MeetingBot on the RUN page.
+  async openControl() {
+    const opened = await this.openApp(this.bot.ctx, this.bot.fileId);
+    this.control = opened;
+    const r = await opened.frame.evaluate((c) => window.MeetingBot.start({ mode: 'control', name: c.name, password: c.password })
+      .then((s) => ({ ok: true, s }), (e) => ({ ok: false, error: String((e && e.message) || e) })), this.creds);
+    if (!r.ok) throw new Error('Meeting Bot control did not start: ' + r.error);
+    const t0 = Date.now();
+    while (Date.now() - t0 < this.cfg.timeoutMs) {
+      const st = await opened.frame.evaluate(() => window.MeetingBot.status());
+      if (st.phase === 'control' && st.connected) {
+        this.room = new AdminRoom((msg) => this.deliver(msg));
+        return st;
+      }
+      await sleep(300);
+    }
+    throw new Error('Meeting Bot control never joined its admin meeting.');
+  }
+
+  // One controller message in, one bot reply out. The bot password is not
+  // part of the message. A room password, when join needs one, is a field
+  // the guest already has; it is not the admin password.
+  async deliver(msg) {
+    const timeout = this.cfg.timeoutMs;
+    return await this.control.frame.evaluate(async ({ msg, timeout }) => {
+      const list = await gifos.meet.list();
+      const admin = (list || []).find((s) => s.control) || (list || [])[0];
+      if (!admin || !admin.meetingId) throw new Error('The control session has no admin meeting.');
+      let fileText = '';
+      const reply = await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('The admin room did not answer.')), timeout);
+        gifos.meet.onXfer((ev) => {
+          try {
+            const bytes = ev && ev.bytes ? new Uint8Array(ev.bytes) : new Uint8Array(0);
+            fileText = new TextDecoder().decode(bytes);
+          } catch (e) { fileText = ''; }
+        });
+        gifos.meet.onChat((ev) => {
+          let decoded = null;
+          try { decoded = window.BotProto.decode(String((ev && ev.text) || '')); } catch (e) { decoded = null; }
+          if (!decoded || decoded.ref !== msg.id) return;
+          clearTimeout(t);
+          if (fileText) decoded.fileText = fileText;
+          resolve(decoded);
+        });
+        gifos.meet.sendChat(admin.meetingId, window.BotProto.encode(msg)).catch((e) => {
+          clearTimeout(t);
+          reject(e);
+        });
+      });
+      return reply;
+    }, { msg, timeout });
+  }
+
+  async announceProviders() {
+    if (!this.room) return { accepted: false };
+    try {
+      await this.room.call('providers', { roles: this.providers.roles });
+      return { accepted: true };
+    } catch (e) {
+      if (e && e.unknown) return { accepted: false, reason: 'bot-ignored' };
+      throw e;
+    }
   }
 
   // RUN first listens ~5 s for a bot with the same name and password. A copy
@@ -255,19 +329,69 @@ export class MeetingBotDriver {
   }
 
   async join(link, password) {
-    const r = await this.call('join', link, password || '');
+    await this.ensureStarted();
+    const reply = await this.room.call('join', { link, password: password || '' });
     await this.shot(this.bot.app, 'bot-joined.png');
-    return r.id;
+    if (!reply.meetingId) throw new Error('The admin room join did not return a meeting.');
+    return reply.meetingId;
   }
 
-  async leave(sessionId) { await this.call('end', sessionId); }
-  async transcribe(sessionId, on) { await this.call('transcribe', sessionId, !!on); }
-  async say(sessionId, text) { await this.call('say', sessionId, String(text)); }
-  async list() { return this.call('list'); }
-  async transcript(sessionId) { return (await this.call('transcript', sessionId)).text || ''; }
+  async leave(sessionId) {
+    await this.ensureStarted();
+    await this.room.call('leave', { meetingId: sessionId });
+  }
+
+  async transcribe(sessionId, on) {
+    await this.ensureStarted();
+    const reply = await this.room.call('transcribe', { meetingId: sessionId, on: !!on });
+    const row = (reply.items || []).find((m) => m.id === sessionId);
+    if (on && row && row.cc === false) throw new Error('Transcribing did not show on the bot tile.');
+  }
+
+  async say(sessionId, text) {
+    await this.ensureStarted();
+    await this.room.call('say', { meetingId: sessionId, text: String(text) });
+  }
+
+  async list() {
+    await this.ensureStarted();
+    const reply = await this.room.call('list', {});
+    return reply.items || reply.meetings || [];
+  }
+
+  async transcript(sessionId) {
+    await this.ensureStarted();
+    const reply = await this.room.call('transcript', { meetingId: sessionId });
+    return reply.fileText || '';
+  }
+
+  async setSwitches(switches) {
+    this.switches = {
+      respond_to_command: !!switches.respond_to_command,
+      conversation_voice: switches.conversation_voice || 'none',
+    };
+    if (!this.room) return { accepted: false };
+    try {
+      await this.room.call('switches', this.switches);
+      return { accepted: true };
+    } catch (e) {
+      if (e && e.unknown) return { accepted: false, reason: 'bot-ignored' };
+      throw e;
+    }
+  }
+
+  async registerProviders(reg) {
+    if (reg && reg.roles) this.providers = { v: 1, op: 'providers', roles: reg.roles };
+    return this.announceProviders();
+  }
 
   async info() {
-    const out = { state: this.state, bot_name: this.creds.name, stt_ready: !!this.sttFileId };
+    const out = {
+      state: this.state, bot_name: this.creds.name, stt_ready: !!this.sttFileId,
+      control: this.room ? 'admin-room' : 'starting',
+      providers: this.providers.roles,
+      switches: this.switches,
+    };
     if (this.error) out.error = this.error;
     if (this.state === 'ready') {
       try {
@@ -293,6 +417,8 @@ export class MeetingBotDriver {
   async close() {
     if (this.bot && this.bot.ctx) await this.bot.ctx.close().catch(() => {});
     this.bot = null;
+    this.control = null;
+    this.room = null;
     this.state = 'stopped';
   }
 }

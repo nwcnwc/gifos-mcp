@@ -21,9 +21,9 @@ if (argv.includes('--help') || argv.includes('-h')) {
     '  gifos-mcp --http [port]   MCP over streamable HTTP on 127.0.0.1 (default 19520)\n\n' +
     'Environment: GIFOS_URL, GIFOS_RELAY, GIFOS_BOT_NAME, GIFOS_BOT_PASSWORD, GIFOS_STT_APP,\n' +
     'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN,\n' +
-    'GIFOS_LLM_URL, GIFOS_LLM_MODEL, GIFOS_CONVERSATION_VOICE, GIFOS_RESPOND_TO_COMMAND,\n' +
-    'GIFOS_VOICE, GIFOS_TRANSCRIPT_POLL_MS, GIFOS_TTS_ENGINE, GIFOS_TTS_URL, GIFOS_TTS_VOICE, GIFOS_STT_URL.\n' +
-    'GIFOS_LLM_KEY stays on this machine. It is handed to Meet Bot only when setVoice exists, and it is not printed.\n' +
+    'GIFOS_LLM_URL, GIFOS_LLM_MODEL, GIFOS_LLM_APP, GIFOS_CONVERSATION_VOICE, GIFOS_RESPOND_TO_COMMAND,\n' +
+    'GIFOS_VOICE, GIFOS_TRANSCRIPT_POLL_MS, GIFOS_TTS_ENGINE, GIFOS_TTS_APP, GIFOS_TTS_URL, GIFOS_TTS_VOICE, GIFOS_STT_URL.\n' +
+    'GIFOS_LLM_KEY is stored in the GifOS computer\'s Settings → AI models. It is not passed to Meet Bot and it is not printed.\n' +
     'See https://github.com/nwcnwc/gifos-mcp#readme\n');
   process.exit(0);
 }

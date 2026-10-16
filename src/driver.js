@@ -13,6 +13,7 @@ import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import { log } from './log.js';
 import { VOICE_GAP, INTERJECT_GAP, HAND_GAP, MIC_GAP, CAMERA_GAP, CONTROLS_GAP, SNAPSHOT_GAP } from './voice/settings.js';
+import { bridgeScript, installPlan } from './voice/providers.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -89,6 +90,9 @@ export class MeetingBotDriver {
     const init = { gifos_meet_bar: '0', gifos_name: this.creds.name };
     if (this.cfg.relay) init.gifos_relay = this.cfg.relay;
     await ctx.addInitScript({ content: 'try{var o=' + JSON.stringify(init) + ';for(var k in o)localStorage.setItem(k,o[k]);}catch(e){}' });
+    // The host page reads Settings and calls GifOS.providers. Meet Bot's frame
+    // never sees a URL or a key. This does not speak and does not call a model.
+    await ctx.addInitScript({ content: bridgeScript() });
     return ctx;
   }
 
@@ -156,18 +160,52 @@ export class MeetingBotDriver {
     }, fileId);
   }
 
-  async useAsSpeechToText(desk, fileId, appId) {
+  // Installs each provider the way Settings → AI models does, then assigns it.
+  // An app lands in the Providers folder. An HTTP stand-in is an endpoint row
+  // { url, key, model } in gifos_ai_config. The key is typed into the GifOS
+  // computer here, never into MeetingBot.setVoice.
+  async applyProviders(desk) {
+    for (const step of installPlan(this.cfg)) {
+      if (step.appId) {
+        const fileId = await this.installFromStore(desk, step.appId);
+        await this.assignProvider(desk, step.role, fileId, step.appId);
+        if (step.role === 'stt') this.sttFileId = fileId;
+      } else if (step.endpoint) {
+        await this.assignEndpoint(desk, step.role, step.endpoint);
+        if (step.role === 'stt') this.sttFileId = 'endpoint';
+      }
+    }
+  }
+
+  async assignProvider(desk, role, fileId, appId) {
     // GifOS only lets a provider answer from the Providers folder.
     if (await this.placedParent(desk, fileId) !== 'sys_providers') {
       throw new Error('The ' + appId + ' app is installed but not in the Providers folder of the bot desktop. Remove ' +
         this.cfg.home + '/profile-bot and restart to reinstall it.');
     }
-    await desk.evaluate(({ fileId, appId }) => {
+    await desk.evaluate(({ role, fileId, appId }) => {
+      const row = { fileId, appId, name: appId };
+      if (window.GifOS && GifOS.providers && typeof GifOS.providers.assign === 'function') {
+        GifOS.providers.assign(role, row);
+        return;
+      }
       const cfg = JSON.parse(localStorage.getItem('gifos_ai_config') || '{}') || {};
-      if (cfg.stt && cfg.stt.app === fileId) return;
-      cfg.stt = { app: fileId, appId, appName: appId };
+      cfg[role] = { app: fileId, appId, appName: appId };
       localStorage.setItem('gifos_ai_config', JSON.stringify(cfg));
-    }, { fileId, appId });
+    }, { role, fileId, appId });
+  }
+
+  async assignEndpoint(desk, role, endpoint) {
+    await desk.evaluate(({ role, endpoint }) => {
+      const cfg = JSON.parse(localStorage.getItem('gifos_ai_config') || '{}') || {};
+      const row = {};
+      if (endpoint.url) row.url = endpoint.url;
+      if (endpoint.model) row.model = endpoint.model;
+      if (endpoint.key) row.key = endpoint.key;
+      if (endpoint.voice) row.voice = endpoint.voice;
+      cfg[role] = row;
+      localStorage.setItem('gifos_ai_config', JSON.stringify(cfg));
+    }, { role, endpoint });
   }
 
   async openApp(ctx, fileId) {
@@ -212,10 +250,7 @@ export class MeetingBotDriver {
     this.bot = { ctx };
     const desk = await this.desktop(ctx);
     this.bot.desk = desk;
-    if (this.cfg.sttApp) {
-      this.sttFileId = await this.installFromStore(desk, this.cfg.sttApp);
-      await this.useAsSpeechToText(desk, this.sttFileId, this.cfg.sttApp);
-    }
+    await this.applyProviders(desk);
     this.bot.fileId = await this.installFromStore(desk, 'meeting-bot');
     await this.shot(desk, 'bot-desktop.png');
     Object.assign(this.bot, await this.openApp(ctx, this.bot.fileId));
@@ -278,8 +313,7 @@ export class MeetingBotDriver {
     return { applied: true, result: result == null ? null : result };
   }
 
-  // Hands the local-LLM setting to the app. The key is not evaluated into the
-  // page unless MeetingBot.setVoice already exists.
+  // Hands provider roles to the app. The object has no URL and no key.
   async setVoice(settings) {
     return this.whenMethod(
       () => typeof (window.MeetingBot && window.MeetingBot.setVoice) === 'function',
@@ -358,6 +392,8 @@ export class MeetingBotDriver {
         out.connected = !!st.connected;
         if (st.warning) out.warning = st.warning;
         out.bot_sessions = (st.meetings || []).map((m) => ({ session_id: m.id, transcribing: !!m.cc, people: m.people || [] }));
+        if (Array.isArray(st.commands)) out.commands = st.commands.map((c) => ({ op: c.op || '', detail: c.detail || '' }));
+        if (Array.isArray(st.errors)) out.errors = st.errors.map((e) => ({ text: e.text || '' }));
       } catch (e) { out.error = String(e.message || e); }
       // GIFOS_MCP_DEBUG=1: what each meeting page says about its captions.
       if (this.cfg.debug) {

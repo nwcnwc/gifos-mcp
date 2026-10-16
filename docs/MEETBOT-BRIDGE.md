@@ -24,7 +24,7 @@ Those files are not in this tree. `set_voice` calls `MeetingBot.setVoice` with t
 
 What stays, because it is management rather than participation:
 
-- Launching headless Chromium, installing Meeting Bot and the speech-to-text app from the store, and calling `window.MeetingBot` (`src/driver.js`).
+- Launching headless Chromium, installing Meeting Bot and the speech-to-text and text-to-speech provider apps from the store, and calling `window.MeetingBot` (`src/driver.js`).
 - Meeting links, mute of transcription, chat via `share_content`, and `end_meeting` (`src/server.js`).
 - A live tail of `MeetingBot.transcript` for the assistant (`tail_transcript` and `gifos://meeting/{id}/transcript`). The tail only reads lines the app already stored.
 
@@ -95,6 +95,37 @@ This is the only API gifos-mcp calls. It lives on the app frame (`#appmount ifra
 
 Remote control (a second copy of the app in CONTROL mode, `gb1 ` JSON on the admin meeting) mirrors those ops. gifos-mcp does not use it. The bot name and password stay in `GIFOS_MCP_HOME/bot.json` and are not a tool result.
 
+## Where the models live
+
+GifOS holds the models. Settings → AI models writes `gifos_ai_config` in the computer's localStorage (not in a shareable backup). The rows this server sets are `smartest` (the text model; Settings has no row named `llm`), `tts`, and `stt`. Each row is either:
+
+- A provider app: `{ app: fileId, appId, appName }`, written by `GifOS.providers.assign(role, { fileId, appId, name })`. The app must list the role under `provides.ai`, must not declare `capabilities.network` or `capabilities.api`, and its icon must sit in the Providers folder (`sys_providers`). `GifOS.providers.call(role, req)` mounts that app in a hidden sandbox and posts `{ ns: "gifos", type: "provider-request" }`.
+- An endpoint: `{ url, key, model }`, "your own address and key". The host page fetches it. The app frame cannot: its CSP is `connect-src 'none'`.
+
+Kokoro is the signed store app `offline-tts-kokoro`. On a fresh profile nothing is assigned, and Meet Bot's host refuses to speak until that app is installed and assigned (`Kokoro is not available on this computer.`). Speech-to-text is the same kind of assignment; transcription already installed `offline-stt-whisper` that way. This server now installs and assigns both during profile setup. It does not download weights, synthesize audio, or call a model. The first spoken line still waits on the provider's own download.
+
+`MeetingBot.setVoice` receives roles, not addresses:
+
+```js
+MeetingBot.setVoice({
+  respond_to_command: true,
+  conversation_voice: "local", // "none" | "grok" | "local"
+  llm: { provider: "smartest" },
+  tts: { provider: "tts", engine: "kokoro", app: "offline-tts-kokoro", voice: "af_heart" },
+  stt: { provider: "stt" }
+})
+```
+
+`llm` and `tts` are included only for `conversation_voice: "local"`. `stt` is included when a speech-to-text app or `GIFOS_STT_URL` is set. The object never includes `llm.url`, `llm.key`, `tts.url`, or `stt.url`. The key is written into `gifos_ai_config` on the GifOS origin, which is where a person types it in Settings. It is not a tool result and it is not an argument of `setVoice`.
+
+The published host (`js/host-voice.js` on gifos-app `cursor/meetbot-host-ops`) still stores a raw URL and fetches it from the host page. Meeting Bot v2 (`gifos-apps-source` `cursor/meetbot-voice-control`) copies `llm.url`, `llm.model`, and `llm.key` into the host and drops any other field. So the page would still have nothing to call if this server only assigned Settings. The driver adds an init script on the GifOS host page that wraps `HostVoice` after `host-voice.js` assigns it:
+
+- A provider app becomes `gifos-provider://smartest` (no key). The wrapped fetch calls `GifOS.providers.call` and hands back one server-sent-event chunk. The wrapped speech function calls `GifOS.providers.call('tts')`.
+- An endpoint is copied from `gifos_ai_config` into the host engine only.
+- An https page never fetches an http URL itself. That call goes to `https://cors-proxy.gifos.app/` with header `x-gifos-target`. An https endpoint is fetched directly, so a key for that host is not sent to the proxy. An http page talking to localhost stays direct.
+
+This script does not speak and does not contain a model client. Kokoro, or the assigned stand-in, does the speaking inside GifOS.
+
 ## Voice settings to hand over
 
 Meet Bot is specified to have two switches. gifos-mcp only stores them and passes them in. It does not act on them.
@@ -112,29 +143,9 @@ Local LLM settings, suggested default xAI Grok:
 | Model | `GIFOS_LLM_MODEL` | `grok-4.20-0309-non-reasoning` on that host. Set it yourself for any other host. |
 | Key | `GIFOS_LLM_KEY` | No default. The user's own key. |
 
-The object passed to `MeetingBot.setVoice`, once that method exists:
+The chat call the host makes for an endpoint is streaming `POST {url}/chat/completions` with `model`, `messages`, and `stream: true`, and nothing else. No tools and no function calls. The key travels only as `Authorization: Bearer`, and only from the host page. Grok Voice (`"grok"`) is Meet Bot's own speech path. Kokoro is the default text-to-speech provider: the store app `offline-tts-kokoro`, voice `af_heart`, unless `GIFOS_TTS_APP` names another provider app, `GIFOS_TTS_URL` names an HTTP stand-in (`tts.engine` `"http"`, the URL stored in Settings, not in `setVoice`), or `GIFOS_TTS_ENGINE=none`. This server does not run Piper or any other speech program.
 
-```js
-MeetingBot.setVoice({
-  respond_to_command: true,
-  conversation_voice: "local", // "none" | "grok" | "local"
-  llm: {
-    url: "https://api.x.ai/v1",
-    model: "grok-4.20-0309-non-reasoning",
-    key: "<the GIFOS_LLM_KEY value>"
-  },
-  tts: {
-    engine: "kokoro", // or "http" or "none"
-    app: "offline-tts-kokoro",
-    voice: "af_heart"
-  },
-  stt: { url: "<GIFOS_STT_URL, only when that variable is set>" }
-})
-```
-
-`llm` and `tts` are included only for `conversation_voice: "local"`. `stt` is included only when `GIFOS_STT_URL` is set. The chat call Meet Bot makes from that setting must be streaming `POST {url}/chat/completions` with `model`, `messages`, and `stream: true`, and nothing else. No tools and no function calls. The key travels only as `Authorization: Bearer`. Grok Voice (`"grok"`) is Meet Bot's own speech path. Kokoro is configuration for `"local"`: the store app `offline-tts-kokoro`, voice `af_heart`, unless `GIFOS_TTS_URL` names an HTTP stand-in (`tts.engine` `"http"` and `tts.url`) or `GIFOS_TTS_ENGINE=none`. This server does not install Kokoro, does not download weights, and does not run Piper or any other speech program.
-
-The key is not logged, not written into a tool result, and not sent to the page unless `typeof MeetingBot.setVoice === "function"`. A missing method is reported as a gap. The page is left untouched.
+The key is not logged and not written into a tool result. A missing `setVoice` is reported as a gap. The page is left untouched.
 
 Spoken `say` from the assistant, distinct from chat `share_content`:
 
@@ -148,10 +159,20 @@ That line is the assistant cutting in. Meet Bot speaks it and it takes priority 
 
 | Env | Effect on the object above |
 |---|---|
-| `GIFOS_TTS_ENGINE` | `auto` or `kokoro` (the default) passes Kokoro. `none` passes `{ engine: "none" }` and wins over `GIFOS_TTS_URL`. Any other value is refused. |
+| `GIFOS_TTS_ENGINE` | `auto` or `kokoro` (the default) installs and assigns Kokoro. `none` assigns nothing for speech and wins over `GIFOS_TTS_URL`. Any other value is refused. |
+| `GIFOS_TTS_APP` | Replaces `offline-tts-kokoro` with another store provider app. |
 | `GIFOS_TTS_VOICE` | Replaces `af_heart` when the engine is Kokoro. |
-| `GIFOS_TTS_URL` | For local voice, `tts` is `{ engine: "http", url }` instead of Kokoro. This process does not request that URL. |
-| `GIFOS_STT_URL` | `stt: { url }` on every `setVoice` call. v1 transcription still uses the store app in `GIFOS_STT_APP`. This process does not request the URL. |
+| `GIFOS_TTS_URL` | An HTTP speech stand-in, stored as the `tts` endpoint in Settings. `setVoice` says `{ provider: "tts", engine: "http" }` and does not include the URL. |
+| `GIFOS_STT_URL` | An HTTP caption stand-in, stored as the `stt` endpoint in Settings, and only when `GIFOS_STT_APP=none`. `setVoice` says `{ provider: "stt" }` and does not include the URL. v1 transcription still uses the store app. |
+| `GIFOS_LLM_APP` | A store provider app assigned to `smartest`, instead of an OpenAI-compatible URL. Conversation voice `local` does not then require a URL. |
+
+## Questions still open
+
+1. The text model is assigned to Settings role `smartest`. Settings also has `cheapest`. This server does not set `cheapest`. Is `smartest` the role Meet Bot should use?
+2. `js/runtime.js` fetches an AI endpoint directly and does not use the CORS proxy (a key would otherwise transit `https://cors-proxy.gifos.app`). Provider apps cannot fetch: a provider that declares network access is refused. For an http endpoint opened from `https://gifos.app`, this server's host script does use that proxy, because mixed content and a missing CORS preflight leave no other path. An https endpoint, including the suggested xAI host, is still fetched directly. Is sending an http endpoint's key through the public proxy acceptable, or should http endpoints be refused until the host broker grows its own proxy?
+3. CONTROL.md v2 still documents raw `llm`, `tts`, and `stt` URLs on `setVoice`, and `js/meet-host.js` still pushes `stt.url` into the meeting session. This server has stopped sending them. The host script papers over that. Should `cursor/meetbot-host-ops` read `gifos_ai_config` itself, so this server can drop the script?
+4. `GIFOS_LLM_APP` assigns a store provider to `smartest`. The requested setup is an OpenAI-compatible URL, model, and key. Is a provider app an allowed language model as well?
+5. The first `say` after installing Kokoro waits while that app downloads its weights. Is that pause the expected one?
 
 ## Gaps Meet Bot must gain
 

@@ -52,7 +52,7 @@ test('lists every tool with an input schema', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
   assert.deepEqual(names, ['create_meeting', 'end_meeting', 'get_transcript', 'join_meeting', 'list_meetings',
-    'mute', 'share_content', 'start_meeting', 'status', 'unmute']);
+    'mute', 'say', 'share_content', 'start_meeting', 'status', 'tail_transcript', 'unmute']);
   for (const t of tools) {
     assert.equal(t.inputSchema.type, 'object', t.name);
     assert.ok(t.description && t.description.length > 20, t.name + ' has a description');
@@ -190,4 +190,21 @@ test('list_meetings and status', async () => {
   assert.equal(s.stt_app, 'offline-stt-whisper');
   assert.deepEqual(s.live_meetings, [b.meeting_id]);
   assert.equal(s.bot.state, 'ready');
+  assert.deepEqual(s.voice, { speaking: false, model: null });
+  assert.equal(JSON.stringify(s).includes('GIFOS_LLM_KEY'), false);
+});
+
+test('say explains that meeting voice is off, and tail_transcript is empty until someone speaks', async () => {
+  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const early = await call('say', { meeting_id: c.meeting_id, text: 'Hello' });
+  assert.equal(early.isError, true);
+  assert.match(text(early), /start_meeting first/);
+  await call('start_meeting', { meeting_id: c.meeting_id });
+  const quiet = await call('say', { meeting_id: c.meeting_id, text: 'Hello from the assistant' });
+  assert.equal(quiet.isError, true);
+  assert.match(text(quiet), /Meeting voice is off/);
+  assert.equal(bot.calls.some((c) => c[0] === 'say'), false, 'say does not fall back to meeting chat');
+  const tail = json(await call('tail_transcript', { meeting_id: c.meeting_id }));
+  assert.deepEqual(tail.lines, []);
+  assert.equal(tail.next, 0);
 });

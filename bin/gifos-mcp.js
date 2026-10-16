@@ -10,6 +10,10 @@ import { loadConfig, botCredentials } from '../src/config.js';
 import { MeetingStore } from '../src/meetings.js';
 import { MeetingBotDriver } from '../src/driver.js';
 import { createServer, VERSION } from '../src/server.js';
+import { LiveTranscript, watchCaptions } from '../src/voice/live.js';
+import { MeetingVoice } from '../src/voice/talk.js';
+import { synthesize } from '../src/voice/speech.js';
+import { scrub } from '../src/voice/llm.js';
 import { log } from '../src/log.js';
 
 const argv = process.argv.slice(2);
@@ -18,7 +22,9 @@ if (argv.includes('--help') || argv.includes('-h')) {
     '  gifos-mcp                 MCP over stdio\n' +
     '  gifos-mcp --http [port]   MCP over streamable HTTP on 127.0.0.1 (default 19520)\n\n' +
     'Environment: GIFOS_URL, GIFOS_RELAY, GIFOS_BOT_NAME, GIFOS_BOT_PASSWORD, GIFOS_STT_APP,\n' +
-    'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN.\n' +
+    'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN,\n' +
+    'GIFOS_LLM_URL, GIFOS_LLM_MODEL, GIFOS_VOICE, GIFOS_TURN_PAUSE_MS, GIFOS_TTS_URL, GIFOS_TTS_VOICE.\n' +
+    'GIFOS_LLM_KEY stays on this machine and is not printed.\n' +
     'See https://github.com/nwcnwc/gifos-mcp#readme\n');
   process.exit(0);
 }
@@ -30,12 +36,39 @@ const meetings = new MeetingStore(cfg.home);
 const reset = meetings.resetLive();
 if (reset) log(reset + ' meeting(s) were live in the last run; they are back to scheduled');
 const bot = new MeetingBotDriver(cfg, creds);
-log('gifos-mcp ' + VERSION + ' · GifOS ' + cfg.gifosUrl + ' · bot "' + creds.name + '" (' + creds.source + ') · data ' + cfg.home);
+const live = new LiveTranscript(cfg.home);
+const captions = watchCaptions({ meetings, bot, live, intervalMs: cfg.voice.pollMs, botName: creds.name });
+
+async function speakAloud(text, signal) {
+  if (signal && signal.aborted) return { played: false, aborted: true };
+  const stop = () => { bot.quiet().catch(() => {}); };
+  if (signal) signal.addEventListener('abort', stop, { once: true });
+  try {
+    const audio = await synthesize(cfg.voice, text, { signal });
+    if (!audio || (signal && signal.aborted)) return { played: false, aborted: !!(signal && signal.aborted) };
+    const played = await bot.playEncoded(audio);
+    return { played: !!played };
+  } finally {
+    if (signal) signal.removeEventListener('abort', stop);
+  }
+}
+
+const voice = new MeetingVoice({
+  voice: cfg.voice,
+  live,
+  speak: speakAloud,
+  log: (line) => log(scrub(line, cfg.voice.key)),
+});
+const mcpArgs = { cfg, meetings, bot, voice, live, captions, botName: creds.name };
+log('gifos-mcp ' + VERSION + ' · GifOS ' + cfg.gifosUrl + ' · bot "' + creds.name + '" (' + creds.source + ') · voice ' +
+  (cfg.voice.enabled ? 'on (' + cfg.voice.model + ')' : 'off') + ' · data ' + cfg.home);
 
 let closing = false;
 async function shutdown(code) {
   if (closing) return;
   closing = true;
+  captions.stopAll();
+  voice.stopAll();
   await bot.close().catch(() => {});
   process.exit(code);
 }
@@ -58,19 +91,19 @@ if (httpAt >= 0) {
       enableDnsRebindingProtection: true,
       allowedHosts: ['127.0.0.1:' + port, 'localhost:' + port],
     });
-    const server = createServer({ cfg, meetings, bot });
+    const server = createServer(mcpArgs);
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res);
     } catch (e) {
-      log('http request failed: ' + e.message);
+      log('http request failed: ' + scrub(e.message, cfg.voice.key));
       if (!res.headersSent) res.writeHead(500).end();
     }
   });
   srv.listen(port, '127.0.0.1', () => log('listening on http://127.0.0.1:' + port + '/mcp'));
 } else {
-  const server = createServer({ cfg, meetings, bot });
+  const server = createServer(mcpArgs);
   await server.connect(new StdioServerTransport());
   process.stdin.on('close', () => shutdown(0));
   log('ready on stdio');

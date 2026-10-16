@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, botCredentials, credentialProblem, generateCredentials, DEFAULT_GIFOS_URL } from '../../src/config.js';
+import { loadConfig, botCredentials, credentialProblem, generateCredentials, DEFAULT_GIFOS_URL, voiceConfig, voicePublic, SUGGESTED_LLM_URL, SUGGESTED_LLM_MODEL } from '../../src/config.js';
 import { MeetingStore, newRoom, linkFor, roomFromLink } from '../../src/meetings.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-cfg-'));
@@ -18,6 +18,29 @@ test('defaults', () => {
   assert.equal(loadConfig({ GIFOS_STT_APP: 'none' }).sttApp, '');
   assert.equal(loadConfig({ GIFOS_URL: 'http://127.0.0.1:19510///' }).gifosUrl, 'http://127.0.0.1:19510');
   assert.throws(() => loadConfig({ GIFOS_URL: 'gifos.app' }), /GIFOS_URL/);
+});
+
+test('meeting voice uses the caller key and the suggested xAI model', () => {
+  const off = voiceConfig({ GIFOS_MCP_HOME: '/x' });
+  assert.equal(off.enabled, false);
+  assert.equal(off.url, '');
+  assert.deepEqual(voicePublic(off), { speaking: false, model: null });
+  const suggested = voiceConfig({ GIFOS_LLM_KEY: 'sk-test-key' });
+  assert.equal(suggested.enabled, true);
+  assert.equal(suggested.url, SUGGESTED_LLM_URL);
+  assert.equal(suggested.model, SUGGESTED_LLM_MODEL);
+  assert.equal(suggested.ttsPath, '/tts');
+  assert.equal(suggested.key, 'sk-test-key');
+  assert.equal(JSON.stringify(voicePublic(suggested)).includes('sk-test-key'), false);
+  assert.equal(JSON.stringify(voicePublic(suggested)).includes('api.x.ai'), false);
+  const local = voiceConfig({ GIFOS_LLM_URL: 'http://127.0.0.1:9/v1/', GIFOS_LLM_MODEL: 'local-model' });
+  assert.equal(local.enabled, true);
+  assert.equal(local.url, 'http://127.0.0.1:9/v1');
+  assert.equal(local.ttsPath, '/audio/speech');
+  assert.equal(local.model, 'local-model');
+  assert.equal(voiceConfig({ GIFOS_LLM_KEY: 'sk-test-key', GIFOS_VOICE: '0' }).enabled, false);
+  assert.equal(voiceConfig({ GIFOS_LLM_URL: 'http://127.0.0.1:9/v1' }).enabled, false);
+  assert.throws(() => voiceConfig({ GIFOS_LLM_URL: 'not a url' }), /GIFOS_LLM_URL/);
 });
 
 test('credential rules match the Meeting Bot app', () => {

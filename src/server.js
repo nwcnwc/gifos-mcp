@@ -3,8 +3,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
+import { etiquetteResult } from './participant/etiquette.js';
+import { withAiBadge } from './participant/names.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
@@ -15,8 +17,12 @@ function fail(message) {
   return { isError: true, content: [{ type: 'text', text: message }] };
 }
 
-export function createServer({ cfg, meetings, bot }) {
+export function createServer({ cfg, meetings, bot, participant }) {
   const server = new McpServer({ name: 'gifos-mcp', version: VERSION });
+  const part = () => {
+    if (!participant) throw new Error('Participant mode is not available in this process.');
+    return participant;
+  };
 
   // Wraps a handler: known meeting, readable errors.
   const guarded = (fn) => async (args) => {
@@ -63,6 +69,7 @@ export function createServer({ cfg, meetings, bot }) {
     inputSchema: { meeting_id: meetingId },
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
+    if (m.mode === 'participant') return fail('Meeting ' + meeting_id + ' is a participant session. Use leave_meeting to leave it.');
     if (m.state === 'live') return ok({ ...publicView(m), note: 'Already live.' });
     return ok(publicView(await enter(m)));
   }));
@@ -138,6 +145,12 @@ export function createServer({ cfg, meetings, bot }) {
     inputSchema: { meeting_id: meetingId },
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
+    if (m.mode === 'participant') {
+      if (participant && participant.meetingId === m.meeting_id) await participant.leave();
+      const left = meetings.get(m.meeting_id) || m;
+      if (left.state === 'live') meetings.update(m.meeting_id, { state: 'ended', ended_at: new Date().toISOString(), session_id: null });
+      return ok({ ...publicView(meetings.get(m.meeting_id) || left), note: 'Left the meeting.' });
+    }
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
     let text = m.transcript || '';
     try { text = await bot.transcript(m.session_id); } catch (e) { /* keep the last copy */ }
@@ -167,8 +180,97 @@ export function createServer({ cfg, meetings, bot }) {
       stt_app: cfg.sttApp || null,
       live_meetings: meetings.all().filter((m) => m.state === 'live').map((m) => m.meeting_id),
       bot: info,
+      participant: participant ? participant.info() : null,
     });
   }));
+
+  const meetingUrl = z.string().url().max(2048).describe('The GifOS meeting link (…/run.html#v=… or …/meet/…).');
+
+  server.registerTool('join_meeting_as_participant', {
+    title: 'Join a GifOS meeting as a participant',
+    description: 'Joins the meeting as a real participant with a live microphone and a camera card. The display name always keeps a robot badge so people can see an AI is present. On the first other person, the server says in chat and out loud that it is an AI assistant, that it transcribes speech so it can take part, and that it is not recording.',
+    inputSchema: {
+      url: meetingUrl,
+      password: z.string().max(200).optional().describe('The meeting password, if the meeting has one.'),
+      display_name: z.string().min(1).max(80).describe('The name on the tile. A robot badge is added if you leave it off. GifOS keeps 40 characters.'),
+      avatar: z.string().max(2048).optional().describe('Image or GIF path or URL used as the camera. Default is a generated robot card.'),
+    },
+  }, guarded(async ({ url, password, display_name, avatar }) => {
+    const joined = await part().join({ url, password, display_name, avatar });
+    return ok({ ...joined, display_name: withAiBadge(joined.display_name || display_name) });
+  }));
+
+  server.registerTool('get_new_utterances', {
+    title: 'New things people said',
+    description: 'Transcript lines heard since the last call, one entry per speaker, plus who is talking now and turn_hint ("your_turn" or "wait"). Pass the last utterance id as since. wait_ms long-polls until a new line arrives or the wait ends (max 30000). The server listens to each remote person separately and does not transcribe its own voice.',
+    inputSchema: {
+      since: z.union([z.string().max(40), z.number()]).optional().describe('The last utterance id you have, or a timestamp in milliseconds. Omit it to read everything still buffered.'),
+      wait_ms: z.number().int().min(0).max(30000).optional().describe('How long to wait for a new line. 0 returns immediately.'),
+    },
+  }, guarded(async ({ since, wait_ms }) => {
+    return ok(await part().utterances({ since, wait_ms }));
+  }));
+
+  server.registerTool('say', {
+    title: 'Speak in the meeting',
+    description: 'Speaks text through the participant microphone using the local text-to-speech engine. If interruptible is true (the default) and someone else starts talking, playback stops and the result is {interrupted: true, spoken_until_ms}.',
+    inputSchema: {
+      text: z.string().min(1).max(2000).describe('What to say, kept short: one to three sentences.'),
+      voice: z.string().max(200).optional().describe('Voice name or a local model path. The default voice is used when this is omitted.'),
+      interruptible: z.boolean().optional().describe('Stop if a remote person starts talking. Default true.'),
+    },
+  }, guarded(async ({ text, voice, interruptible }) => {
+    return ok(await part().say(text, voice, interruptible));
+  }));
+
+  server.registerTool('stop_speaking', {
+    title: 'Stop speaking',
+    description: 'Stops the current spoken line immediately.',
+    inputSchema: {},
+  }, guarded(async () => ok(await part().stop())));
+
+  server.registerTool('send_chat', {
+    title: 'Send a chat message',
+    description: 'Posts a chat line as the participant.',
+    inputSchema: {
+      text: z.string().min(1).max(2000).describe('The chat message.'),
+    },
+  }, guarded(async ({ text }) => ok(await part().chat(text))));
+
+  server.registerTool('raise_hand', {
+    title: 'Raise or lower your hand',
+    description: 'Raises the participant hand when on is true, and lowers it when on is false.',
+    inputSchema: { on: z.boolean().describe('true to raise, false to lower.') },
+  }, guarded(async ({ on }) => ok(await part().hand(on))));
+
+  server.registerTool('set_mic', {
+    title: 'Turn the microphone on or off',
+    description: 'Unmutes the participant microphone when on is true. Muting stops the room hearing you; it does not stop you hearing them.',
+    inputSchema: { on: z.boolean() },
+  }, guarded(async ({ on }) => ok(await part().mic(on))));
+
+  server.registerTool('set_camera', {
+    title: 'Turn the camera on or off',
+    description: 'Shows the camera card when on is true, and turns it off when on is false.',
+    inputSchema: { on: z.boolean() },
+  }, guarded(async ({ on }) => ok(await part().cam(on))));
+
+  server.registerTool('get_meeting_state', {
+    title: 'Who is in the meeting',
+    description: 'Participants, who is talking, whether your hand, microphone, and camera are on, and whether the join disclosure has been spoken.',
+    inputSchema: {},
+  }, guarded(async () => ok(await part().meetingState())));
+
+  server.registerTool('leave_meeting', {
+    title: 'Leave the meeting',
+    description: 'Leaves the meeting. Call this when someone asks you to leave.',
+    inputSchema: {},
+  }, guarded(async () => ok(await part().leave())));
+
+  server.registerPrompt('meeting_participant_etiquette', {
+    title: 'Meeting participant etiquette',
+    description: 'How to take part in a GifOS meeting as an AI assistant: wait for pauses, keep replies short, identify as an AI, disclose transcription, keep the robot badge, and leave when asked.',
+  }, async () => etiquetteResult());
 
   return server;
 }

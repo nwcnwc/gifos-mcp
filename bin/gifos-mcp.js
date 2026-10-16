@@ -9,6 +9,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { loadConfig, botCredentials } from '../src/config.js';
 import { MeetingStore } from '../src/meetings.js';
 import { MeetingBotDriver } from '../src/driver.js';
+import { ParticipantHost } from '../src/participant/host.js';
 import { createServer, VERSION } from '../src/server.js';
 import { log } from '../src/log.js';
 
@@ -18,7 +19,9 @@ if (argv.includes('--help') || argv.includes('-h')) {
     '  gifos-mcp                 MCP over stdio\n' +
     '  gifos-mcp --http [port]   MCP over streamable HTTP on 127.0.0.1 (default 19520)\n\n' +
     'Environment: GIFOS_URL, GIFOS_RELAY, GIFOS_BOT_NAME, GIFOS_BOT_PASSWORD, GIFOS_STT_APP,\n' +
-    'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN.\n' +
+    'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN,\n' +
+    'GIFOS_STT_URL, GIFOS_STT_ENGINE, GIFOS_STT_MODEL, GIFOS_STT_THREADS, GIFOS_WHISPER_BIN, GIFOS_WHISPER_MODEL,\n' +
+    'GIFOS_TTS_URL, GIFOS_TTS_ENGINE, GIFOS_TTS_VOICE, GIFOS_PIPER_BIN, GIFOS_VAD_END_MS, GIFOS_TURN_PAUSE_MS.\n' +
     'See https://github.com/nwcnwc/gifos-mcp#readme\n');
   process.exit(0);
 }
@@ -30,12 +33,14 @@ const meetings = new MeetingStore(cfg.home);
 const reset = meetings.resetLive();
 if (reset) log(reset + ' meeting(s) were live in the last run; they are back to scheduled');
 const bot = new MeetingBotDriver(cfg, creds);
+const participant = new ParticipantHost(cfg, meetings);
 log('gifos-mcp ' + VERSION + ' · GifOS ' + cfg.gifosUrl + ' · bot "' + creds.name + '" (' + creds.source + ') · data ' + cfg.home);
 
 let closing = false;
 async function shutdown(code) {
   if (closing) return;
   closing = true;
+  await participant.close().catch(() => {});
   await bot.close().catch(() => {});
   process.exit(code);
 }
@@ -58,7 +63,7 @@ if (httpAt >= 0) {
       enableDnsRebindingProtection: true,
       allowedHosts: ['127.0.0.1:' + port, 'localhost:' + port],
     });
-    const server = createServer({ cfg, meetings, bot });
+    const server = createServer({ cfg, meetings, bot, participant });
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     try {
       await server.connect(transport);
@@ -70,7 +75,7 @@ if (httpAt >= 0) {
   });
   srv.listen(port, '127.0.0.1', () => log('listening on http://127.0.0.1:' + port + '/mcp'));
 } else {
-  const server = createServer({ cfg, meetings, bot });
+  const server = createServer({ cfg, meetings, bot, participant });
   await server.connect(new StdioServerTransport());
   process.stdin.on('close', () => shutdown(0));
   log('ready on stdio');

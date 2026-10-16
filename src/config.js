@@ -32,6 +32,9 @@ export function loadConfig(env = process.env) {
     autoInstallBrowser: env.GIFOS_MCP_NO_INSTALL !== '1',
     prewarm: env.GIFOS_MCP_LAZY !== '1',
     debug: env.GIFOS_MCP_DEBUG === '1',
+    vadEndMs: Number(env.GIFOS_VAD_END_MS) > 0 ? Number(env.GIFOS_VAD_END_MS) : 450,
+    turnPauseMs: Number(env.GIFOS_TURN_PAUSE_MS) >= 0 && env.GIFOS_TURN_PAUSE_MS !== undefined && env.GIFOS_TURN_PAUSE_MS !== ''
+      ? Number(env.GIFOS_TURN_PAUSE_MS) : 700,
   };
 }
 

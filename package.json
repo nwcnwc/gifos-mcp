@@ -1,7 +1,7 @@
 {
   "name": "gifos-mcp",
-  "version": "0.1.0",
-  "description": "GifOS Meet connector for Grok Bot: an MCP server that runs the GifOS Meeting Bot in a headless browser on your own machine.",
+  "version": "0.2.0",
+  "description": "GifOS Meet connector: an MCP server that runs the GifOS Meeting Bot and can also join a meeting as a participant.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -13,15 +13,18 @@
     "src",
     "assets",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "start": "node bin/gifos-mcp.js",
-    "test": "node --test test/unit/config.test.js test/unit/tools.test.js test/unit/http.test.js",
-    "test:e2e": "node test/e2e/run.js"
+    "test": "node --test test/unit/config.test.js test/unit/tools.test.js test/unit/http.test.js test/unit/audio.test.js test/unit/participant.test.js",
+    "test:e2e": "node test/e2e/run.js",
+    "test:participant": "node test/participant/run.js",
+    "stt-bench": "node scripts/stt-bench.js"
   },
   "keywords": [
     "mcp",

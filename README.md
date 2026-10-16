@@ -2,8 +2,10 @@
 
 # gifos-mcp: GifOS Meet connector for Grok Bot
 
-`gifos-mcp` is an [MCP](https://modelcontextprotocol.io) server that lets Grok Bot (or any MCP client) create
+`gifos-mcp` is an [MCP](https://modelcontextprotocol.io) server that lets an assistant create
 [GifOS](https://gifos.app) meetings, put a note-taking bot in them, and read back the transcript.
+It can also join a meeting as a participant that hears and speaks. That mode is described in
+[docs/PARTICIPANT.md](docs/PARTICIPANT.md).
 
 It runs **on your own computer**. It starts a headless Chromium running GifOS, installs the **Meeting Bot** app
 from the GifOS app store, and drives it. Meetings stay peer to peer between the people in them. Transcripts stay
@@ -111,6 +113,9 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_MCP_LAZY` | `0` | `1` starts the browser on the first tool call instead of at launch. |
 | `GIFOS_MCP_DEBUG` | `0` | `1` logs the GifOS console to stderr and adds per-meeting caption state to `status`. |
 | `GIFOS_MCP_SHOTS` | none | A folder for screenshots of the bot's screens (for debugging). |
+| `GIFOS_STT_URL`, `GIFOS_TTS_URL` | local engines | Replace server-side speech-to-text or text-to-speech. See [docs/PARTICIPANT.md](docs/PARTICIPANT.md). |
+| `GIFOS_STT_ENGINE`, `GIFOS_STT_MODEL`, `GIFOS_STT_THREADS` | whisper.cpp, `base.en`, 2 | The local speech-to-text engine. |
+| `GIFOS_TTS_ENGINE`, `GIFOS_TTS_VOICE` | Piper, lessac medium | The local text-to-speech engine. |
 
 ## Tools
 
@@ -126,6 +131,17 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Everyone else can stay, because GifOS meetings have no owner who can close them. |
 | `list_meetings` | none | Every meeting this server created or joined, with its state (`scheduled`, `live` or `ended`). |
 | `status` | none | Browser state, bot name, the bot's live sessions, and its last heartbeat. |
+| `join_meeting_as_participant` | `url`, `display_name`, `password?`, `avatar?` | Join as a person with a mic, a camera card, and a 🤖 badge. |
+| `get_new_utterances` | `since?`, `wait_ms?` | New per-speaker lines, plus `turn_hint`. |
+| `say` | `text`, `voice?`, `interruptible?` | Speak through the participant mic. |
+| `stop_speaking` | none | Cut the current line. |
+| `send_chat` | `text` | Post chat as the participant. |
+| `raise_hand` | `on` | Raise or lower the hand. |
+| `set_mic`, `set_camera` | `on` | Mute or show the camera. |
+| `get_meeting_state` | none | Who is here, who is talking, hand, mic, camera. |
+| `leave_meeting` | none | Leave the participant session. |
+
+Participant mode has its own browser. The prompt `meeting_participant_etiquette` is the rule set for the assistant that calls these tools. Details, engine environment variables, and the limit on stadium mixes are in [docs/PARTICIPANT.md](docs/PARTICIPANT.md).
 
 Errors come back as MCP tool errors with a readable message, for example `Unknown meeting_id …` or
 `Meeting m_… is scheduled. Call start_meeting first.`
@@ -189,8 +205,8 @@ npm install
 npm test
 ```
 
-These run the ten tools over a real MCP client/server pair with a fake bot, plus the `--http` transport through
-the real binary.
+These run the tools over a real MCP client/server pair with a fake bot and a fake participant, plus the `--http` transport through
+the real binary. `npm run test:participant` is the live hearing and speaking check; it needs `GIFOS_URL`, `GIFOS_RELAY`, and `GIFOS_MCP_HOME`.
 
 **2. Try it live (needs GifOS 0.9.23 or newer on gifos.app).**
 

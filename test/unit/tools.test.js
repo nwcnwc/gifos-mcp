@@ -11,6 +11,39 @@ import { createServer } from '../../src/server.js';
 import { loadConfig } from '../../src/config.js';
 import { MeetingStore } from '../../src/meetings.js';
 
+class FakeParticipant {
+  constructor(meetings) { this.meetings = meetings; this.calls = []; this.meetingId = null; this.lines = []; }
+  async join({ url, password, display_name, avatar }) {
+    this.calls.push(['join', url, password || '', display_name, avatar || '']);
+    const m = this.meetings.add({ topic: display_name, room: 'room', link: url, state: 'live', mode: 'participant', display_name });
+    this.meetingId = m.meeting_id;
+    return { meeting_id: m.meeting_id, display_name, link: url };
+  }
+  async utterances() {
+    return { utterances: this.lines, state: { speaking_now: [], last_speech_end_ms: 0, silence_ms: 900, turn_hint: 'your_turn' } };
+  }
+  async say(text, voice, interruptible) {
+    this.calls.push(['say', text, voice || '', interruptible !== false]);
+    return { interrupted: false, spoken_until_ms: 900, text };
+  }
+  async stop() { this.calls.push(['stop']); return { stopped: true }; }
+  async chat(text) { this.calls.push(['chat', text]); return { sent: true }; }
+  async hand(on) { this.calls.push(['hand', !!on]); return { hand_raised: !!on }; }
+  async mic(on) { this.calls.push(['mic', !!on]); return { mic_on: !!on }; }
+  async cam(on) { this.calls.push(['cam', !!on]); return { camera_on: !!on }; }
+  async meetingState() {
+    return { meeting_id: this.meetingId, display_name: 'Helper 🤖', participants: ['Helper 🤖 (you)', 'Ada'], speaking_now: [], hand_raised: false, mic_on: true, camera_on: true, self_speaking: false, disclosed: true, turn_hint: 'your_turn' };
+  }
+  async leave() {
+    this.calls.push(['leave']);
+    if (this.meetingId) this.meetings.update(this.meetingId, { state: 'ended', ended_at: new Date().toISOString() });
+    const id = this.meetingId;
+    this.meetingId = null;
+    return { left: true, meeting_id: id };
+  }
+  info() { return { joined: !!this.meetingId, display_name: this.meetingId ? 'Helper 🤖' : null }; }
+}
+
 class FakeBot {
   constructor() { this.calls = []; this.lines = {}; this.seq = 0; this.started = 0; this.failJoin = ''; }
   async ensureStarted() { this.started++; }
@@ -28,10 +61,10 @@ class FakeBot {
   async info() { return { state: 'ready', bot_name: 'notes-test' }; }
 }
 
-let home, cfg, meetings, bot, client;
+let home, cfg, meetings, bot, participant, client;
 
 async function connect() {
-  const server = createServer({ cfg, meetings, bot });
+  const server = createServer({ cfg, meetings, bot, participant });
   const [a, b] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: 'unit', version: '1' });
   await Promise.all([server.connect(a), client.connect(b)]);
@@ -45,14 +78,19 @@ beforeEach(async () => {
   cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510/' });
   meetings = new MeetingStore(home);
   bot = new FakeBot();
+  participant = new FakeParticipant(meetings);
   await connect();
 });
 
 test('lists every tool with an input schema', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['create_meeting', 'end_meeting', 'get_transcript', 'join_meeting', 'list_meetings',
-    'mute', 'share_content', 'start_meeting', 'status', 'unmute']);
+  assert.deepEqual(names, [
+    'create_meeting', 'end_meeting', 'get_meeting_state', 'get_new_utterances', 'get_transcript',
+    'join_meeting', 'join_meeting_as_participant', 'leave_meeting', 'list_meetings', 'mute',
+    'raise_hand', 'say', 'send_chat', 'set_camera', 'set_mic', 'share_content', 'start_meeting',
+    'status', 'stop_speaking', 'unmute',
+  ]);
   for (const t of tools) {
     assert.equal(t.inputSchema.type, 'object', t.name);
     assert.ok(t.description && t.description.length > 20, t.name + ' has a description');
@@ -190,4 +228,52 @@ test('list_meetings and status', async () => {
   assert.equal(s.stt_app, 'offline-stt-whisper');
   assert.deepEqual(s.live_meetings, [b.meeting_id]);
   assert.equal(s.bot.state, 'ready');
+  assert.equal(s.participant.joined, false);
+});
+
+test('participant tools join, listen, speak, and leave without the notes bot', async () => {
+  const j = json(await call('join_meeting_as_participant', {
+    url: 'https://gifos.app/run.html#v=room-one', display_name: 'Helper',
+  }));
+  assert.equal(j.display_name, 'Helper 🤖');
+  assert.equal(meetings.get(j.meeting_id).mode, 'participant');
+  assert.equal(bot.calls.length, 0, 'the notes bot stays out of participant mode');
+  const refused = await call('start_meeting', { meeting_id: j.meeting_id });
+  assert.equal(refused.isError, true);
+  assert.match(text(refused), /participant session/);
+  participant.lines = [{ id: 'u1', speaker: 'Ada', text: 'the purple giraffe reads seven books', t_start: 10, t_end: 20 }];
+  const heard = json(await call('get_new_utterances', { wait_ms: 0 }));
+  assert.equal(heard.utterances[0].speaker, 'Ada');
+  assert.equal(heard.state.turn_hint, 'your_turn');
+  const said = json(await call('say', { text: 'hello from the assistant' }));
+  assert.equal(said.interrupted, false);
+  assert.deepEqual(participant.calls.at(-1), ['say', 'hello from the assistant', '', true]);
+  const cut = json(await call('say', { text: 'stop this one', interruptible: false }));
+  assert.equal(cut.text, 'stop this one');
+  assert.deepEqual(participant.calls.at(-1), ['say', 'stop this one', '', false]);
+  assert.equal(json(await call('stop_speaking')).stopped, true);
+  assert.equal(json(await call('send_chat', { text: 'in the chat' })).sent, true);
+  assert.equal(json(await call('raise_hand', { on: true })).hand_raised, true);
+  assert.equal(json(await call('set_mic', { on: false })).mic_on, false);
+  assert.equal(json(await call('set_camera', { on: true })).camera_on, true);
+  const st = json(await call('get_meeting_state'));
+  assert.equal(st.disclosed, true);
+  assert.ok(st.participants.includes('Ada'));
+  const left = json(await call('leave_meeting'));
+  assert.equal(left.left, true);
+  assert.equal(meetings.get(j.meeting_id).state, 'ended');
+  assert.equal(bot.calls.length, 0);
+});
+
+test('meeting_participant_etiquette tells the agent to wait, disclose, and leave', async () => {
+  const { prompts } = await client.listPrompts();
+  assert.equal(prompts[0].name, 'meeting_participant_etiquette');
+  const got = await client.getPrompt({ name: 'meeting_participant_etiquette' });
+  const body = got.messages.map((m) => m.content.text).join('\n');
+  assert.match(body, /your_turn/);
+  assert.match(body, /one to three sentences/);
+  assert.match(body, /AI assistant/);
+  assert.match(body, /🤖/);
+  assert.match(body, /leave_meeting/);
+  assert.match(body, /not recording/);
 });

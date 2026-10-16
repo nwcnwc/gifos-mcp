@@ -13,7 +13,8 @@ import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import { log } from './log.js';
 import { VOICE_GAP, INTERJECT_GAP, HAND_GAP, MIC_GAP, CAMERA_GAP, CONTROLS_GAP, SNAPSHOT_GAP } from './voice/settings.js';
-import { bridgeScript, installPlan } from './voice/providers.js';
+import { bridgeScript, installPlan, MCP_TTS_BINDING, speakAsTts } from './voice/providers.js';
+import { installKokoro } from './voice/kokoro.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -31,9 +32,10 @@ function silenceWav(file) {
 }
 
 export class MeetingBotDriver {
-  constructor(cfg, creds) {
+  constructor(cfg, creds, kokoro) {
     this.cfg = cfg;
     this.creds = creds;
+    this.kokoro = kokoro || null;
     this.state = 'stopped';
     this.error = '';
     this.starting = null;
@@ -89,10 +91,19 @@ export class MeetingBotDriver {
     });
     const init = { gifos_meet_bar: '0', gifos_name: this.creds.name };
     if (this.cfg.relay) init.gifos_relay = this.cfg.relay;
+    const mcpTts = !!(this.kokoro && this.cfg.voice.tts.source === 'mcp');
+    if (mcpTts) {
+      const engine = this.kokoro;
+      await ctx.exposeBinding(MCP_TTS_BINDING, async (_source, text, voice) => {
+        const out = await speakAsTts(engine, { text, voice });
+        return out.bytes.toString('base64');
+      });
+    }
     await ctx.addInitScript({ content: 'try{var o=' + JSON.stringify(init) + ';for(var k in o)localStorage.setItem(k,o[k]);}catch(e){}' });
     // The host page reads Settings and calls GifOS.providers. Meet Bot's frame
-    // never sees a URL or a key. This does not speak and does not call a model.
-    await ctx.addInitScript({ content: bridgeScript() });
+    // never sees a URL or a key. Kokoro audio, when this process owns it,
+    // arrives through the binding above. The page does not fetch it.
+    await ctx.addInitScript({ content: bridgeScript({ mcpTts }) });
     return ctx;
   }
 
@@ -242,6 +253,9 @@ export class MeetingBotDriver {
     this.state = 'starting';
     this.error = '';
     fs.mkdirSync(this.cfg.home, { recursive: true, mode: 0o700 });
+    if (this.cfg.voice.tts.source === 'mcp' && !this.kokoro) {
+      this.kokoro = await installKokoro({ home: this.cfg.home, voice: this.cfg.voice.tts.voice });
+    }
     let audio = this.cfg.botAudio;
     if (!audio) { audio = path.join(this.cfg.home, 'silence.wav'); if (!fs.existsSync(audio)) silenceWav(audio); }
 

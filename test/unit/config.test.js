@@ -58,7 +58,8 @@ test('meeting voice is a Meet Bot setting, and the public view hides the endpoin
   assert.equal('llm' in voiceSettings(voiceConfig({ GIFOS_CONVERSATION_VOICE: 'grok' })), false);
   assert.equal(voiceConfig({ GIFOS_LLM_KEY: 'sk-test-key', GIFOS_RESPOND_TO_COMMAND: '0' }).respondToCommand, false);
   assert.equal(local.tts.engine, 'kokoro');
-  assert.equal(local.tts.app, 'offline-tts-kokoro');
+  assert.equal(local.tts.source, 'mcp');
+  assert.equal(local.tts.app, 'mcp-tts-kokoro');
   assert.equal(local.tts.voice, 'af_heart');
   assert.equal(local.sttUrl, '');
   const standin = voiceConfig({

@@ -63,7 +63,7 @@ test('local voice settings name providers, and public text does not carry the ke
   assert.equal('url' in settings.llm, false);
   assert.equal(settings.tts.provider, 'tts');
   assert.equal(settings.tts.engine, 'kokoro');
-  assert.equal(settings.tts.app, 'offline-tts-kokoro');
+  assert.equal(settings.tts.app, 'mcp-tts-kokoro');
   assert.equal(settings.tts.voice, 'af_heart');
   assert.equal(JSON.stringify(settings).includes(KEY), false);
   assert.equal(JSON.stringify(settings).includes('127.0.0.1'), false);

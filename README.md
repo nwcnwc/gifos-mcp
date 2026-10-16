@@ -24,7 +24,10 @@ Grok Bot ──MCP (stdio)──▶ gifos-mcp ──▶ headless Chromium (one p
 
 - `create_meeting` only mints a meeting link. Nothing joins yet.
 - `start_meeting` or `join_meeting` sends the bot into the meeting. Everyone in the meeting sees it as a tile
-  labelled **🤖 bot** with a **📝 transcribing** chip. The bot has no camera. This server does not play audio.
+  labelled **🤖 bot** with a **📝 transcribing** chip. The bot has no camera.
+- Spoken lines are Kokoro, running in this process. The headless GifOS computer sees that voice as its `tts`
+  provider. The first start downloads the weights and the `af_heart` voice. This process does not play the
+  audio into the meeting; Meet Bot does.
 - Speech is turned into text on your computer by the Offline Captions (Whisper) app from the GifOS store. The bot
   writes down each participant who is unmuted, credited by name. It never writes down its own machine's
   microphone.
@@ -38,7 +41,7 @@ in a headless browser and passes commands through `window.MeetingBot`. It does n
 and it does not call a model. Meet Bot has two switches: respond to commands (on or off) and conversation voice
 (`none`, Grok Voice, or a local LLM with Kokoro). A local LLM is any OpenAI-compatible endpoint, with your own
 key, or a provider app. The suggested default is xAI Grok (`grok-4.20-0309-non-reasoning`). On startup this
-server installs the speech providers and writes the endpoint into Settings → AI models, the same way you would.
+server sets up Kokoro, installs the speech-to-text provider, and writes the language-model endpoint into Settings → AI models, the same way you would.
 `set_voice` then names those providers. It does not send the URL or the key. Until the app accepts the setting,
 the tool reports the gap and this server does not imitate speech.
 
@@ -134,8 +137,8 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_RESPOND_TO_COMMAND` | on | `0` tells Meet Bot not to answer commands it hears. |
 | `GIFOS_VOICE` | follows the settings above | `0` forces conversation voice `none`. Tailing the transcript still works. |
 | `GIFOS_TRANSCRIPT_POLL_MS` | `500` | How often captions are copied from Meet Bot into the live transcript. |
-| `GIFOS_TTS_ENGINE` | `kokoro` | `auto` and `kokoro` install the store app `offline-tts-kokoro` (voice `af_heart`) and assign it as text-to-speech, including on a fresh profile. `none` does not install it. This server does not run the speech engine. |
-| `GIFOS_TTS_APP` | `offline-tts-kokoro` | Another store provider app to install and assign for speech. |
+| `GIFOS_TTS_ENGINE` | `kokoro` | `auto` and `kokoro` run Kokoro in this process (voice `af_heart`) and register it as the GifOS `tts` role. The first start downloads the weights into `GIFOS_MCP_HOME/kokoro`. `none` does not. |
+| `GIFOS_TTS_APP` | empty | A store provider app to install and assign for speech instead of Kokoro in this process. |
 | `GIFOS_TTS_VOICE` | `af_heart` | Kokoro voice name, passed through with local voice. |
 | `GIFOS_TTS_URL` | empty | HTTP speech stand-in, stored as the `tts` endpoint in Settings. Replaces the Kokoro install. Not requested by this server. `GIFOS_TTS_ENGINE=none` wins. |
 | `GIFOS_STT_URL` | empty | HTTP caption stand-in, stored as the `stt` endpoint in Settings when `GIFOS_STT_APP=none`. Not passed to Meet Bot as a URL. |

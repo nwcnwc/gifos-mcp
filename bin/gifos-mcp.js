@@ -12,6 +12,7 @@ import { MeetingBotDriver } from '../src/driver.js';
 import { createServer, VERSION } from '../src/server.js';
 import { LiveTranscript, watchCaptions } from '../src/voice/live.js';
 import { scrub } from '../src/voice/settings.js';
+import { installKokoro } from '../src/voice/kokoro.js';
 import { log } from '../src/log.js';
 
 const argv = process.argv.slice(2);
@@ -31,10 +32,15 @@ if (argv.includes('--version')) { process.stdout.write(VERSION + '\n'); process.
 
 const cfg = loadConfig();
 const creds = botCredentials(cfg);
+let kokoro = null;
+if (cfg.voice.tts.source === 'mcp') {
+  log('setting up Kokoro (weights, voice ' + cfg.voice.tts.voice + ')');
+  kokoro = await installKokoro({ home: cfg.home, voice: cfg.voice.tts.voice });
+}
 const meetings = new MeetingStore(cfg.home);
 const reset = meetings.resetLive();
 if (reset) log(reset + ' meeting(s) were live in the last run; they are back to scheduled');
-const bot = new MeetingBotDriver(cfg, creds);
+const bot = new MeetingBotDriver(cfg, creds, kokoro);
 const live = new LiveTranscript(cfg.home);
 const hide = (text) => scrub(text, [cfg.voice.key, creds.password]);
 const captions = watchCaptions({ meetings, bot, live, intervalMs: cfg.voice.pollMs, botName: creds.name, scrubText: hide });

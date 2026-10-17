@@ -227,3 +227,33 @@ test('a worker that keeps dying waits longer before each restart, and joins go t
     assert.equal(forks[0], before + 1);
   }
 });
+
+test('a call that never answers times out without killing a worker that is still alive', { timeout: 10000 }, async () => {
+  makePool({ heartbeatMs: 50, stuckMs: 2000, callMs: 200 });
+  const a = await pool.join('https://gifos.app/run.html#v=roomA', '');
+  const t0 = Date.now();
+  await assert.rejects(pool.workers[0].call('slow'), /Worker 0 did not answer slow within 200ms/);
+  assert.ok(Date.now() - t0 < 1500);
+  // The worker kept answering pings, so it stays up with its room.
+  await pool.say(a, 'still here');
+  const row = (await pool.info()).workers[0];
+  assert.equal(row.state, 'ready');
+  assert.equal(row.rooms, 1);
+});
+
+test('a join that times out and then lands late is left at once, so no seat is orphaned', { timeout: 10000 }, async () => {
+  makePool({ workers: 1, rooms: 1, callMs: 2000, joinMs: 200 });
+  await pool.ensureStarted();
+  await pool.workers[0].call('holdJoins');
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /Worker 0 did not answer join within 200ms/);
+  assert.equal(pool.workers[0].used, 0);
+  await pool.workers[0].call('releaseJoins');
+  let log = [];
+  for (let i = 0; i < 100 && !log.some((r) => r[0] === 'leave'); i++) {
+    await new Promise((r) => setTimeout(r, 20));
+    log = await pool.workers[0].call('calls');
+  }
+  assert.deepEqual(log.filter((r) => r[0] === 'leave'), [['leave', 'mt_1']]);
+  // The seat is free for the next join.
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w0:mt_2');
+});

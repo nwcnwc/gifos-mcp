@@ -10,7 +10,11 @@ class FakeDriver {
     this.seq = 0;
   }
   async ensureStarted() { this.log.push(['ensureStarted']); }
-  async join(link, password) { this.log.push(['join', link, password]); return 'mt_' + (++this.seq); }
+  async join(link, password) {
+    this.log.push(['join', link, password]);
+    if (this.held) await this.held.promise;
+    return 'mt_' + (++this.seq);
+  }
   async leave(id) { this.log.push(['leave', id]); }
   async transcribe(id, on) { this.log.push(['transcribe', id, on]); }
   async say(id, text) { this.log.push(['say', id, text]); }
@@ -26,11 +30,14 @@ class FakeDriver {
   async whoami() { return { name: this.boot.creds.name, profile: this.boot.cfg.profile, argv: process.argv, env: Object.keys(process.env).filter((k) => String(process.env[k]).includes(this.boot.creds.password)) }; }
   async think(id, on) { this.queue.setThinking(id, on); }
   async slow() { return new Promise(() => {}); }
+  // Joins wait until releaseJoins(), so a test can time one out and then let it land.
+  async holdJoins() { let release; const promise = new Promise((r) => { release = r; }); this.held = { promise, release }; }
+  async releaseJoins() { const h = this.held; this.held = null; if (h) h.release(); }
   // Blocks the event loop for good, the way a wedged worker would: no reply, no pong.
   async hang() { for (;;) { /* stuck */ } }
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins']);
 });
 process.send({ event: 'boot' });

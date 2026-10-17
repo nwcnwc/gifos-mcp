@@ -356,3 +356,38 @@ test('a room that cannot be entered raises one meeting.error per order, not one 
   for (let i = 0; i < 3; i++) await clock.tick(start + 60 * 1000 + i * 15000);
   assert.equal(errors('m_fixed'), 2, 'one more error after the good join, not one per tick');
 });
+
+test('an order whose room cannot be entered raises one schedule.due, not one every tick', async () => {
+  const store = new ScheduleStore(homeDir());
+  const meetings = memoryMeetings();
+  const events = [];
+  let fail = true;
+  const { order: row } = store.add(order());
+  meetings.add({ meeting_id: 'm_fixed', room: 'room123', link: LINK, topic: 'Notes' });
+  store.setPhase(row.schedule_id, { meeting_id: 'm_fixed' });
+  const clock = createClock({
+    schedule: store,
+    meetings,
+    cap: 4,
+    near: 3,
+    horizonMs: 24 * 60 * 60 * 1000,
+    emit: (e) => events.push(e),
+    join: async (item) => {
+      if (fail) throw new Error('Meet Bot: the room did not open');
+      const m = meetings.get(item.meeting_id);
+      m.state = 'live';
+      m.session_id = 's1';
+      return m;
+    },
+    leave: async () => {},
+    people: async () => [{ name: 'Ada', bot: false }],
+  });
+  const due = () => events.filter((e) => e.type === 'schedule.due' && e.meeting_id === 'm_fixed').length;
+  const start = Date.parse(row.start);
+  for (let i = 0; i < 3; i++) await clock.tick(start - 30 * 1000 + i * 15000);
+  assert.equal(due(), 1, 'one schedule.due over 3 failed ticks');
+  fail = false;
+  await clock.tick(start + 30 * 1000);
+  assert.equal(store.get(row.schedule_id).phase, 'live');
+  assert.equal(due(), 1, 'the join that works is not due again');
+});

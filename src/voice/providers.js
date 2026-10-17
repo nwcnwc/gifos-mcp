@@ -6,8 +6,10 @@
 // for them. A raw URL and the key never go to Meet Bot.
 // See docs/MEETBOT-BRIDGE.md.
 
-import { MCP_TTS_APP } from './settings.js';
+import { MCP_TTS_APP, KOKORO_VOICE } from './settings.js';
 import { QUESTION_RE, WAKE_RE } from './wake.js';
+import { nativeVoice } from './voices.js';
+import { HALLUCINATION_PHRASES, LOW_ENERGY } from './hallucination.js';
 
 export const CORS_PROXY = 'https://cors-proxy.gifos.app/';
 // One Playwright binding for every role this process serves. The page
@@ -147,7 +149,11 @@ export async function speakAsTts(engine, req) {
   if (!engine || typeof engine.speak !== 'function') throw new Error('Kokoro is not available on this computer.');
   const text = String((req && req.text) || '').trim();
   if (!text) throw new Error('Nothing to say.');
-  const voice = String((req && req.voice) || engine.voice || '');
+  const fallback = String(engine.voice || KOKORO_VOICE);
+  const has = typeof engine.hasVoice === 'function'
+    ? (name) => !!engine.hasVoice(name)
+    : (engine.voices && typeof engine.voices === 'object' ? (name) => !!engine.voices[name] : (name) => name === fallback);
+  const voice = nativeVoice((req && req.voice) || '', fallback, has);
   const bytes = Buffer.from(await engine.speak(text, voice));
   if (bytes.length < 44 || bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE') {
     throw new Error('Kokoro did not return a WAV.');
@@ -206,13 +212,47 @@ export function bridgeScript(opts) {
       '    if(HOST[role]) return {host:true, role:role, name:"gifos-mcp"};\n' +
       '    return origAssigned(role);\n' +
       '  };\n' +
+      '  var HALL={};\n' +
+      '  var HALL_LIST=' + JSON.stringify(HALLUCINATION_PHRASES) + ';\n' +
+      '  for(var hi=0;hi<HALL_LIST.length;hi++) HALL[HALL_LIST[hi]]=1;\n' +
+      '  function normLine(text){ return String(text||"").toLowerCase().replace(/[,.!?;:]+/g," ").replace(/\\s+/g," ").trim(); }\n' +
+      '  function pcmEnergy(raw){\n' +
+      '    var bytes=asBytes(raw);\n' +
+      '    if(!bytes) return null;\n' +
+      '    if(!bytes.length) return 0;\n' +
+      '    var start=0, end=bytes.length, o, id, size, n, i, sum, v, found=false;\n' +
+      '    if(bytes.length>=12 && bytes[0]===82 && bytes[1]===73 && bytes[2]===70 && bytes[3]===70 && bytes[8]===87 && bytes[9]===65 && bytes[10]===86 && bytes[11]===69){\n' +
+      '      o=12;\n' +
+      '      while(o+8<=bytes.length){\n' +
+      '        id=String.fromCharCode(bytes[o],bytes[o+1],bytes[o+2],bytes[o+3]);\n' +
+      '        size=bytes[o+4]|(bytes[o+5]<<8)|(bytes[o+6]<<16)|(bytes[o+7]<<24);\n' +
+      '        if(size<0) break;\n' +
+      '        if(id==="data"){ start=o+8; end=Math.min(bytes.length, start+size); found=true; break; }\n' +
+      '        o+=8+size+(size&1);\n' +
+      '      }\n' +
+      '      if(!found) return null;\n' +
+      '    }\n' +
+      '    n=Math.floor((end-start)/2); if(n<=0) return 0; sum=0;\n' +
+      '    for(i=0;i<n;i++){ v=bytes[start+i*2]|(bytes[start+i*2+1]<<8); if(v&32768) v-=65536; if(v<0) v=-v; sum+=v; }\n' +
+      '    return sum/n;\n' +
+      '  }\n' +
+      '  function quietStt(out, req){\n' +
+      '    if(!out || typeof out.text!=="string" || !out.text) return out;\n' +
+      '    if(!HALL[normLine(out.text)]) return out;\n' +
+      '    var raw=req&&(req.audio!=null?req.audio:req.bytes);\n' +
+      '    var energy=pcmEnergy(raw);\n' +
+      '    if(energy==null || energy>=' + LOW_ENERGY + ') return out;\n' +
+      '    var copy={}, k; for(k in out) copy[k]=out[k]; copy.text=""; return copy;\n' +
+      '  }\n' +
       '  p.call=function(role, req){\n' +
+      '    var pending;\n' +
       '    if(HOST[role]){\n' +
       '      var fn=window[' + bindLit + '];\n' +
       '      if(typeof fn!=="function") return Promise.reject(new Error("The host provider is not available."));\n' +
-      '      return Promise.resolve(fn(role, packReq(req))).then(unpack);\n' +
-      '    }\n' +
-      '    return origCall(role, req);\n' +
+      '      pending=Promise.resolve(fn(role, packReq(req))).then(unpack);\n' +
+      '    } else pending=origCall(role, req);\n' +
+      '    if(role!=="stt") return pending;\n' +
+      '    return Promise.resolve(pending).then(function(out){ return quietStt(out, req); });\n' +
       '  };\n' +
       '  p.__gifosHost=true;\n' +
       '}\n' +

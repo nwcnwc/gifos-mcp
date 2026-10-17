@@ -3,6 +3,8 @@
 // binding. It does not fetch, and no sandboxed provider GIF is mounted.
 // The key stays in this process.
 import { speakAsTts } from './providers.js';
+import { nativeVoice } from './voices.js';
+import { heardText } from './hallucination.js';
 
 const CHAT_PATH = '/chat/' + 'completions';
 
@@ -30,7 +32,9 @@ export async function serveHost(services, role, req, fetchImpl) {
 
 async function fetchSpeech(tts, req, fetchFn) {
   const text = String((req && req.text) || '');
-  const voice = String((req && (req.voice || tts.voice)) || '');
+  const configured = String((tts && tts.voice) || '');
+  const known = configured ? (name) => name === configured : null;
+  const voice = nativeVoice((req && req.voice) || '', configured, known);
   const res = await fetchFn(tts.url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -79,11 +83,14 @@ async function fetchCaptions(stt, req, fetchFn) {
   });
   if (!res.ok) throw await readError(res);
   const ct = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || '';
+  let text = '';
   if (ct.includes('json') || typeof res.text !== 'function') {
     const data = await res.json();
-    return { role: 'stt', text: String((data && (data.text || data.transcript)) || '') };
+    text = String((data && (data.text || data.transcript)) || '');
+  } else {
+    text = String(await res.text());
   }
-  return { role: 'stt', text: String(await res.text()) };
+  return { role: 'stt', text: heardText(text, body) };
 }
 
 export function packHostResult(out) {

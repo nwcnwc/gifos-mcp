@@ -237,7 +237,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
 
   server.registerTool('tail_transcript', {
     title: 'Tail the live transcript',
-    description: 'New caption lines since `since` (the seq from the previous tail, or 0). Each line is {seq, ts, speaker, text, kind} and kind is speech. Lines come from Meet Bot. Works while the meeting is live and after it ends. The same bytes are the gifos://meeting/{id}/transcript resource.',
+    description: 'New lines since `since` (the seq from the previous tail, or 0). Each line is {seq, ts, speaker, text, kind}. kind is speech for someone in the room, and spoken for a line this bot said. Lines come from Meet Bot. Works while the meeting is live and after it ends. The same bytes are the gifos://meeting/{id}/transcript resource.',
     inputSchema: {
       meeting_id: meetingId,
       since: z.number().int().min(0).optional().describe('Return lines with a seq greater than this. Omit or pass 0 to read from the start.'),
@@ -259,6 +259,10 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     if (typeof bot.interject !== 'function') throw new Error(INTERJECT_GAP);
     const said = await bot.interject(m.session_id, text);
     if (!said || said.applied === false) throw new Error((said && said.gap) || INTERJECT_GAP);
+    const speaker = botName || 'Meet Bot';
+    const body = String(text).trim();
+    const have = transcript.lines.some((l) => l.meeting_id === m.meeting_id && l.kind === 'spoken' && l.speaker === speaker && l.text === body);
+    if (body && !have) transcript.append({ meeting_id: m.meeting_id, speaker, text: body, kind: 'spoken' });
     return ok({ meeting_id: m.meeting_id, spoken: true });
   }));
 

@@ -3,6 +3,7 @@
 // 0600. Callers scrub secrets before append.
 import fs from 'node:fs';
 import path from 'node:path';
+import { isCaptionHallucination } from './hallucination.js';
 
 const ID_RE = /^m_[0-9a-f]+$/;
 
@@ -86,10 +87,10 @@ export class LiveTranscript {
     if (typeof prev === 'string' && text.startsWith(prev)) {
       fresh = raw.slice(splitLines(prev).length);
     } else if (prev !== undefined) {
-      const have = new Set(this.lines.filter((l) => l.meeting_id === meetingId && l.kind === 'speech').map((l) => l.source));
+      const have = this.seenSources(meetingId);
       fresh = raw.filter((line) => !have.has(line));
     } else {
-      const have = new Set(this.lines.filter((l) => l.meeting_id === meetingId && l.kind === 'speech').map((l) => l.source));
+      const have = this.seenSources(meetingId);
       if (have.size) fresh = raw.filter((line) => !have.has(line));
     }
     this.snapshots.set(meetingId, String(text || ''));
@@ -101,10 +102,20 @@ export class LiveTranscript {
       const speaker = m[1].trim();
       const said = m[2].trim();
       if (!said) continue;
-      if (skip && speaker.toLowerCase() === skip) continue;
+      if (isCaptionHallucination(said)) continue;
+      const bot = !!(skip && speaker.toLowerCase() === skip);
+      if (bot) {
+        const dup = this.lines.some((l) => l.meeting_id === meetingId && l.kind === 'spoken' && l.speaker.toLowerCase() === speaker.toLowerCase() && l.text === said);
+        if (!dup) added.push(this.append({ meeting_id: meetingId, speaker, text: said, kind: 'spoken', source: line }));
+        continue;
+      }
       added.push(this.append({ meeting_id: meetingId, speaker, text: said, kind: 'speech', source: line }));
     }
     return added;
+  }
+
+  seenSources(meetingId) {
+    return new Set(this.lines.filter((l) => l.meeting_id === meetingId && (l.kind === 'speech' || l.kind === 'spoken') && l.source).map((l) => l.source));
   }
 
   tail(meetingId, since) {

@@ -246,7 +246,8 @@ test('a join that times out and then lands late is left at once, so no seat is o
   await pool.ensureStarted();
   await pool.workers[0].call('holdJoins');
   await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /Worker 0 did not answer join within 200ms/);
-  assert.equal(pool.workers[0].used, 0);
+  // The join may still land, so its seat stays taken until it answers.
+  assert.equal(pool.workers[0].used, 1);
   await pool.workers[0].call('releaseJoins');
   let log = [];
   for (let i = 0; i < 100 && !log.some((r) => r[0] === 'leave'); i++) {
@@ -681,4 +682,24 @@ test('a late join whose leave fails keeps its seat and is left again on its own,
   assert.ok(await until(() => pool.workers[0].used === 0), 'the seat stayed taken after the retry worked');
   assert.equal((await pool.info()).workers[0].stray_rooms, undefined);
   assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w0:mt_2');
+});
+
+test('a join that timed out and has not landed yet keeps its seat, so the worker is not given more rooms than its budget', { timeout: 10000 }, async () => {
+  makePool({ workers: 1, rooms: 1, callMs: 2000, joinMs: 200 });
+  await pool.ensureStarted();
+  await pool.workers[0].call('holdJoins');
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /did not answer join within 200ms/);
+  // The bot may still be walking into roomA, so the only seat is not free.
+  assert.equal(pool.workers[0].used, 1);
+  assert.equal(pool.hasSeat(), false);
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomB', ''), (e) => e.code === 'no_seat');
+  const joins = async () => (await pool.workers[0].call('calls')).filter((r) => r[0] === 'join').length;
+  assert.equal(await joins(), 1, 'a second room was sent to a worker whose budget was spent');
+  assert.equal((await pool.info()).workers[0].late_joins, 1);
+  // The late join fails in the room: nothing to leave, and the seat is free again.
+  await pool.workers[0].call('breakJoin', 'Meeting Bot: wrong room password');
+  await pool.workers[0].call('releaseJoins');
+  assert.ok(await until(() => pool.workers[0].used === 0), 'a late join that failed kept its seat');
+  assert.equal((await pool.info()).workers[0].late_joins, undefined);
+  assert.equal((await pool.workers[0].call('calls')).filter((r) => r[0] === 'leave').length, 0);
 });

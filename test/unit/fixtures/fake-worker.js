@@ -21,6 +21,7 @@ class FakeDriver {
   async join(link, password) {
     this.log.push(['join', link, password]);
     if (this.held) await this.held.promise;
+    if (this.joinFails) throw new Error(this.joinFails);
     return 'mt_' + (++this.seq);
   }
   async leave(id) {
@@ -65,6 +66,8 @@ class FakeDriver {
   // Joins wait until releaseJoins(), so a test can time one out and then let it land.
   async holdJoins() { let release; const promise = new Promise((r) => { release = r; }); this.held = { promise, release }; }
   async releaseJoins() { const h = this.held; this.held = null; if (h) h.release(); }
+  // join fails with this text from now on.
+  async breakJoin(text) { this.joinFails = String(text); }
   // leave fails with this text until fixLeave().
   async breakLeave(text) { this.leaveFails = String(text); }
   async fixLeave() { this.leaveFails = null; }
@@ -84,6 +87,6 @@ class FakeDriver {
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'fixStart']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'fixStart']);
 });
 process.send({ event: 'boot' });

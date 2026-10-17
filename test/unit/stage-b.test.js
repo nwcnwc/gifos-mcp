@@ -811,3 +811,32 @@ test('a leave that never answers while Meet Bot still lists the room keeps the s
   await pool.workers[0].call('releaseLeaves');
   assert.ok(await until(() => pool.workers[0].used === 0), 'the seat stayed taken after the late leave landed');
 });
+
+test('a worker whose boot never finishes is killed after bootMs, so a join goes to the next worker instead of waiting forever', { timeout: 10000 }, async () => {
+  cfg.hangBoot = [0];
+  makePool({ workers: 2, rooms: 1, bootMs: 300 });
+  const t0 = Date.now();
+  const joined = await Promise.race([
+    pool.join('https://gifos.app/run.html#v=roomA', ''),
+    new Promise((r) => setTimeout(() => r('still waiting after 5s'), 5000)),
+  ]);
+  assert.equal(joined, 'w1:mt_1');
+  assert.ok(Date.now() - t0 < 3000);
+  const row = (await pool.info()).workers[0];
+  assert.equal(row.state, 'lost');
+  assert.match(row.error, /did not boot within 300ms/);
+  assert.ok(row.restart_in_ms > 0);
+});
+
+test('close() while a join waits on a worker that is booting starts no other worker, and the join fails', { timeout: 10000 }, async () => {
+  cfg.hangBoot = [0];
+  makePool({ workers: 2, rooms: 1, closeMs: 300 });
+  const joining = pool.join('https://gifos.app/run.html#v=roomA', '').then((v) => ({ v }), (e) => ({ e }));
+  await new Promise((r) => setTimeout(r, 300));
+  await pool.close();
+  const got = await Promise.race([joining, new Promise((r) => setTimeout(() => r({ v: 'still waiting after 3s' }), 3000))]);
+  assert.ok(got.e, 'the join went on after close: ' + got.v);
+  assert.match(String(got.e.message), /closed/);
+  assert.equal(pool.workers[1].child, null, 'a worker was started after close');
+  assert.deepEqual(pool.workers.map((w) => w.state), ['stopped', 'stopped']);
+});

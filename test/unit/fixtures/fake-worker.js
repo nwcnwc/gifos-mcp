@@ -99,6 +99,9 @@ class FakeDriver {
 }
 
 process.once('message', (boot) => {
+  // cfg.hangBoot lists workers whose boot never finishes, the way a stalled
+  // Kokoro download would: the process is alive but never says up.
+  if ((boot.cfg.hangBoot || []).includes(boot.index)) { setInterval(() => {}, 1000); return; }
   serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stallJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'stallLeaves', 'fixStart']);
 });
 process.send({ event: 'boot' });

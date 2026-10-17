@@ -276,7 +276,7 @@ export class MeetingBotDriver {
     this.error = '';
     fs.mkdirSync(this.cfg.home, { recursive: true, mode: 0o700 });
     if (this.cfg.voice.tts.source === 'mcp' && !this.kokoro) {
-      this.kokoro = await installKokoro({ home: this.cfg.home, voice: this.cfg.voice.tts.voice });
+      this.kokoro = await installKokoro({ home: this.cfg.home, voice: this.cfg.voice.tts.voice, host: this.cfg.voice.tts.weights });
     }
     let audio = this.cfg.botAudio;
     if (!audio) { audio = path.join(this.cfg.home, 'silence.wav'); if (!fs.existsSync(audio)) silenceWav(audio); }

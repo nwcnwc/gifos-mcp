@@ -140,7 +140,8 @@ function ttsConfig(env) {
   if (url) return { engine: 'http', url: cleanBase(url, 'GIFOS_TTS_URL'), voice: named };
   const app = String(env.GIFOS_TTS_APP || '').trim();
   if (app) return { engine: 'kokoro', app, voice: named || KOKORO_VOICE, source: 'store' };
-  return { engine: 'kokoro', app: MCP_TTS_APP, voice: named || KOKORO_VOICE, source: 'mcp' };
+  const weights = String(env.GIFOS_KOKORO_URL || '').trim();
+  return { engine: 'kokoro', app: MCP_TTS_APP, voice: named || KOKORO_VOICE, source: 'mcp', weights: weights ? cleanBase(weights, 'GIFOS_KOKORO_URL') : '' };
 }
 
 function sttUrl(env) {

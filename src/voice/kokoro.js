@@ -14,12 +14,15 @@ export const KOKORO_DTYPE = 'q8';
 
 const loads = new Map();
 
-export function installKokoro({ home, voice } = {}) {
+export const KOKORO_HOST = 'https://huggingface.co';
+
+// host is a mirror of the Hugging Face layout (GIFOS_KOKORO_URL); empty means huggingface.co.
+export function installKokoro({ home, voice, host } = {}) {
   if (!home) throw new Error('Kokoro needs a directory to keep its weights.');
   const dir = path.join(home, 'kokoro');
   let pending = loads.get(dir);
   if (!pending) {
-    pending = load(dir, voice || KOKORO_VOICE).catch((e) => {
+    pending = load(dir, voice || KOKORO_VOICE, host || KOKORO_HOST).catch((e) => {
       loads.delete(dir);
       throw e;
     });
@@ -28,10 +31,11 @@ export function installKokoro({ home, voice } = {}) {
   return pending;
 }
 
-async function load(dir, voice) {
+async function load(dir, voice, host) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const transformers = await import('@huggingface/transformers');
   transformers.env.cacheDir = dir;
+  transformers.env.remoteHost = String(host).replace(/\/+$/, '') + '/';
   const { KokoroTTS } = await import('kokoro-js');
   log('Kokoro: loading ' + KOKORO_MODEL + ' (' + KOKORO_DTYPE + ') into ' + dir);
   const seen = new Set();

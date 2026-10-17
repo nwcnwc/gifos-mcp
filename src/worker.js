@@ -64,7 +64,7 @@ async function main() {
     const { cfg, creds } = boot || {};
     let kokoro = null;
     if (cfg.voice && cfg.voice.tts && cfg.voice.tts.source === 'mcp') {
-      kokoro = await installKokoro({ home: cfg.home, voice: cfg.voice.tts.voice });
+      kokoro = await installKokoro({ home: cfg.home, voice: cfg.voice.tts.voice, host: cfg.voice.tts.weights });
     }
     serveWorker(process, (queue) => new MeetingBotDriver(cfg, creds, kokoro, { queue }));
   });

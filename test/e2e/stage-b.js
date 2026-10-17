@@ -11,8 +11,8 @@
 // that worker's bot -> each transcript holds only its own room's person ->
 // say in the worker-1 room is a spoken line under <name>-w1, never speech ->
 // chat shared in room A is not seen in room B -> worker 1 is killed: room B
-// drops to scheduled, worker 0 is untouched, start_meeting seats B again on
-// the restarted worker 1 -> end both, the bots leave.
+// drops to scheduled, worker 0 is untouched, the clock seats B again on
+// the restarted worker 1 by itself, and start_meeting then does not seat it twice -> end both, the bots leave.
 //
 // E2E_HUMAN_WS=ws://127.0.0.1:39301/pw,ws://127.0.0.1:39302/pw runs the two
 // people in Chromium on other machines, started there with
@@ -305,13 +305,27 @@ async function main() {
     const stillThere = await botTiles(people[1 - i1].page);
     check(people[1 - i1].name + ' still sees the worker-0 bot', stillThere.length === 1, JSON.stringify(stillThere));
 
-    // Worker 0 is full; worker 1 restarts after its 1s backoff and takes the room back.
-    await sleep(1500);
-    const back = await call('start_meeting', { meeting_id: r1.meeting_id });
+    // Worker 0 is full; worker 1 restarts after its 1s backoff and the clock
+    // (one tick each 15s) takes the room back with nobody calling start_meeting.
+    let back = dropped;
+    const backBy = Date.now() + 120000;
+    while (back.state !== 'live' && Date.now() < backBy) {
+      await sleep(1000);
+      back = await call('meeting_status', { meeting_id: r1.meeting_id });
+    }
     const backSt = await call('status');
-    check('start_meeting seats the dropped room again on the restarted worker 1',
+    check('the clock seats the dropped room again on the restarted worker 1, on its own',
       back.state === 'live' && backSt.bot.workers[1].state === 'ready' && backSt.bot.workers[1].rooms === 1 && backSt.bot.workers[1].pid !== w1pid,
-      JSON.stringify(backSt.bot.workers.map((w) => ({ state: w.state, rooms: w.rooms }))));
+      JSON.stringify({ state: back.state, workers: backSt.bot.workers.map((w) => ({ state: w.state, rooms: w.rooms })) }));
+    const again = await call('start_meeting', { meeting_id: r1.meeting_id });
+    const againSt = await call('status');
+    check('start_meeting on the room it is already back in does not seat it twice',
+      again.state === 'live' && againSt.bot.workers[1].rooms === 1 && (againSt.bot.bot_sessions || []).filter((x) => x.worker === 1).length === 1,
+      JSON.stringify(againSt.bot.workers.map((w) => w.rooms)));
+    const events = (await call('tail_events')).events || [];
+    check('tail_events shows the room joined again for reason worker',
+      events.some((e) => e.type === 'meeting.joined' && e.meeting_id === r1.meeting_id && e.data && e.data.reason === 'worker'),
+      JSON.stringify(events.filter((e) => e.meeting_id === r1.meeting_id).map((e) => e.type)));
     const backTile = await waitTiles(people[i1].page, (t) => t.length === 1 && t[0].includes(w1), 90000);
     check(people[i1].name + ' sees the bot come back', backTile.ok, JSON.stringify(backTile.tiles));
     await people[i1].page.screenshot({ path: path.join(PROOF, people[i1].name.toLowerCase() + '-bot-back.png') });

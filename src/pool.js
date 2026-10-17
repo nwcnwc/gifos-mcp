@@ -37,9 +37,15 @@
 //   worker, so one broken Chromium does not fail every join.
 // - A join whose worker dies under it goes to the next worker, once, and
 //   fails with code worker_died if that one dies too.
+// - Each worker runs with a TMPDIR of its own (workerTmpDir), emptied
+//   before each start and removed when it exits, so what a crashed worker's
+//   Chromium leaves there (playwright-artifacts-*) does not pile up in /tmp.
 // - Voice settings go to every ready worker at once and again to any worker
 //   that restarts or missed them, before its next join. A ready worker that
 //   refused them is asked again every voiceRetryMs until it takes them.
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +57,18 @@ const SESSION_RE = /^w(\d+):(.+)$/;
 const SLOW_METHODS = new Set(['ensureStarted', 'join']);
 // Meet Bot's answer for a session it does not hold: already left.
 const GONE_RE = /No such meeting/;
+
+// Under the system TMPDIR, not the home: Chromium puts its singleton socket
+// in TMPDIR, and a socket path is capped near 108 bytes. Named by the home,
+// so the next start of the same home clears what a killed one left.
+export function workerTmpDir(cfg, index) {
+  const tag = crypto.createHash('sha256').update(path.resolve(cfg.home)).digest('hex').slice(0, 8);
+  return path.join(os.tmpdir(), 'gifos-mcp-' + tag + '-w' + index);
+}
+
+function removeDir(dir) {
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { log('could not remove ' + dir + ': ' + ((e && e.message) || e)); }
+}
 
 // Worker 0 keeps the bot's own name and profile, so a one-worker machine
 // that moves to several keeps its installed apps. Worker n is its own bot
@@ -150,8 +168,11 @@ class Worker {
     this.botName = id.creds.name;
     this.state = 'starting';
     this.error = '';
+    const tmpDir = workerTmpDir(this.pool.cfg, this.index);
+    removeDir(tmpDir);
+    try { fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 }); } catch (e) { log('could not make ' + tmpDir + ': ' + ((e && e.message) || e)); }
     this.booting = new Promise((resolve, reject) => {
-      const child = this.pool.forkWorker(this.index);
+      const child = this.pool.forkWorker(this.index, { tmpDir });
       this.child = child;
       let up = false;
       // The heartbeat starts at up, so this covers the boot before it.
@@ -179,6 +200,8 @@ class Worker {
       child.on('error', (e) => { this.error = String((e && e.message) || e); });
       child.on('exit', (code, signal) => {
         clearTimeout(boot);
+        // A worker killed under its browser could not remove its own.
+        removeDir(tmpDir);
         const why = this.error || ('worker ' + this.index + ' exited' + (signal ? ' (' + signal + ')' : ' (code ' + code + ')'));
         this.lost(why);
         if (!up) reject(new Error(why));
@@ -454,7 +477,7 @@ class Worker {
 }
 
 export class WorkerPool {
-  // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
+  // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index, { tmpDir }), closeMs,
   //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs, voiceRetryMs,
   //         leaveRetryMs, lateJoinMs, lateLeaveMs, bootMs }
   constructor(cfg, creds, opts = {}) {
@@ -487,7 +510,10 @@ export class WorkerPool {
     const script = opts.workerScript || WORKER_SCRIPT;
     this.forkWorker = typeof opts.forkWorker === 'function'
       ? opts.forkWorker
-      : () => fork(script, [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+      : (index, { tmpDir }) => fork(script, [], {
+        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+        env: { ...process.env, TMPDIR: tmpDir, GIFOS_WORKER_TMP: tmpDir },
+      });
     this.workers = Array.from({ length: this.size }, (_, i) => new Worker(this, i));
     this.closed = false;
     this.thinking = new Set();

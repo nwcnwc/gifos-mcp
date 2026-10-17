@@ -14,7 +14,7 @@ import { createServer } from '../../src/server.js';
 import { loadConfig } from '../../src/config.js';
 import { MeetingStore } from '../../src/meetings.js';
 import { EventLog } from '../../src/events.js';
-import { WorkerPool, splitSession, workerIdentity } from '../../src/pool.js';
+import { WorkerPool, splitSession, workerIdentity, workerTmpDir } from '../../src/pool.js';
 import { dropLostMeetings } from '../../src/supervisor.js';
 import { tmpHome } from './fixtures/tmp-home.js';
 
@@ -479,10 +479,13 @@ test('a worker whose supervisor is killed closes its browser and exits instead o
   if (orphaned) process.kill(pid, 'SIGKILL');
   assert.equal(orphaned, false, 'worker ' + pid + ' outlived its supervisor');
   assert.equal(fs.readFileSync(path.join(home, 'closed-w0'), 'utf8'), String(pid));
+  // Nobody is left to remove the worker's TMPDIR, so it took it along.
+  assert.equal(fs.existsSync(workerTmpDir(cfg, 0)), false);
 });
 
 test('a worker killed under its browser leaves no browser temp folder behind', async () => {
-  makePool();
+  let now = 1000000;
+  makePool({ workers: 1, now: () => now });
   await pool.join('https://gifos.app/run.html#v=roomA', '');
   const { tmpdir, artifacts } = await pool.workers[0].call('tmp');
   assert.ok(artifacts && fs.existsSync(artifacts));
@@ -497,6 +500,7 @@ test('a worker killed under its browser leaves no browser temp folder behind', a
   assert.equal(fs.existsSync(artifacts), false, 'left ' + artifacts);
   assert.equal(fs.existsSync(tmpdir), false, 'left ' + tmpdir);
   // The restarted worker gets a clean one, and close() removes it.
+  now += 1000;
   await pool.join('https://gifos.app/run.html#v=roomB', '');
   const again = await pool.workers[0].call('tmp');
   assert.equal(again.tmpdir, tmpdir);

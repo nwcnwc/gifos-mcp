@@ -3,6 +3,7 @@
 // the meeting index. It sends one call at a time per message over the IPC
 // channel and routes by session id. A worker never sees the schedule file or
 // a room password other than the one on the join it was handed.
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { SpeechQueue } from './voice/queue.js';
 
@@ -12,6 +13,13 @@ export const WORKER_METHODS = [
   'ensureStarted', 'join', 'leave', 'transcribe', 'say', 'people', 'list', 'transcript',
   'setVoice', 'interject', 'raiseHand', 'setMic', 'setCamera', 'meetingState', 'snapshot', 'info',
 ];
+
+// The TMPDIR the pool made for this worker. With the supervisor gone nobody
+// else removes it, so a worker leaving on disconnect takes it along.
+function dropOwnTmp() {
+  const dir = process.env.GIFOS_WORKER_TMP;
+  if (dir && dir === process.env.TMPDIR) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* exiting anyway */ } }
+}
 
 function errorText(e) {
   return String((e && e.message) || e || 'The worker call failed.');
@@ -35,9 +43,9 @@ export function serveWorker(channel, makeDriver, extra = [], closeMs = 10000) {
   // IPC channel. Chromium would keep this process and its seats alive with
   // nobody to route to them, so close the browser and go.
   channel.on('disconnect', () => {
-    const t = setTimeout(() => process.exit(1), closeMs);
+    const t = setTimeout(() => { dropOwnTmp(); process.exit(1); }, closeMs);
     t.unref();
-    shut().then(() => process.exit(0));
+    shut().then(() => { dropOwnTmp(); process.exit(0); });
   });
   channel.on('message', async (msg) => {
     if (!msg || typeof msg !== 'object') return;
@@ -77,7 +85,7 @@ async function main() {
   // stalled Kokoro download for good, and no browser is open yet, so a
   // supervisor that dies or closes ends it at once (the part file is kept
   // for the next start to resume).
-  const onDisconnect = () => process.exit(1);
+  const onDisconnect = () => { dropOwnTmp(); process.exit(1); };
   const onClose = (msg) => { if (msg && msg.type === 'close') process.exit(0); };
   process.on('disconnect', onDisconnect);
   process.on('message', onClose);

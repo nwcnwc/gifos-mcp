@@ -11,6 +11,8 @@
 //   the meeting index can drop them, and the clock rejoins live orders on a
 //   worker that is still up.
 // - A worker that stops answering the heartbeat is killed and counts as lost.
+//   So is one that does not say up within bootMs (a stalled Kokoro download
+//   would hold every join to it), and joins go to the next worker.
 // - A call that gets no answer within callMs (joinMs for a browser start or
 //   a join) fails, but a worker that still answers the heartbeat stays up.
 //   A join that timed out keeps its seat until it answers, since the bot
@@ -59,6 +61,10 @@ export function workerIdentity(cfg, creds, index) {
     profile: 'profile-bot' + tag,
     creds: { ...creds, name: String(creds.name).slice(0, 40 - tag.length) + tag },
   };
+}
+
+function closedError() {
+  return new Error('The worker pool is closed.');
 }
 
 // No worker can take a room right now. The clock waits on this; it is not
@@ -134,6 +140,7 @@ class Worker {
 
   spawn() {
     if (this.booting) return this.booting;
+    if (this.pool.closed) return Promise.reject(closedError());
     if (this.restartInMs() > 0) return Promise.reject(this.waitError());
     const id = workerIdentity(this.pool.cfg, this.pool.creds, this.index);
     const shots = this.pool.cfg.shotsDir || path.join(this.pool.cfg.home, 'shots');
@@ -145,10 +152,17 @@ class Worker {
       const child = this.pool.forkWorker(this.index);
       this.child = child;
       let up = false;
+      // The heartbeat starts at up, so this covers the boot before it.
+      const boot = setTimeout(() => {
+        if (up || this.child !== child) return;
+        this.error = 'worker ' + this.index + ' did not boot within ' + this.pool.bootMs + 'ms';
+        try { child.kill('SIGKILL'); } catch (e) { /* exit follows */ }
+      }, this.pool.bootMs);
+      boot.unref();
       child.on('message', (msg) => {
         if (!msg || typeof msg !== 'object') return;
         if (msg.event === 'boot') { child.send({ type: 'boot', cfg, creds: id.creds, index: this.index }); return; }
-        if (msg.event === 'up') { up = true; this.state = 'up'; this.upAt = this.pool.now(); this.heartbeat(child); resolve(); return; }
+        if (msg.event === 'up') { up = true; clearTimeout(boot); this.state = 'up'; this.upAt = this.pool.now(); this.heartbeat(child); resolve(); return; }
         if (msg.event === 'pong') { this.lastPong = Date.now(); return; }
         if (msg.event === 'thinking') { this.pool.thinkingFrom(this.index, msg.id, msg.on); return; }
         if (msg.id != null && this.late.has(msg.id)) { this.landedLate(msg); return; }
@@ -162,6 +176,7 @@ class Worker {
       });
       child.on('error', (e) => { this.error = String((e && e.message) || e); });
       child.on('exit', (code, signal) => {
+        clearTimeout(boot);
         const why = this.error || ('worker ' + this.index + ' exited' + (signal ? ' (' + signal + ')' : ' (code ' + code + ')'));
         this.lost(why);
         if (!up) reject(new Error(why));
@@ -439,7 +454,7 @@ class Worker {
 export class WorkerPool {
   // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
   //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs, voiceRetryMs,
-  //         leaveRetryMs, lateJoinMs, lateLeaveMs }
+  //         leaveRetryMs, lateJoinMs, lateLeaveMs, bootMs }
   constructor(cfg, creds, opts = {}) {
     this.cfg = cfg;
     this.creds = creds;
@@ -458,6 +473,8 @@ export class WorkerPool {
     // A browser start chains several page waits of cfg.timeoutMs each.
     this.callMs = opts.callMs > 0 ? opts.callMs : 60000;
     this.joinMs = opts.joinMs > 0 ? opts.joinMs : 5 * (cfg.timeoutMs || 120000);
+    // A first boot may fetch the Kokoro weights; give it one join window.
+    this.bootMs = opts.bootMs > 0 ? opts.bootMs : this.joinMs;
     this.infoMs = opts.infoMs > 0 ? opts.infoMs : 3000;
     this.voiceRetryMs = opts.voiceRetryMs > 0 ? opts.voiceRetryMs : 10000;
     this.leaveRetryMs = opts.leaveRetryMs > 0 ? opts.leaveRetryMs : 10000;
@@ -470,6 +487,7 @@ export class WorkerPool {
       ? opts.forkWorker
       : () => fork(script, [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
     this.workers = Array.from({ length: this.size }, (_, i) => new Worker(this, i));
+    this.closed = false;
     this.thinking = new Set();
     this.voice = null;
     const pool = this;
@@ -512,9 +530,11 @@ export class WorkerPool {
     const tried = new Set();
     let err = null;
     for (let w = this.pick(tried); w; w = this.pick(tried)) {
+      if (this.closed) throw closedError();
       tried.add(w);
       try { await w.ready(); return; } catch (e) { err = err || e; }
     }
+    if (this.closed) throw closedError();
     if (err) throw err;
     await this.workers[0].ready();
   }
@@ -541,6 +561,8 @@ export class WorkerPool {
     const tried = new Set();
     let err = null;
     for (let w = this.pick(tried); w; w = this.pick(tried)) {
+      // A join that outlived close() must not start the next worker.
+      if (this.closed) throw closedError();
       tried.add(w);
       w.reserved++;
       try {
@@ -553,6 +575,7 @@ export class WorkerPool {
         w.reserved--;
       }
     }
+    if (this.closed) throw closedError();
     if (err) throw err;
     const waiting = this.workers.find((x) => x.used < this.rooms && x.waitMs() > 0);
     if (waiting) throw waiting.waitError();
@@ -660,6 +683,7 @@ export class WorkerPool {
   }
 
   async close() {
+    this.closed = true;
     await Promise.all(this.workers.map((w) => w.close()));
   }
 }

@@ -14,6 +14,9 @@
 // - A call that gets no answer within callMs (joinMs for a browser start or
 //   a join) fails, but a worker that still answers the heartbeat stays up.
 //   A join that lands after its caller gave up is left at once.
+// - A leave that fails or times out keeps the room on its worker, so the
+//   seat stays taken and a second leave can still reach it. A late leave
+//   that lands, or Meet Bot saying the room is gone, frees it.
 // - status and list ask every ready worker at once and wait at most infoMs,
 //   so one stuck worker shows as an error row instead of holding status.
 // - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
@@ -30,6 +33,8 @@ const WORKER_SCRIPT = fileURLToPath(new URL('./worker.js', import.meta.url));
 const SESSION_RE = /^w(\d+):(.+)$/;
 // Calls that may start a browser or wait on a meeting page get joinMs.
 const SLOW_METHODS = new Set(['ensureStarted', 'join']);
+// Meet Bot's answer for a session it does not hold: already left.
+const GONE_RE = /No such meeting/;
 
 // Worker 0 keeps the bot's own name and profile, so a one-worker machine
 // that moves to several keeps its installed apps. Worker n is its own bot
@@ -67,7 +72,7 @@ class Worker {
     this.error = '';
     this.seq = 0;
     this.pending = new Map();
-    this.late = new Map();    // call id -> method, for calls that timed out
+    this.late = new Map();    // call id -> { method, args }, for calls that timed out
     this.rooms = new Set();   // local session ids seated on this worker
     this.reserved = 0;        // joins in flight
     this.booting = null;
@@ -193,7 +198,7 @@ class Worker {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
-        this.late.set(id, method);
+        this.late.set(id, { method, args });
         reject(new Error('Worker ' + this.index + ' did not answer ' + method + ' within ' + ms + 'ms.'));
       }, ms);
       timer.unref();
@@ -204,10 +209,12 @@ class Worker {
   }
 
   // A reply to a call that already timed out. Nobody holds the session id of
-  // a late join, so leave it rather than keep a seat no one can reach.
+  // a late join, so leave it rather than keep a seat no one can reach. A
+  // late leave that worked frees the seat it kept.
   landedLate(msg) {
-    const method = this.late.get(msg.id);
+    const { method, args } = this.late.get(msg.id);
     this.late.delete(msg.id);
+    if (method === 'leave' && (msg.ok || GONE_RE.test(msg.error || ''))) { this.rooms.delete(String(args[0])); return; }
     if (method !== 'join' || !msg.ok || msg.value == null) return;
     const local = String(msg.value);
     log('worker ' + this.index + ': a join landed after it timed out; leaving ' + local);
@@ -391,7 +398,10 @@ export class WorkerPool {
     const { w, local } = this.route(sessionId);
     this.setThinking(String(sessionId), false);
     try { await w.call('leave', local); }
-    finally { w.rooms.delete(local); }
+    catch (e) {
+      if (!GONE_RE.test((e && e.message) || '')) throw e;
+    }
+    w.rooms.delete(local);
   }
 
   async transcribe(id, on) { const r = this.route(id); return r.w.call('transcribe', r.local, !!on); }

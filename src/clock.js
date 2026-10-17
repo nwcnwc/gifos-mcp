@@ -77,6 +77,8 @@ export function createClock(deps) {
   // A room that cannot be entered (not a crash, not a full pool) is one
   // meeting.error per order or reseat until a join works, not one per tick.
   const enterFailed = new Set();
+  // schedule.due is once per order too, not once per retry tick.
+  const dueSent = new Set();
   function joinFailed(key, room, meetingId, e, now) {
     if (!(e && e.code === 'worker_died')) {
       if (enterFailed.has(key)) return;
@@ -181,6 +183,7 @@ export function createClock(deps) {
         const reason = order.phase === 'waiting_for_capacity' ? 'capacity' : 'late';
         crashCleared(order.room);
         enterFailed.delete(orderKey(order));
+        dueSent.delete(orderKey(order));
         deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'missed', missed_reason: reason });
         emit('schedule.missed', order.meeting_id, { ...briefOrder(order), reason });
         continue;
@@ -192,12 +195,16 @@ export function createClock(deps) {
           wait(order, full);
           continue;
         }
-        emit('schedule.due', order.meeting_id, briefOrder(order));
+        if (!dueSent.has(orderKey(order))) {
+          dueSent.add(orderKey(order));
+          emit('schedule.due', order.meeting_id, briefOrder(order));
+        }
         try {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
           waited.delete(orderKey(order));
           enterFailed.delete(orderKey(order));
+          dueSent.delete(orderKey(order));
           crashCleared(order.room);
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });

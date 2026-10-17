@@ -8,6 +8,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { weightsCache } from '../../src/voice/kokoro.js';
 
@@ -20,16 +21,23 @@ const CONFIG = JSON.stringify({ model_type: 'style_text_to_speech_2' });
 
 // files: name -> Buffer (served whole, or from a Range start) | { partial,
 // total, bytes? } (sends the first partial bytes of total, then stalls) |
-// missing (stalls with no answer). ranges lists each request's Range header.
-async function weightsServer(t, files) {
+// missing (stalls with no answer). ranges lists each request's Range and
+// If-Range headers. Like the Hugging Face CDN, every answer carries a strong
+// ETag (the sha256 of the bytes, or `etag`; null sends none) and If-Range
+// is ignored.
+const tagOf = (b) => '"' + crypto.createHash('sha256').update(b).digest('hex') + '"';
+async function weightsServer(t, files, { etag } = {}) {
   const asked = [];
   const ranges = [];
   const server = http.createServer((req, res) => {
     const prefix = '/' + REPO + '/resolve/main/';
     const name = req.url.startsWith(prefix) ? decodeURIComponent(req.url.slice(prefix.length)) : req.url;
     asked.push(name);
-    ranges.push({ name, range: req.headers.range || null });
+    ranges.push({ name, range: req.headers.range || null, ifRange: req.headers['if-range'] || null });
     const f = files[name];
+    const whole = Buffer.isBuffer(f) ? f : f && f.bytes;
+    const tag = etag !== undefined ? etag : whole ? tagOf(whole) : null;
+    if (tag) res.setHeader('etag', tag);
     const from = /^bytes=(\d+)-$/.exec(req.headers.range || '');
     if (Buffer.isBuffer(f) && from && Number(from[1]) < f.length) {
       const start = Number(from[1]);
@@ -178,32 +186,83 @@ test('a start after a download was killed asks only for the bytes it does not ha
 test('a resumed download puts the kept bytes and the rest together in order', async (t) => {
   const home = freshHome(t);
   const whole = pattern(1000000);
+  await killedPart(t, home, whole, 300000);
   const w = await weightsServer(t, { [MODEL]: whole });
   const dir = path.join(home, 'kokoro');
   const file = path.join(dir, REPO, MODEL);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file + '.' + (await deadPid()) + '.part', whole.subarray(0, 300000));
   const cache = weightsCache(dir, w.host);
   const res = await cache.match(w.host + '/' + REPO + '/resolve/main/' + MODEL);
   assert.ok(res, 'the kept part is finished and answered from the cache');
   assert.ok(Buffer.from(await res.arrayBuffer()).equals(whole), 'the answer is the whole file');
   assert.ok(fs.readFileSync(file).equals(whole), 'the file on disk is the whole file');
-  assert.deepEqual(w.ranges, [{ name: MODEL, range: 'bytes=300000-' }]);
-  assert.deepEqual(filesUnder(path.dirname(file)).filter((p) => p.endsWith('.part')), [], 'no part file is left');
+  assert.deepEqual(w.ranges, [{ name: MODEL, range: 'bytes=300000-', ifRange: tagOf(whole) }]);
+  assert.deepEqual(filesUnder(path.dirname(file)), [file], 'no part file (or its tag) is left');
 });
 
 test('a server that ignores Range gives the whole file, not the kept bytes twice', async (t) => {
   const home = freshHome(t);
   const whole = pattern(500000);
-  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-length': whole.length }); res.end(whole); });
+  await killedPart(t, home, whole, 200000);
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-length': whole.length, etag: tagOf(whole) }); res.end(whole); });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => { server.closeAllConnections(); server.close(); });
   const host = 'http://127.0.0.1:' + server.address().port;
   const dir = path.join(home, 'kokoro');
   const file = path.join(dir, REPO, MODEL);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file + '.' + (await deadPid()) + '.part', whole.subarray(0, 200000));
   const res = await weightsCache(dir, host).match(host + '/' + REPO + '/resolve/main/' + MODEL);
   assert.ok(res);
   assert.ok(fs.readFileSync(file).equals(whole), 'the file on disk is the whole file');
+});
+
+// A part file the way a real start leaves it: a child downloading `whole`
+// is killed after `partial` bytes. etag is what that server sent (null: none).
+async function killedPart(t, home, whole, partial, etag) {
+  const w = await weightsServer(t, {
+    'config.json': Buffer.from(CONFIG),
+    [MODEL]: { partial, total: whole.length, bytes: whole },
+  }, { etag });
+  const child = run(CHILD, [home, w.host]);
+  t.after(() => child.proc.kill('SIGKILL'));
+  await until(() => filesUnder(modelDir(home)).some((p) => p.endsWith('.part') && fs.statSync(p).size >= partial), 20000, 'the partial model on disk');
+  child.proc.kill('SIGKILL');
+  await child.done;
+}
+
+test('a part of an older version of the model is not joined to the new one', async (t) => {
+  const home = freshHome(t);
+  const v1 = pattern(600000);
+  const v2 = Buffer.from(v1.map((b) => (b + 1) % 251));
+  await killedPart(t, home, v1, 200000);
+  // The model changed upstream; the CDN still answers the Range with a 206.
+  const w = await weightsServer(t, { [MODEL]: v2 });
+  const dir = path.join(home, 'kokoro');
+  const file = path.join(dir, REPO, MODEL);
+  const res = await weightsCache(dir, w.host).match(w.host + '/' + REPO + '/resolve/main/' + MODEL);
+  if (res) assert.ok(Buffer.from(await res.arrayBuffer()).equals(v2), 'an answer from the cache is the new file, not old bytes + new bytes');
+  if (fs.existsSync(file)) assert.ok(fs.readFileSync(file).equals(v2), 'the file on disk is the new file, not old bytes + new bytes');
+  assert.deepEqual(filesUnder(path.dirname(file)).filter((p) => p.endsWith('.part')), [], 'the old part is dropped');
+});
+
+test('a resume tells the server which version its kept bytes are from', async (t) => {
+  const home = freshHome(t);
+  const whole = pattern(600000);
+  await killedPart(t, home, whole, 200000);
+  const w = await weightsServer(t, { [MODEL]: whole });
+  const dir = path.join(home, 'kokoro');
+  const res = await weightsCache(dir, w.host).match(w.host + '/' + REPO + '/resolve/main/' + MODEL);
+  assert.ok(res && Buffer.from(await res.arrayBuffer()).equals(whole), 'the same version is resumed into the whole file');
+  const ask = w.ranges.find((r) => r.name === MODEL);
+  assert.ok(ask && /^bytes=\d+-$/.test(ask.range), 'the model is asked for from the kept bytes on; asked ' + JSON.stringify(w.ranges));
+  assert.equal(ask.ifRange, tagOf(whole), 'the Range is sent with If-Range: the ETag the kept bytes came with');
+});
+
+test('a part from a server that gave no version tag is downloaded again, not resumed', async (t) => {
+  const home = freshHome(t);
+  const whole = pattern(600000);
+  await killedPart(t, home, whole, 200000, null);
+  const w = await weightsServer(t, { [MODEL]: whole }, { etag: null });
+  const dir = path.join(home, 'kokoro');
+  await weightsCache(dir, w.host).match(w.host + '/' + REPO + '/resolve/main/' + MODEL);
+  assert.deepEqual(w.ranges.filter((r) => r.range), [], 'no Range is asked for bytes nobody can vouch for; asked ' + JSON.stringify(w.ranges));
+  assert.deepEqual(filesUnder(path.join(dir, REPO)).filter((p) => p.endsWith('.part')), [], 'the unvouched part is dropped');
 });

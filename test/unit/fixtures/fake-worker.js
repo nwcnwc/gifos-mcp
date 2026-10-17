@@ -26,9 +26,11 @@ class FakeDriver {
   async whoami() { return { name: this.boot.creds.name, profile: this.boot.cfg.profile, argv: process.argv, env: Object.keys(process.env).filter((k) => String(process.env[k]).includes(this.boot.creds.password)) }; }
   async think(id, on) { this.queue.setThinking(id, on); }
   async slow() { return new Promise(() => {}); }
+  // Blocks the event loop for good, the way a wedged worker would: no reply, no pong.
+  async hang() { for (;;) { /* stuck */ } }
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang']);
 });
 process.send({ event: 'boot' });

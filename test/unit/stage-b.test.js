@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fork } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../../src/server.js';
@@ -171,4 +172,52 @@ test('the real worker entry boots over IPC and answers info without starting a b
   assert.equal(inf.state, 'stopped');
   assert.equal(inf.bot_name, CREDS.name + '-w1');
   await assert.rejects(pool.workers[1].call('start'), /no method "start"/);
+});
+
+test('a worker that stops answering the heartbeat is killed, and its rooms are dropped', { timeout: 10000 }, async () => {
+  makePool({ heartbeatMs: 50, stuckMs: 400 });
+  const lost = new Promise((resolve) => pool.onLost((ids, why, index) => resolve({ ids, why, index })));
+  const a = await pool.join('https://gifos.app/run.html#v=roomA', '');
+  const hung = pool.workers[0].call('hang');
+  const got = await lost;
+  assert.deepEqual(got, { ids: [a], why: got.why, index: 0 });
+  assert.match(got.why, /stopped answering/);
+  await assert.rejects(hung, /Worker 0 stopped/);
+  const row = (await pool.info()).workers[0];
+  assert.equal(row.state, 'lost');
+  assert.match(row.error, /stopped answering/);
+});
+
+test('a worker that keeps dying waits longer before each restart, and joins go to a worker that is up', async () => {
+  const CRASH = fileURLToPath(new URL('./fixtures/crash-worker.js', import.meta.url));
+  let now = 1000000;
+  const forks = [0, 0];
+  makePool({
+    now: () => now,
+    backoffMs: 1000,
+    backoffMaxMs: 4000,
+    forkWorker: (index) => {
+      forks[index]++;
+      return fork(index === 0 ? CRASH : FAKE, [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+    },
+  });
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /worker 0 exited/);
+  assert.deepEqual(forks, [1, 0]);
+  // Worker 0 is waiting out its backoff, so the next join starts worker 1.
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w1:mt_1');
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomC', ''), 'w1:mt_2');
+  assert.deepEqual(forks, [1, 1]);
+  // Worker 1 is full and worker 0 may not start yet.
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomD', ''), /worker 0 restarts in 1s/i);
+  assert.deepEqual(forks, [1, 1]);
+  assert.equal((await pool.info()).workers[0].restart_in_ms, 1000);
+  // 1s, then 2s, then 4s, then capped at 4s.
+  for (const wait of [1000, 2000, 4000, 4000]) {
+    now += wait - 1;
+    await assert.rejects(pool.join('https://gifos.app/run.html#v=roomD', ''), /restarts in/);
+    now += 1;
+    const before = forks[0];
+    await assert.rejects(pool.join('https://gifos.app/run.html#v=roomD', ''), /worker 0 exited/);
+    assert.equal(forks[0], before + 1);
+  }
 });

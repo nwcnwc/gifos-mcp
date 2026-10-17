@@ -312,3 +312,47 @@ test('an unreadable schedule.json is kept aside, not overwritten by the next sav
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('a room that cannot be entered raises one meeting.error per order, not one every tick; a good join resets it', async () => {
+  const store = new ScheduleStore(homeDir());
+  const meetings = memoryMeetings();
+  const events = [];
+  let fail = true;
+  const { order: row } = store.add(order());
+  meetings.add({ meeting_id: 'm_fixed', room: 'room123', link: LINK, topic: 'Notes' });
+  store.setPhase(row.schedule_id, { meeting_id: 'm_fixed' });
+  // A meeting a lost worker dropped that no order brings back.
+  meetings.add({ meeting_id: 'm_hand', room: 'room456', link: LINK, topic: 'Hand', reseat: true });
+  const clock = createClock({
+    schedule: store,
+    meetings,
+    cap: 4,
+    near: 3,
+    horizonMs: 24 * 60 * 60 * 1000,
+    emit: (e) => events.push(e),
+    join: async (item) => {
+      if (fail) throw new Error('Meet Bot: the room did not open');
+      const m = meetings.get(item.meeting_id);
+      m.state = 'live';
+      m.session_id = 's1';
+      return m;
+    },
+    reseat: async () => { throw new Error('Meet Bot: the room did not open'); },
+    leave: async () => {},
+    people: async () => [{ name: 'Ada', bot: false }],
+  });
+  const errors = (id) => events.filter((e) => e.type === 'meeting.error' && e.meeting_id === id).length;
+  const start = Date.parse(row.start);
+  for (let i = 0; i < 3; i++) await clock.tick(start - 30 * 1000 + i * 15000);
+  assert.equal(errors('m_fixed'), 1, 'one error for the order over 3 failed ticks');
+  assert.equal(errors('m_hand'), 1, 'one error for the reseat over 3 failed ticks');
+
+  fail = false;
+  await clock.tick(start + 30 * 1000);
+  assert.equal(store.get(row.schedule_id).phase, 'live');
+  // The seat is lost again (worker died); the next failures are news once more.
+  meetings.get('m_fixed').state = 'scheduled';
+  fail = true;
+  for (let i = 0; i < 3; i++) await clock.tick(start + 60 * 1000 + i * 15000);
+  assert.equal(errors('m_fixed'), 2, 'one more error after the good join, not one per tick');
+});

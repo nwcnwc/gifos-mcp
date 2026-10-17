@@ -35,6 +35,7 @@
 // - A worker that is up but whose browser will not start waits the same way
 //   before its next start, and the join that found it out tries the next
 //   worker, so one broken Chromium does not fail every join.
+// - A join whose worker dies under it goes to the next worker, once.
 // - Voice settings go to every ready worker at once and again to any worker
 //   that restarts or missed them, before its next join. A ready worker that
 //   refused them is asked again every voiceRetryMs until it takes them.
@@ -556,10 +557,14 @@ export class WorkerPool {
   }
 
   // A worker whose browser fails to start is skipped for the next one. A
-  // join that fails in the room is the room's fault and is not retried.
+  // join that fails in the room is the room's fault and is not retried. A
+  // worker process that dies mid-join took its browser with it, so the join
+  // goes to the next worker, but only once: a room that kills every worker
+  // it reaches should not take the whole pool down.
   async join(link, password) {
     const tried = new Set();
     let err = null;
+    let died = false;
     for (let w = this.pick(tried); w; w = this.pick(tried)) {
       // A join that outlived close() must not start the next worker.
       if (this.closed) throw closedError();
@@ -567,7 +572,16 @@ export class WorkerPool {
       w.reserved++;
       try {
         try { await w.ready(); } catch (e) { err = err || e; continue; }
-        const local = await w.call('join', link, password || '');
+        const child = w.child;
+        let local;
+        try { local = await w.call('join', link, password || ''); }
+        catch (e) {
+          if (died || this.closed || w.child === child) throw e;
+          died = true;
+          log('worker ' + w.index + ' died during a join; trying the next worker');
+          err = e;
+          continue;
+        }
         w.rooms.add(String(local));
         w.leftLate.delete(String(local));
         return 'w' + w.index + ':' + local;

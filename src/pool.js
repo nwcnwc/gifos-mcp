@@ -22,8 +22,10 @@
 //   freed, so a join that never answers does not hold it until the worker dies.
 // - A leave that fails or times out keeps the room on its worker, so the
 //   seat stays taken and a second leave can still reach it. A late leave
-//   that lands, or Meet Bot saying the room is gone, frees it. A leave of a
-//   room a late leave already freed counts as left, so the meeting can end.
+//   that lands, or Meet Bot saying the room is gone, frees it. A leave that
+//   has not answered after lateLeaveMs is checked against Meet Bot's room
+//   list: a room it no longer lists is freed too. A leave of a room a late
+//   leave already freed counts as left, so the meeting can end.
 // - status and list ask every ready worker at once and wait at most infoMs,
 //   so one stuck worker shows as an error row instead of holding status.
 // - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
@@ -89,6 +91,7 @@ class Worker {
     this.reserved = 0;        // joins in flight
     this.lateJoins = 0;       // joins that timed out and have not answered yet
     this.lateTimer = null;    // the next check of those joins against Meet Bot's list
+    this.leaveTimer = null;   // the same check for leaves that timed out
     this.booting = null;
     this.voice = null;
     this.voicing = null;      // { settings, promise } for the push in flight
@@ -212,6 +215,8 @@ class Worker {
     this.lateJoins = 0;
     clearTimeout(this.lateTimer);
     this.lateTimer = null;
+    clearTimeout(this.leaveTimer);
+    this.leaveTimer = null;
     this.clearStray();        // the process and its browser are gone
     this.leftLate.clear();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Worker ' + this.index + ' stopped: ' + why)); }
@@ -237,6 +242,7 @@ class Worker {
         if (!this.pending.delete(id)) return;
         this.late.set(id, { method, args, settled: false });
         if (method === 'join') { this.lateJoins++; this.checkLate(); }
+        if (method === 'leave') this.checkLateLeaves();
         reject(new Error('Worker ' + this.index + ' did not answer ' + method + ' within ' + ms + 'ms.'));
       }, ms);
       timer.unref();
@@ -298,6 +304,34 @@ class Worker {
       again();
     }, this.pool.lateJoinMs);
     this.lateTimer.unref();
+  }
+
+  // A leave that never answers would keep its seat until someone leaves
+  // again. Meet Bot's list says whether the bot is still in the room: one it
+  // no longer lists is freed and counts as left. One it lists keeps its seat,
+  // since the bot is there, and a late answer or a second leave frees it.
+  checkLateLeaves() {
+    if (this.leaveTimer || ![...this.late.values()].some((l) => l.method === 'leave' && !l.settled)) return;
+    const child = this.child;
+    this.leaveTimer = setTimeout(async () => {
+      const again = () => { this.leaveTimer = null; if (this.child === child) this.checkLateLeaves(); };
+      if (this.child !== child) return;
+      const asked = [...this.late.values()].filter((l) => l.method === 'leave' && !l.settled);
+      let rows;
+      try { rows = await this.callWithin(this.pool.infoMs, 'list'); }
+      catch (e) { log('worker ' + this.index + ': could not check late leaves: ' + ((e && e.message) || e)); again(); return; }
+      if (this.child !== child) return;
+      const listed = new Set((Array.isArray(rows) ? rows : []).map((row) => String((row && row.id) || '')));
+      for (const l of asked) {
+        l.settled = true;
+        const local = String(l.args[0]);
+        if (listed.has(local) || !this.rooms.delete(local)) continue;
+        log('worker ' + this.index + ': a leave that never answered did leave ' + local + '; seat freed');
+        this.leftLate.add(local);
+      }
+      again();
+    }, this.pool.lateLeaveMs);
+    this.leaveTimer.unref();
   }
 
   // One log line per stranded room, not one per retry.
@@ -391,6 +425,8 @@ class Worker {
     this.voiceTimer = null;
     clearTimeout(this.lateTimer);
     this.lateTimer = null;
+    clearTimeout(this.leaveTimer);
+    this.leaveTimer = null;
     this.clearStray();
     const exited = new Promise((r) => child.once('exit', r));
     try { child.send({ type: 'close' }); } catch (e) { /* already gone */ }
@@ -403,7 +439,7 @@ class Worker {
 export class WorkerPool {
   // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
   //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs, voiceRetryMs,
-  //         leaveRetryMs, lateJoinMs }
+  //         leaveRetryMs, lateJoinMs, lateLeaveMs }
   constructor(cfg, creds, opts = {}) {
     this.cfg = cfg;
     this.creds = creds;
@@ -427,6 +463,8 @@ export class WorkerPool {
     this.leaveRetryMs = opts.leaveRetryMs > 0 ? opts.leaveRetryMs : 10000;
     // A late join gets one more join window to answer before the list check.
     this.lateJoinMs = opts.lateJoinMs > 0 ? opts.lateJoinMs : this.joinMs;
+    // A late leave gets one more call window.
+    this.lateLeaveMs = opts.lateLeaveMs > 0 ? opts.lateLeaveMs : this.callMs;
     const script = opts.workerScript || WORKER_SCRIPT;
     this.forkWorker = typeof opts.forkWorker === 'function'
       ? opts.forkWorker
@@ -550,6 +588,7 @@ export class WorkerPool {
       if (!GONE_RE.test((e && e.message) || '')) throw e;
     }
     w.rooms.delete(local);
+    w.leftLate.delete(local);   // the list check may have freed it meanwhile
   }
 
   async transcribe(id, on) { const r = this.route(id); return r.w.call('transcribe', r.local, !!on); }

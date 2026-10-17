@@ -23,6 +23,23 @@ export function createClock(deps) {
     return deps.emit({ type, meeting_id: meetingId || '', data: data || {} });
   }
 
+  // A schedule.json save that fails (disk full) keeps the order in memory,
+  // where setPhase already put it, and the tick goes on; the next save that
+  // works writes it. Logged once until a save works, not once per tick.
+  let saveFailing = false;
+  function keep(write) {
+    try {
+      const out = write();
+      saveFailing = false;
+      return out;
+    } catch (e) {
+      if (!saveFailing) log('schedule.json not saved (' + e.message + '); orders are kept in memory until the next save.');
+      saveFailing = true;
+      return undefined;
+    }
+  }
+  const setPhase = (id, fields) => keep(() => deps.schedule.setPhase(id, fields));
+
   // Orders that already announced their wait, so a wait is one event and
   // not one per tick. A seated order is taken off.
   const waited = new Set();
@@ -107,7 +124,7 @@ export function createClock(deps) {
   function wait(order, reason) {
     const key = noteKey(order);
     const phase = order.phase;
-    if (phase === 'upcoming') deps.schedule.setPhase(orderKey(order), { phase: 'waiting_for_capacity' });
+    if (phase === 'upcoming') setPhase(orderKey(order), { phase: 'waiting_for_capacity' });
     if (waited.has(key) || phase === 'waiting_for_capacity') return;
     waited.add(key);
     emit('schedule.waiting', order.meeting_id, { ...briefOrder(deps.schedule.get(key) || order), reason });
@@ -174,7 +191,7 @@ export function createClock(deps) {
 
   async function tick(now = Date.now()) {
     deps.schedule.materialize(now, deps.horizonMs);
-    deps.schedule.save();
+    keep(() => deps.schedule.save());
     const orders = deps.schedule.all().filter((o) => o.phase !== 'series' && o.phase !== 'cancelled' && o.phase !== 'ended' && o.phase !== 'missed' && o.phase !== 'left_early');
     for (const order of orders) {
       const start = Date.parse(order.start);
@@ -187,7 +204,7 @@ export function createClock(deps) {
         crashCleared(order.room);
         enterFailed.delete(noteKey(order));
         dueSent.delete(noteKey(order));
-        deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'missed', missed_reason: reason });
+        setPhase(order.occurrence_id || order.schedule_id, { phase: 'missed', missed_reason: reason });
         emit('schedule.missed', order.meeting_id, { ...briefOrder(order), reason });
         continue;
       }
@@ -209,7 +226,7 @@ export function createClock(deps) {
           enterFailed.delete(noteKey(order));
           dueSent.delete(noteKey(order));
           crashCleared(order.room);
-          deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
+          setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
           if (isNoSeat(e)) wait(order, 'worker');
@@ -231,7 +248,7 @@ export function createClock(deps) {
           waited.delete(noteKey(order));
           enterFailed.delete(noteKey(order));
           crashCleared(order.room);
-          deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: now >= end ? 'overrun' : 'live', meeting_id: joined.meeting_id, overrun_at: now >= end ? new Date(now).toISOString() : '' });
+          setPhase(order.occurrence_id || order.schedule_id, { phase: now >= end ? 'overrun' : 'live', meeting_id: joined.meeting_id, overrun_at: now >= end ? new Date(now).toISOString() : '' });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
           if (isNoSeat(e)) wait(order, 'worker');
@@ -242,7 +259,7 @@ export function createClock(deps) {
       const freshMeeting = fresh.meeting_id ? deps.meetings.get(fresh.meeting_id) : meeting;
       if ((fresh.phase === 'live' || fresh.phase === 'overrun') && freshMeeting && freshMeeting.state === 'live' && now >= end) {
         if (fresh.phase !== 'overrun') {
-          deps.schedule.setPhase(fresh.occurrence_id || fresh.schedule_id, { phase: 'overrun', overrun_at: fresh.overrun_at || new Date(now).toISOString() });
+          setPhase(fresh.occurrence_id || fresh.schedule_id, { phase: 'overrun', overrun_at: fresh.overrun_at || new Date(now).toISOString() });
           emit('schedule.overrun', fresh.meeting_id, { ...briefOrder(fresh), overrun_quiet_minutes: quietMs / 60000 });
         }
         const current = deps.schedule.get(fresh.occurrence_id || fresh.schedule_id) || fresh;
@@ -321,7 +338,7 @@ export function createClock(deps) {
       timer = setInterval(() => {
         if (running) return;
         running = true;
-        tick().catch(() => {}).finally(() => { running = false; });
+        tick().catch((e) => log('clock tick failed: ' + ((e && e.message) || e))).finally(() => { running = false; });
       }, ms);
       if (timer.unref) timer.unref();
       return timer;

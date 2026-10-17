@@ -1322,3 +1322,49 @@ test('end_meeting on a full disk (meetings.json and schedule.json saves fail) st
   assert.equal(new MeetingStore(home).get(m.meeting_id).state, 'ended');
   await client.close();
 });
+
+test('join_meeting with a password on a full disk (schedule.json save fails after the seat is taken) still reports the join, announces meeting.joined once, keeps the order live in memory, and no clock tick seats the bot again', { timeout: 15000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  const schedule = new ScheduleStore(home);
+  makePool();
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events, schedule });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const call = (name, args = {}) => client.callTool({ name, arguments: args });
+  const json = async (name, args = {}) => JSON.parse((await call(name, args)).content[0].text);
+  const sitting = async () => {
+    let n = 0;
+    for (const w of pool.workers) if (w.state === 'ready') n += (await w.call('list')).length;
+    return n;
+  };
+
+  const save = schedule.save;
+  schedule.save = () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); };
+  const res = await call('join_meeting', { link: 'http://127.0.0.1:19510/run.html#v=fullroom', password: ROOM, topic: 'Full join' });
+  assert.ok(!res.isError, 'the bot joined, so join_meeting says so: ' + res.content[0].text);
+  const m = JSON.parse(res.content[0].text);
+  assert.equal(await sitting(), 1, 'the bot sits in the room');
+  assert.equal(meetings.get(m.meeting_id).state, 'live');
+  const order = schedule.all().find((o) => o.room === 'fullroom');
+  assert.ok(order, 'the order is kept in memory');
+  assert.equal(order.phase, 'live', 'the order is live in memory');
+  assert.equal(order.meeting_id, m.meeting_id);
+  const now = Date.now();
+  for (let i = 0; i < 3; i++) await server.clock.tick(now + i * 1000);
+  assert.equal(await sitting(), 1, 'no tick seats the bot again');
+  const tail = (await json('tail_events', { limit: 200 })).events;
+  assert.equal(tail.filter((e) => e.type === 'meeting.joined' && e.meeting_id === m.meeting_id).length, 1, 'one meeting.joined');
+
+  // Once the disk has room, the next save writes the order with its password.
+  schedule.save = save;
+  await server.clock.tick(now + 5000);
+  const kept = new ScheduleStore(home).all().find((o) => o.room === 'fullroom');
+  assert.equal(kept && kept.phase, 'live');
+  assert.equal(kept.room_password, ROOM);
+  await json('end_meeting', { meeting_id: m.meeting_id });
+  assert.equal(await sitting(), 0);
+  await client.close();
+});

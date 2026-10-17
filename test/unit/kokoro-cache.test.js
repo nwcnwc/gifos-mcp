@@ -266,3 +266,18 @@ test('a part from a server that gave no version tag is downloaded again, not res
   assert.deepEqual(w.ranges.filter((r) => r.range), [], 'no Range is asked for bytes nobody can vouch for; asked ' + JSON.stringify(w.ranges));
   assert.deepEqual(filesUnder(path.join(dir, REPO)).filter((p) => p.endsWith('.part')), [], 'the unvouched part is dropped');
 });
+
+// A running child renames its part files (.part, .part.tag) while a test
+// polls the folder; one gone between readdir and stat must not throw.
+test('listing the model folder skips a file renamed away under it', (t) => {
+  const home = freshHome(t);
+  const dir = modelDir(home);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'config.json'), CONFIG);
+  const readdir = fs.readdirSync;
+  // As if the child renamed config.json.1.part.tag right after readdir.
+  fs.readdirSync = (...a) => [...readdir(...a), 'config.json.1.part.tag'];
+  let found;
+  try { found = filesUnder(dir); } finally { fs.readdirSync = readdir; }
+  assert.deepEqual(found, [path.join(dir, 'config.json')]);
+});

@@ -964,3 +964,46 @@ test('a scheduled room that takes down every worker it reaches is not joined aga
   assert.equal(meetings.get(g.meeting_id).state, 'live');
   await client.close();
 });
+
+test('a start_meeting or join_meeting by hand on a room that just took down every worker is refused until its wait is over, so the meetings it knocked off keep their seats', { timeout: 15000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  let now = Date.now();
+  makePool({ now: () => now });
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const call = (name, args = {}) => client.callTool({ name, arguments: args });
+  const json = async (name, args = {}) => JSON.parse((await call(name, args)).content[0].text);
+
+  const good = (await json('create_meeting', { name: 'Good', admin_password: 'owner-77' })).link;
+  const bad = (await json('create_meeting', { name: 'Poison', admin_password: 'owner-77' })).link;
+  const g = meetings.all().find((m) => m.link === good);
+  const p = meetings.all().find((m) => m.link === bad);
+  cfg.crashRoom = p.room;
+  assert.equal((await json('start_meeting', { meeting_id: g.meeting_id })).state, 'live');
+
+  // Poison kills worker 0 (dropping Good), then worker 1, and fails.
+  const first = await call('start_meeting', { meeting_id: p.meeting_id });
+  assert.ok(first.isError);
+  assert.deepEqual(pool.workers.map((w) => w.state), ['lost', 'lost']);
+
+  // Both workers restart and the clock brings Good back.
+  for (let i = 0; i < 4; i++) { now += 2000; await server.clock.tick(now); }
+  assert.equal(meetings.get(g.meeting_id).state, 'live');
+
+  // Asking again by hand right away does not walk into the room again.
+  const again = await call('start_meeting', { meeting_id: p.meeting_id });
+  assert.ok(again.isError);
+  assert.match(again.content[0].text, /crashed the bot/);
+  const byLink = await call('join_meeting', { link: bad, password: ROOM });
+  assert.ok(byLink.isError);
+  assert.match(byLink.content[0].text, /crashed the bot/);
+  assert.deepEqual(pool.workers.map((w) => w.state), ['ready', 'ready'], 'no worker was taken down again');
+  assert.equal(meetings.get(g.meeting_id).state, 'live', 'Good keeps its seat');
+  const tail = (await json('tail_events', { limit: 200 })).events;
+  assert.equal(tail.filter((e) => e.type === 'meeting.disconnected' && e.meeting_id === g.meeting_id).length, 1, 'Good was knocked off once');
+  await client.close();
+});

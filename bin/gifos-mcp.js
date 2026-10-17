@@ -63,7 +63,7 @@ const bot = cfg.workers > 1
   : new MeetingBotDriver(cfg, creds, kokoro, { queue: new SpeechQueue({ onThinking }) });
 const live = new LiveTranscript(cfg.home);
 const hide = (text) => scrub(text, [cfg.voice.key, creds.password]);
-const captions = watchCaptions({ meetings, bot, live, intervalMs: cfg.voice.pollMs, botName: creds.name, scrubText: hide });
+const captions = watchCaptions({ meetings, bot, live, intervalMs: cfg.voice.pollMs, botName: typeof bot.botNames === 'function' ? bot.botNames() : creds.name, scrubText: hide });
 if (bot instanceof WorkerPool) bot.onLost(dropLostMeetings({ meetings, events, captions }));
 const mcpArgs = { cfg, meetings, bot, live, captions, botName: creds.name, botPassword: creds.password, schedule, events };
 const boot = createServer(mcpArgs);

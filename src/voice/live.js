@@ -79,6 +79,7 @@ export class LiveTranscript {
 
   // Captions only grow during a meeting. A restart has no snapshot, so lines
   // already stored are not appended again.
+  // botName may be a list: in stage B each worker's bot has its own name.
   ingestCaption(meetingId, text, botName) {
     const raw = splitLines(text);
     const prev = this.snapshots.get(meetingId);
@@ -95,7 +96,7 @@ export class LiveTranscript {
     }
     this.snapshots.set(meetingId, String(text || ''));
     const added = [];
-    const skip = String(botName || '').toLowerCase();
+    const skip = new Set([].concat(botName || []).map((n) => String(n).toLowerCase()).filter(Boolean));
     for (const line of fresh) {
       const m = /^([^:]{1,80}):\s*(.*)$/.exec(line);
       if (!m) continue;
@@ -103,7 +104,7 @@ export class LiveTranscript {
       const said = m[2].trim();
       if (!said) continue;
       if (isCaptionHallucination(said)) continue;
-      const bot = !!(skip && speaker.toLowerCase() === skip);
+      const bot = skip.has(speaker.toLowerCase());
       if (bot) {
         const dup = this.lines.some((l) => l.meeting_id === meetingId && l.kind === 'spoken' && l.speaker.toLowerCase() === speaker.toLowerCase() && l.text === said);
         if (!dup) added.push(this.append({ meeting_id: meetingId, speaker, text: said, kind: 'spoken', source: line }));

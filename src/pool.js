@@ -303,6 +303,17 @@ export class WorkerPool {
     }
   }
 
+  // Every name this machine's bots sit under. A caption from any of them is
+  // the bot's own speech, whichever worker holds the room.
+  botNames() {
+    return this.workers.map((w) => workerIdentity(this.cfg, this.creds, w.index).creds.name);
+  }
+
+  botNameFor(sessionId) {
+    const s = splitSession(sessionId);
+    return s && this.workers[s.index] ? workerIdentity(this.cfg, this.creds, s.index).creds.name : this.creds.name;
+  }
+
   route(sessionId) {
     const s = splitSession(sessionId);
     const w = s && this.workers[s.index];

@@ -37,6 +37,11 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return handed;
   }
 
+  // The names the bot sits under, and the one in this meeting's room (stage
+  // B: worker n is <name>-wn).
+  const ourNames = () => (typeof bot.botNames === 'function' ? bot.botNames() : [botName]);
+  const nameIn = (m) => (typeof bot.botNameFor === 'function' ? bot.botNameFor(m.session_id) : botName) || 'Meet Bot';
+
   function secrets() {
     return secret.concat(schedule.all().map((o) => o.room_password).filter(Boolean));
   }
@@ -228,7 +233,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     if (m.state === 'live' && m.session_id) {
       const text = scrub(await bot.transcript(m.session_id), secret);
       meetings.update(m.meeting_id, { transcript: text });
-      transcript.ingestCaption(m.meeting_id, text, botName);
+      transcript.ingestCaption(m.meeting_id, text, ourNames());
       return ok(text || '(no transcript lines yet)');
     }
     if (m.transcript != null) return ok(m.transcript || '(the transcript is empty)');
@@ -239,7 +244,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     if (captions) captions.stop(m.meeting_id);
     let text = scrub(m.transcript || '', secrets());
     try { text = scrub(await bot.transcript(m.session_id), secrets()); } catch (e) { /* keep the last copy */ }
-    transcript.ingestCaption(m.meeting_id, text, botName);
+    transcript.ingestCaption(m.meeting_id, text, ourNames());
     await bot.leave(m.session_id);
     if (bot.queue && typeof bot.queue.leave === 'function') bot.queue.leave(m.meeting_id);
     const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false, thinking: false,
@@ -329,7 +334,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     if (typeof bot.interject !== 'function') throw new Error(INTERJECT_GAP);
     const said = await bot.interject(m.session_id, text);
     if (!said || said.applied === false) throw new Error((said && said.gap) || INTERJECT_GAP);
-    const speaker = botName || 'Meet Bot';
+    const speaker = nameIn(m);
     const body = String(text).trim();
     const have = transcript.lines.some((l) => l.meeting_id === m.meeting_id && l.kind === 'spoken' && l.speaker === speaker && l.text === body);
     if (body && !have) transcript.append({ meeting_id: m.meeting_id, speaker, text: body, kind: 'spoken' });
@@ -356,7 +361,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
   }, guarded(async ({ meeting_id, text }) => {
     const m = needLive(meeting_id);
     await bot.say(m.session_id, text);
-    transcript.append({ meeting_id: m.meeting_id, speaker: botName || 'Meet Bot', text, kind: 'chat' });
+    transcript.append({ meeting_id: m.meeting_id, speaker: nameIn(m), text, kind: 'chat' });
     return ok({ meeting_id: m.meeting_id, sent: true, chars: text.length });
   }));
 

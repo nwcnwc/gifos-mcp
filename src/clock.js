@@ -17,6 +17,32 @@ export function createClock(deps) {
     return deps.emit({ type, meeting_id: meetingId || '', data: data || {} });
   }
 
+  // Orders that already announced their wait, so a wait is one event and
+  // not one per tick. A seated order is taken off.
+  const waited = new Set();
+  const orderKey = (order) => order.occurrence_id || order.schedule_id;
+  const isNoSeat = (e) => !!(e && e.code === 'no_seat');
+
+  // 'capacity' when the cap is reached, 'worker' when every worker is full
+  // or waiting out a restart (stage B), otherwise ''.
+  function fullReason() {
+    if (deps.meetings.all().filter((m) => m.state === 'live').length >= deps.cap) return 'capacity';
+    if (typeof deps.canSeat === 'function' && !deps.canSeat()) return 'worker';
+    return '';
+  }
+
+  // An order that cannot be seated now. One still before its window's end
+  // waits for capacity and is missed for capacity if no seat frees. A live
+  // or overrun order that lost its seat keeps its phase and rejoins later.
+  function wait(order, reason) {
+    const key = orderKey(order);
+    const phase = order.phase;
+    if (phase === 'upcoming') deps.schedule.setPhase(key, { phase: 'waiting_for_capacity' });
+    if (waited.has(key) || phase === 'waiting_for_capacity') return;
+    waited.add(key);
+    emit('schedule.waiting', order.meeting_id, { ...briefOrder(deps.schedule.get(key) || order), reason });
+  }
+
   function emitCapacity(now, force) {
     const picture = capacityPicture({
       orders: deps.schedule.all(),
@@ -93,36 +119,40 @@ export function createClock(deps) {
         continue;
       }
       if ((order.phase === 'upcoming' || order.phase === 'waiting_for_capacity') && now >= joinAt && now < end) {
-        const liveCount = deps.meetings.all().filter((m) => m.state === 'live').length;
-        if (liveCount >= deps.cap) {
-          if (order.phase !== 'waiting_for_capacity') {
-            deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'waiting_for_capacity' });
-            emit('schedule.waiting', order.meeting_id, briefOrder(order));
-          }
+        const full = fullReason();
+        if (full) {
+          wait(order, full);
           continue;
         }
         emit('schedule.due', order.meeting_id, briefOrder(order));
         try {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
+          waited.delete(orderKey(order));
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
-          emit('meeting.error', order.meeting_id, { text: 'The room could not be entered.' });
+          if (isNoSeat(e)) wait(order, 'worker');
+          else emit('meeting.error', order.meeting_id, { text: 'The room could not be entered.' });
         }
         continue;
       }
       const restarted = (order.phase === 'live' || order.phase === 'overrun') && !seated;
       if (restarted) {
-        const liveCount = deps.meetings.all().filter((m) => m.state === 'live').length;
-        if (liveCount >= deps.cap) continue;
+        const full = fullReason();
+        if (full) {
+          wait(order, full);
+          continue;
+        }
         try {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
+          waited.delete(orderKey(order));
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: now >= end ? 'overrun' : 'live', meeting_id: joined.meeting_id, overrun_at: now >= end ? new Date(now).toISOString() : '' });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
-          emit('meeting.error', order.meeting_id, { text: 'The room could not be entered.' });
+          if (isNoSeat(e)) wait(order, 'worker');
+          else emit('meeting.error', order.meeting_id, { text: 'The room could not be entered.' });
         }
       }
       const fresh = deps.schedule.get(order.occurrence_id || order.schedule_id) || order;
@@ -151,13 +181,14 @@ export function createClock(deps) {
     if (typeof deps.reseat === 'function') {
       for (const m of deps.meetings.all()) {
         if (!m.reseat || m.state !== 'scheduled' || deps.schedule.forMeeting(m.meeting_id)) continue;
-        if (deps.meetings.all().filter((row) => row.state === 'live').length >= deps.cap) break;
+        // meeting.disconnected already told the owner; no seat is a quiet wait.
+        if (fullReason()) break;
         try {
           const joined = await deps.reseat(m);
           if (!joined || joined.state !== 'live') continue; // ended while joining
           emit('meeting.joined', joined.meeting_id, { topic: joined.topic, link: joined.link, state: 'live', reason: 'worker' });
         } catch (e) {
-          emit('meeting.error', m.meeting_id, { text: 'The room could not be entered.' });
+          if (!isNoSeat(e)) emit('meeting.error', m.meeting_id, { text: 'The room could not be entered.' });
         }
       }
     }

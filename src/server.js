@@ -518,6 +518,8 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
       return enter(m, order.room_password);
     },
     reseat: (m) => enter(m),
+    // Stage B: a lost worker's rooms are not seats until it restarts.
+    canSeat: () => (typeof bot.hasSeat === 'function' ? bot.hasSeat() : true),
     leave: (order, reason) => {
       const m = order.meeting_id && meetings.get(order.meeting_id);
       if (!m || m.state !== 'live') {

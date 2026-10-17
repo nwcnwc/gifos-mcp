@@ -39,6 +39,14 @@ export function workerIdentity(cfg, creds, index) {
   };
 }
 
+// No worker can take a room right now. The clock waits on this; it is not
+// a broken room.
+function noSeat(text) {
+  const e = new Error(text);
+  e.code = 'no_seat';
+  return e;
+}
+
 export function splitSession(sessionId) {
   const m = SESSION_RE.exec(String(sessionId || ''));
   if (!m) return null;
@@ -76,9 +84,13 @@ class Worker {
     return 'Worker ' + this.index + ' restarts in ' + Math.ceil(this.restartInMs() / 1000) + 's (it stopped: ' + this.error + ').';
   }
 
+  waitError() {
+    return noSeat(this.waitText());
+  }
+
   spawn() {
     if (this.booting) return this.booting;
-    if (this.restartInMs() > 0) return Promise.reject(new Error(this.waitText()));
+    if (this.restartInMs() > 0) return Promise.reject(this.waitError());
     const id = workerIdentity(this.pool.cfg, this.pool.creds, this.index);
     const shots = this.pool.cfg.shotsDir || path.join(this.pool.cfg.home, 'shots');
     const cfg = { ...this.pool.cfg, profile: id.profile, shotsDir: this.index === 0 ? this.pool.cfg.shotsDir : path.join(shots, 'w' + this.index) };
@@ -288,11 +300,17 @@ export class WorkerPool {
     return open[0];
   }
 
+  // Whether a join now would find a worker. A lost worker's rooms are not
+  // seats until it restarts.
+  hasSeat() {
+    return !!this.pick();
+  }
+
   async join(link, password) {
     const w = this.pick();
     const waiting = !w && this.workers.find((x) => x.used < this.rooms && x.restartInMs() > 0);
-    if (waiting) throw new Error(waiting.waitText());
-    if (!w) throw new Error('Every worker is full (' + this.size + ' workers, ' + this.rooms + ' rooms each).');
+    if (waiting) throw waiting.waitError();
+    if (!w) throw noSeat('Every worker is full (' + this.size + ' workers, ' + this.rooms + ' rooms each).');
     w.reserved++;
     try {
       await w.ready();

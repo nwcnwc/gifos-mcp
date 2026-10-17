@@ -242,9 +242,11 @@ test('say and the transcript go through Meet Bot, and the key stays out of tool 
   assert.equal(JSON.stringify(said).includes(KEY), false);
 
   const tail = await json('tail_transcript', { meeting_id: created.meeting_id });
-  assert.deepEqual(tail.lines.map((l) => l.kind), ['speech']);
+  assert.deepEqual(tail.lines.map((l) => l.kind), ['speech', 'spoken']);
   assert.equal(tail.lines[0].speaker, 'Ada');
   assert.equal(tail.lines[0].text, 'What should we do next?');
+  assert.equal(tail.lines[1].speaker, 'notes-test');
+  assert.equal(tail.lines[1].text, 'I will take that question.');
   const resource = await client.readResource({ uri });
   assert.equal(resource.contents[0].mimeType, 'application/x-ndjson');
   assert.match(resource.contents[0].text, /What should we do next/);
@@ -271,7 +273,7 @@ test('say and the transcript go through Meet Bot, and the key stays out of tool 
   const ended = await json('end_meeting', { meeting_id: created.meeting_id });
   assert.equal(ended.state, 'ended');
   const after = await json('tail_transcript', { meeting_id: created.meeting_id });
-  assert.equal(after.lines.length, 1);
+  assert.equal(after.lines.length, 2);
   const file = path.join(home, 'transcripts', created.meeting_id + '.jsonl');
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(fs.readFileSync(file, 'utf8').includes(KEY), false);
@@ -332,14 +334,17 @@ test('join_meeting does not send the old voice call the new Meet Bot refuses', a
   await client.close();
 });
 
-test('captions are not stored twice, and the bot name is skipped', async () => {
+test('captions are not stored twice, and the bot line is spoken', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-live-'));
   const live = new LiveTranscript(home);
   const id = 'm_abcde12345';
   live.ingestCaption(id, 'Ada: hello\nnotes-test: echo\nBob: hi', 'notes-test');
   live.ingestCaption(id, 'Ada: hello\nnotes-test: echo\nBob: hi', 'notes-test');
-  assert.deepEqual(live.tail(id, 0).lines.map((l) => l.speaker + ': ' + l.text), ['Ada: hello', 'Bob: hi']);
+  const lines = live.tail(id, 0).lines;
+  assert.deepEqual(lines.filter((l) => l.kind === 'speech').map((l) => l.speaker + ': ' + l.text), ['Ada: hello', 'Bob: hi']);
+  assert.deepEqual(lines.filter((l) => l.kind === 'spoken').map((l) => l.speaker + ': ' + l.text), ['notes-test: echo']);
   live.ingestCaption(id, 'Ada: hello\nnotes-test: echo\nBob: hi\nAda: again', 'notes-test');
   assert.equal(live.tail(id, 0).lines.at(-1).text, 'again');
-  assert.equal(live.tail(id, 0).lines.length, 3);
+  assert.equal(live.tail(id, 0).lines.filter((l) => l.kind === 'speech').length, 3);
+  assert.equal(live.tail(id, 0).lines.filter((l) => l.kind === 'spoken').length, 1);
 });

@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { MCP_TTS_APP, KOKORO_VOICE } from './settings.js';
+import { nativeVoice } from './voices.js';
 import { log } from '../log.js';
 
 export const KOKORO_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
@@ -52,16 +53,19 @@ async function load(dir, voice) {
     throw new Error('Kokoro has no voice ' + JSON.stringify(voice) + '.');
   }
   log('Kokoro is ready (' + voice + ')');
-  return {
+  const loaded = voice || KOKORO_VOICE;
+  const engine = {
     appId: MCP_TTS_APP,
-    voice,
+    voice: loaded,
     dir,
+    hasVoice(name) { return !!(tts.voices && tts.voices[name]); },
     async speak(text, want) {
-      const chosen = String(want || voice || KOKORO_VOICE);
-      if (!tts.voices[chosen]) throw new Error('Kokoro has no voice ' + JSON.stringify(chosen) + '.');
+      const chosen = nativeVoice(want, loaded, (name) => engine.hasVoice(name));
+      if (!tts.voices || !tts.voices[chosen]) throw new Error('Kokoro has no voice ' + JSON.stringify(chosen) + '.');
       const audio = await tts.generate(String(text || ''), { voice: chosen });
       const wav = audio.toWav();
       return Buffer.from(wav);
     },
   };
+  return engine;
 }

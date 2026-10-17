@@ -7,6 +7,7 @@
 // See docs/MEETBOT-BRIDGE.md.
 
 import { MCP_TTS_APP } from './settings.js';
+import { QUESTION_RE, WAKE_RE } from './wake.js';
 
 export const CORS_PROXY = 'https://cors-proxy.gifos.app/';
 // One Playwright binding for every role this process serves. The page
@@ -217,17 +218,61 @@ export function bridgeScript(opts) {
       '}\n' +
       'arm();\n'
     : '';
+  const wakeLit = WAKE_RE.toString();
+  const questionLit = QUESTION_RE.toString();
+  const fetchWrap = roles.length
+    ? 'var origFetch=window.fetch;\n' +
+      'window.fetch=function(url, init){\n' +
+      '  var s=String(url==null?"":url);\n' +
+      '  if(s.indexOf(PREFIX)!==0){\n' +
+      '    if(typeof origFetch!=="function") return Promise.reject(new Error("The host provider is not available."));\n' +
+      '    return origFetch.apply(window, arguments);\n' +
+      '  }\n' +
+      '  var role=s.slice(PREFIX.length).split("/")[0]||"smartest";\n' +
+      '  var fn=window[' + bindLit + '];\n' +
+      '  if(typeof fn!=="function") return Promise.reject(new Error("The host provider is not available."));\n' +
+      '  var body={};\n' +
+      '  try{ body=JSON.parse((init&&init.body)||"{}"); }catch(e){ body={}; }\n' +
+      '  var req=body||{};\n' +
+      '  if(role==="tts") req={ text:String(body.input||body.text||""), voice:String(body.voice||"") };\n' +
+      '  else if(role==="smartest") req={ messages:body.messages||[] };\n' +
+      '  return Promise.resolve(fn(role, JSON.stringify(req))).then(function(raw){\n' +
+      '    var parsed=typeof raw==="string"?JSON.parse(raw):(raw||{});\n' +
+      '    var text=String(parsed.text||"");\n' +
+      '    var mime=String(parsed.mime||(role==="tts"?"audio/wav":"application/json"));\n' +
+      '    var bytes=null;\n' +
+      '    if(parsed.audio){\n' +
+      '      var bin=atob(String(parsed.audio)); bytes=new Uint8Array(bin.length); var i;\n' +
+      '      for(i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i)&255;\n' +
+      '    }\n' +
+      '    var chat={choices:[{message:{content:text}}]};\n' +
+      '    return {\n' +
+      '      ok:true, status:200,\n' +
+      '      headers:{get:function(n){ return String(n||"").toLowerCase()==="content-type"?mime:null; }},\n' +
+      '      arrayBuffer:function(){ return Promise.resolve(bytes?bytes.buffer:new ArrayBuffer(0)); },\n' +
+      '      json:function(){ return Promise.resolve(chat); },\n' +
+      '      text:function(){ return Promise.resolve(JSON.stringify(chat)); }\n' +
+      '    };\n' +
+      '  });\n' +
+      '};\n'
+    : '';
   return '(function(){\n' +
     'var HOST=' + hostLit + ';\n' +
-    'function dropHosted(){\n' +
-    '  var ai, role, changed=false;\n' +
-    '  try{ ai=JSON.parse(localStorage.getItem("gifos_ai_config")||"{}")||{}; }catch(e){ return; }\n' +
-    '  for(role in HOST){ if(HOST[role]&&ai[role]){ delete ai[role]; changed=true; } }\n' +
+    'var PREFIX="gifos-provider://";\n' +
+    'function registerHost(){\n' +
+    '  var ai, role, next, cur, changed=false;\n' +
+    '  try{ ai=JSON.parse(localStorage.getItem("gifos_ai_config")||"{}")||{}; }catch(e){ ai={}; }\n' +
+    '  for(role in HOST){\n' +
+    '    if(!HOST[role]) continue;\n' +
+    '    next={ url:PREFIX+role, model:role==="tts"?"kokoro":"provider" };\n' +
+    '    cur=ai[role]||{};\n' +
+    '    if(cur.url!==next.url||cur.model!==next.model||cur.key||cur.app||cur.appId){ ai[role]=next; changed=true; }\n' +
+    '  }\n' +
     '  if(changed){ try{ localStorage.setItem("gifos_ai_config", JSON.stringify(ai)); }catch(e){} }\n' +
     '}\n' +
-    'dropHosted();\n' +
+    'registerHost();\n' +
+    fetchWrap +
     arm +
-    'var PREFIX="gifos-provider://";\n' +
     'var PROXY="https://cors-proxy.gifos.app/";\n' +
     'function readAi(){try{return JSON.parse(localStorage.getItem("gifos_ai_config")||"{}")||{};}catch(e){return {};}}\n' +
     'function expand(settings){\n' +
@@ -324,5 +369,42 @@ export function bridgeScript(opts) {
     '  });\n' +
     '}catch(e){}\n' +
     'if(current) current=wrap(current);\n' +
+    'function hears(text, name){\n' +
+    '  var t=String(text||"").trim();\n' +
+    '  if(!t) return false;\n' +
+    '  var n=String(name||"").trim().toLowerCase();\n' +
+    '  if(n && t.toLowerCase().indexOf(n)>=0) return true;\n' +
+    '  return ' + wakeLit + '.test(t);\n' +
+    '}\n' +
+    'function asks(text){\n' +
+    '  var t=String(text||"").trim();\n' +
+    '  if(!t) return false;\n' +
+    '  if(/\\?\\s*$/.test(t)) return true;\n' +
+    '  return ' + questionLit + '.test(t);\n' +
+    '}\n' +
+    'function patchVoice(api){\n' +
+    '  if(!api||api.__gifosWake||typeof api.isCommand!=="function") return api;\n' +
+    '  var command=api.isCommand;\n' +
+    '  var conversation=api.isConversation;\n' +
+    '  api.isCommand=function(text, name){\n' +
+    '    if(command.call(api, text, name)) return true;\n' +
+    '    return hears(text, name);\n' +
+    '  };\n' +
+    '  api.isConversation=function(text, name){\n' +
+    '    if(hears(text, name)) return false;\n' +
+    '    if(typeof conversation==="function"&&conversation.call(api, text, name)) return true;\n' +
+    '    return asks(text);\n' +
+    '  };\n' +
+    '  api.__gifosWake=true;\n' +
+    '  return api;\n' +
+    '}\n' +
+    'var voiceNow=window.BotVoice;\n' +
+    'try{\n' +
+    '  Object.defineProperty(window,"BotVoice",{configurable:true, enumerable:true,\n' +
+    '    get:function(){return voiceNow;},\n' +
+    '    set:function(v){voiceNow=patchVoice(v);}\n' +
+    '  });\n' +
+    '}catch(e){}\n' +
+    'if(voiceNow) voiceNow=patchVoice(voiceNow);\n' +
     '})();\n';
 }

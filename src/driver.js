@@ -104,7 +104,9 @@ export class MeetingBotDriver {
     await ctx.addInitScript({ content: 'try{var o=' + JSON.stringify(init) + ';for(var k in o)localStorage.setItem(k,o[k]);}catch(e){}' });
     // This process embeds the page, so provider calls for the roles it hosts
     // come back through the binding above. The page does not fetch them.
-    // Meet Bot's frame never sees a URL or a key.
+    // Meet Bot's frame never sees a URL or a key. On a fresh profile the
+    // script also writes the GifOS AI rows for those roles, so gifos.ai.tts
+    // and gifos.ai.chat are configured without MeetingBot.setVoice.
     await ctx.addInitScript({ content: bridgeScript({ hostRoles: roles }) });
     return ctx;
   }

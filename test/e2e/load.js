@@ -14,8 +14,9 @@
 // RSS summed over processes, PSS (shared pages split), CPU over E2E_SAMPLE_MS.
 //
 // E2E_HUMAN_WS=ws://...,ws://... spreads the people over browsers on other
-// machines (see stage-b.js for how to start them); without it they run in
-// one local Chromium, which is not counted in the cost.
+// machines (see stage-b.js for how to start them); "local" in that list is a
+// Chromium here. Without it they run in one local Chromium. People are never
+// counted in the cost.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -123,7 +124,7 @@ async function main() {
   const rooms = [];
   try {
     await client.connect(transport);
-    for (let i = 0; i < Math.max(1, HUMAN_WS.length); i++) browsers.push(await peopleBrowser(HUMAN_WS[i]));
+    for (let i = 0; i < Math.max(1, HUMAN_WS.length); i++) browsers.push(await peopleBrowser(HUMAN_WS[i] === 'local' ? '' : HUMAN_WS[i]));
 
     for (const n of STEPS) {
       say('---- ' + n + ' room(s) ----');

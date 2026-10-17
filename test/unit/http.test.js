@@ -16,10 +16,11 @@ const PORT = 19521;
 test('streamable HTTP on 127.0.0.1 with a bearer token', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-http-'));
   const proc = spawn(process.execPath, [BIN, '--http', String(PORT)], {
-    env: { ...process.env, GIFOS_MCP_HOME: home, GIFOS_MCP_LAZY: '1', GIFOS_MCP_HTTP_TOKEN: 'test-token-123', GIFOS_URL: 'https://gifos.app', GIFOS_VOICE: '0', GIFOS_LLM_URL: '', GIFOS_LLM_KEY: '' },
+    env: { ...process.env, GIFOS_MCP_HOME: home, GIFOS_MCP_LAZY: '1', GIFOS_MCP_HTTP_TOKEN: 'test-token-123', GIFOS_URL: 'https://gifos.app', GIFOS_VOICE: '0', GIFOS_LLM_URL: '', GIFOS_LLM_KEY: '', GIFOS_TTS_ENGINE: 'none' },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
-  t.after(() => proc.kill());
+  // No Kokoro: the transport test does not speak, and a 90 MB download per run fills /tmp.
+  t.after(() => { proc.kill(); fs.rmSync(home, { recursive: true, force: true }); });
   await new Promise((resolve, reject) => {
     let err = '';
     proc.stderr.on('data', (d) => { err += d; if (/listening on/.test(err)) resolve(); });

@@ -18,6 +18,12 @@
 // is the gifos-mcp process alone and its whole tree (Chromium included):
 // RSS summed over processes, PSS (shared pages split), CPU over E2E_SAMPLE_MS.
 //
+// E2E_SOAK_MS keeps everyone talking at the last step for that long and
+// samples cost every E2E_SOAK_EVERY_MS (60s), with how many speech lines each
+// room stored in that window: if captions fall behind one shared engine,
+// lines per minute drop while memory climbs. Every room must still be heard
+// in the last window.
+//
 // E2E_HUMAN_WS=ws://...,ws://... spreads the people over browsers on other
 // machines (see stage-b.js for how to start them); "local" in that list is a
 // Chromium here. Without it they run in one local Chromium. People are never
@@ -42,6 +48,8 @@ const HUMAN_WS = String(process.env.E2E_HUMAN_WS || '').split(',').map((s) => s.
 const STEPS = String(process.env.E2E_ROOMS || '1,4,8').split(',').map(Number).filter((n) => n > 0).sort((a, b) => a - b);
 const SAMPLE_MS = Number(process.env.E2E_SAMPLE_MS || 10000);
 const WAIT_MS = Number(process.env.E2E_TRANSCRIPT_WAIT_MS || 180000);
+const SOAK_MS = Number(process.env.E2E_SOAK_MS || 0);
+const SOAK_EVERY_MS = Number(process.env.E2E_SOAK_EVERY_MS || 60000);
 const CALL = { timeout: 600000 }; // a first join installs apps and starts a browser
 const STT = process.env.E2E_STT || 'synthetic';              // synthetic | whisper
 const SPEECH = process.env.E2E_SPEECH_WAV ? path.resolve(process.env.E2E_SPEECH_WAV) : '';
@@ -198,9 +206,37 @@ async function main() {
       say('heard, room 1: ' + JSON.stringify(sample[0]) + (n > 1 ? '; room ' + n + ': ' + JSON.stringify(sample[n - 1]) : ''));
       const talking = await cost(transport.pid);
       say('cost, ' + n + ' room(s), one person talking in each: ' + JSON.stringify(talking));
-      results.push({ rooms: n, alone, talking, heard: heard.filter(Boolean).length });
+      const row = { rooms: n, alone, talking, heard: heard.filter(Boolean).length };
+      if (SOAK_MS > 0 && n === max) row.soak = await soak(n);
+      results.push(row);
       fs.writeFileSync(path.join(PROOF, 'load.json'), JSON.stringify({ stt: STT, cores: os.cpus().length, mem_gb: Math.round(os.totalmem() / 2 ** 30), sample_ms: SAMPLE_MS, results }, null, 2) + '\n');
       for (const p of people) await p.ctx.close().catch(() => {});
+    }
+
+    // Lines are stored by the caption poller while a room is live; the
+    // window count is seq-based, so a line is counted once.
+    async function soak(n) {
+      const since = new Array(n).fill(0);
+      for (let i = 0; i < n; i++) since[i] = (await call('tail_lines', { meeting_id: rooms[i].meeting_id })).next || 0;
+      const rows = [];
+      const start = Date.now();
+      say('soak: ' + n + ' room(s) talking for ' + Math.round(SOAK_MS / 1000) + 's, a sample every ' + Math.round(SOAK_EVERY_MS / 1000) + 's');
+      while (Date.now() - start < SOAK_MS) {
+        await sleep(Math.max(0, SOAK_EVERY_MS - SAMPLE_MS));
+        const c = await cost(transport.pid);
+        const lines = [];
+        for (let i = 0; i < n; i++) {
+          const t = await call('tail_lines', { meeting_id: rooms[i].meeting_id, since: since[i], kinds: ['speech'] });
+          lines.push((t.lines || []).length);
+          if (t.next) since[i] = t.next;
+        }
+        const r = { at_s: Math.round((Date.now() - start) / 1000), ...c, lines_per_room: lines };
+        rows.push(r);
+        say('soak ' + r.at_s + 's: ' + JSON.stringify(r));
+      }
+      const last = rows[rows.length - 1];
+      check('soak: every room still heard in the last window', !!last && last.lines_per_room.every((x) => x > 0), last && JSON.stringify(last.lines_per_room));
+      return rows;
     }
 
     for (const r of rooms) await call('end_meeting', { meeting_id: r.meeting_id }).catch((e) => say('end ' + r.name + ': ' + e.message));
@@ -211,6 +247,10 @@ async function main() {
     for (const r of results) {
       const f = (c) => c.tree_rss_mb + ' / ' + c.tree_pss_mb + ', ' + c.tree_cpu_pct + '%, ' + c.mcp_rss_mb;
       say(String(r.rooms).padStart(5) + ' | ' + f(r.alone) + ' | ' + f(r.talking));
+    }
+    for (const r of results.filter((x) => x.soak)) {
+      say('soak, ' + r.rooms + ' rooms talking | s | tree PSS / RSS MB, tree CPU %, mcp RSS MB | speech lines per room in the window');
+      for (const s of r.soak) say(String(s.at_s).padStart(5) + ' | ' + s.tree_pss_mb + ' / ' + s.tree_rss_mb + ', ' + s.tree_cpu_pct + '%, ' + s.mcp_rss_mb + ' | ' + s.lines_per_room.join(' '));
     }
   } catch (e) {
     check('suite ran', false, e && e.stack ? e.stack.split('\n').slice(0, 5).join(' | ') : String(e));

@@ -402,3 +402,59 @@ test('end_meeting while a reseat is in flight ends it; the late join is left, no
   assert.equal((await pool.info()).workers[1].rooms, 0);
   await client.close();
 });
+
+test('while a lost worker waits out its restart, orders it cannot seat wait once instead of erroring every tick, and one that never gets a seat is missed for capacity', async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  let now = Date.now();
+  // Two workers of one room: the pool seats two, below the cap of four.
+  makePool({ now: () => now, rooms: 1 });
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const json = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  const start = new Date(Date.now() - 60 * 1000).toISOString();
+  const end = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const ids = {};
+  for (const name of ['One', 'Two']) {
+    const { link } = await json('create_meeting', { name, admin_password: 'owner-77' });
+    ids[name] = (await json('schedule_meeting', { link, room_password: ROOM, start, end, topic: name })).schedule_id;
+  }
+  await server.clock.tick(Date.now());
+  assert.deepEqual(meetings.all().filter((m) => m.state === 'live').map((m) => m.session_id).sort(), ['w0:mt_1', 'w1:mt_1']);
+
+  const child = pool.workers[1].child;
+  const exited = new Promise((r) => child.once('exit', r));
+  child.kill('SIGKILL');
+  await exited;
+  const { link: link3 } = await json('create_meeting', { name: 'Three', admin_password: 'owner-77' });
+  ids.Three = (await json('schedule_meeting', { link: link3, room_password: ROOM, start, end, topic: 'Three' })).schedule_id;
+
+  // Worker 0 is full, worker 1 restarts in 1s. Three ticks in that second.
+  for (let i = 0; i < 3; i++) await server.clock.tick(Date.now());
+  let tail = (await json('tail_events', { limit: 200 })).events;
+  assert.deepEqual(tail.filter((e) => e.type === 'meeting.error'), [], 'no seat is a wait, not an error');
+  const waits = tail.filter((e) => e.type === 'schedule.waiting');
+  assert.deepEqual(waits.map((e) => e.data.schedule_id).sort(), [ids.Two, ids.Three].sort(), 'each unseated order waits once');
+  assert.ok(waits.every((e) => e.data.reason === 'worker'));
+  const three = (await json('list_schedule')).orders.find((o) => o.schedule_id === ids.Three);
+  assert.equal(three.phase, 'waiting_for_capacity');
+
+  // Worker 1 is back: the dropped room takes its seat, Three still waits.
+  now += 1000;
+  await server.clock.tick(Date.now());
+  const two = meetings.all().find((m) => m.topic === 'Two');
+  assert.equal(meetings.get(two.meeting_id).state, 'live');
+  assert.equal(meetings.get(two.meeting_id).session_id, 'w1:mt_1');
+  assert.equal((await json('list_schedule')).orders.find((o) => o.schedule_id === ids.Three).phase, 'waiting_for_capacity');
+
+  // No seat frees before Three's end, so it is missed for capacity, not late.
+  await server.clock.tick(Date.parse(end) + 1);
+  const missed = (await json('list_schedule')).orders.find((o) => o.schedule_id === ids.Three);
+  assert.equal(missed.phase, 'missed');
+  assert.equal(missed.missed_reason, 'capacity');
+  await client.close();
+});

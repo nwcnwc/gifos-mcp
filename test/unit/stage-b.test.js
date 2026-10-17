@@ -1125,3 +1125,39 @@ test('a join whose transcription will not start does not leave the bot in the ro
   assert.equal(await sitting(), 1, 'the bot sits in the room once');
   await client.close();
 });
+
+test('a join whose transcription will not start and whose leave fails stays live with captions off, so unmute and end_meeting reach that seat and no tick seats it again', { timeout: 15000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  cfg.failTranscribe = true;
+  makePool();
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const json = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  await pool.ensureStarted();
+  await pool.workers[0].call('breakLeave', 'leave refused');
+  const link = (await json('create_meeting', { name: 'Stuck', admin_password: 'owner-77' })).link;
+  const now = Date.now();
+  await json('schedule_meeting', { link, room_password: ROOM, start: new Date(now - 60 * 1000).toISOString(), end: new Date(now + 60 * 60 * 1000).toISOString(), topic: 'Stuck' });
+  const m = meetings.all().find((row) => row.topic === 'Stuck');
+  for (let i = 0; i < 3; i++) await server.clock.tick(now + i * 1000);
+  const row = meetings.get(m.meeting_id);
+  assert.equal(row.state, 'live');
+  assert.equal(row.session_id, 'w0:mt_1');
+  assert.equal(row.transcribing, false);
+  assert.deepEqual((await pool.workers[0].call('list')).map((r) => r.id), ['mt_1'], 'seated once');
+  assert.equal(pool.workers[1].state, 'stopped', 'no second worker was started for it');
+  const tail = (await json('tail_events', { limit: 200 })).events;
+  assert.equal(tail.filter((e) => e.type === 'meeting.error' && /Transcription could not be started/.test(e.data.text)).length, 1);
+
+  await pool.workers[0].call('fixTranscribe');
+  assert.equal((await json('unmute', { meeting_id: m.meeting_id })).transcribing, true);
+  await pool.workers[0].call('fixLeave');
+  assert.equal((await json('end_meeting', { meeting_id: m.meeting_id })).state, 'ended');
+  assert.deepEqual(await pool.workers[0].call('list'), []);
+  await client.close();
+});

@@ -97,7 +97,21 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
       await bot.leave(sessionId).catch(() => {});
       return meetings.get(m.meeting_id);
     }
-    await bot.transcribe(sessionId, true);
+    try { await bot.transcribe(sessionId, true); }
+    catch (e) {
+      // The bot sits in the room, but no meeting holds its seat yet. Leave,
+      // so the next try (the clock's next tick) does not seat it twice.
+      const stuck = await bot.leave(sessionId).then(() => null, (le) => (GONE_RE.test((le && le.message) || '') ? null : le));
+      if (!stuck) throw e;
+      // It could not leave: keep the meeting live with captions off, so
+      // unmute and end_meeting can still reach that seat.
+      const kept = meetings.update(m.meeting_id, {
+        state: 'live', session_id: sessionId, transcribing: false, muted: false, reseat: false,
+        started_at: new Date().toISOString(), ended_at: null, transcript: null,
+      });
+      emit({ type: 'meeting.error', meeting_id: m.meeting_id, data: { text: 'Transcription could not be started; unmute to try again.' } });
+      return kept;
+    }
     const updated = meetings.update(m.meeting_id, {
       state: 'live', session_id: sessionId, transcribing: true, muted: false, reseat: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,

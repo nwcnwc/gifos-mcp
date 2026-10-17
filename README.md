@@ -302,6 +302,8 @@ Variants:
   `.e2e/proof-load/load.json`; see [PROOF.md](PROOF.md). It uses the synthetic provider unless `E2E_STT=whisper`,
   which needs `E2E_SPEECH_WAV` (each person's mic plays it) and counts a room heard when its person's line
   matches `E2E_EXPECT`.
+- Each runner works in a folder under `TMPDIR` and removes it however it exits: a failed setup, a failed check,
+  Ctrl-C or SIGTERM.
 
 ## License
 

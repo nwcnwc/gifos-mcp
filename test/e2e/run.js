@@ -11,7 +11,6 @@
 //    "Alice" and plays speech -> get_transcript is non-empty -> share_content,
 //    mute/unmute, list_meetings, status -> end_meeting -> the bot is gone.
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +18,7 @@ import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { packApp, startSite } from './site.js';
+import { workDir } from './work.js';
 import { SYNTH_STT, SYNTH_TTS, SYNTH_LLM } from './synth.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -81,7 +81,7 @@ async function main() {
   need(STT === 'whisper' || STT === 'synthetic', 'E2E_STT is whisper or synthetic');
   need(STT !== 'whisper' || (SPEECH && fs.existsSync(SPEECH)), 'whisper mode needs E2E_SPEECH_WAV, a WAV file of someone speaking');
   fs.mkdirSync(PROOF, { recursive: true });
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-e2e-'));
+  const work = workDir('gifos-mcp-e2e-');
   const wav = SPEECH || path.join(work, 'noise.wav');
   if (!SPEECH) noiseWav(wav);
   say('site ' + BASE + ' from the gifos-app checkout; STT ' + STT + '; speech ' + path.basename(wav));
@@ -266,7 +266,6 @@ async function main() {
     await client.close().catch(() => {});
     if (relayProc) relayProc.kill();
     site.close();
-    fs.rmSync(work, { recursive: true, force: true });
   }
   say(failures ? failures + ' FAILURE(S)' : 'ALL PASS');
   say('screenshots in ' + PROOF);

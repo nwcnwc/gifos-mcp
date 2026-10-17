@@ -21,12 +21,12 @@
 // the fake-media args below (a run-server ignores them). Forward that port
 // here and 19510 back there, so the page stays on 127.0.0.1.
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { packApp, startSite } from './site.js';
+import { workDir } from './work.js';
 import { SYNTH_LINE, SYNTH_STT, SYNTH_TTS, SYNTH_LLM } from './synth.js';
 import { sleep, procsUnder, alive, usage, peopleBrowser, personIn, botTiles, waitTiles } from './people.js';
 
@@ -65,7 +65,7 @@ async function main() {
     process.exit(2);
   }
   fs.mkdirSync(PROOF, { recursive: true });
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-stage-b-'));
+  const work = workDir('gifos-mcp-stage-b-');
   const logo = fs.readFileSync(path.join(REPO, 'assets', 'logo-512.png'));
   const extra = [];
   for (const [slug, files] of [['stt-synthetic', SYNTH_STT], ['tts-synthetic', SYNTH_TTS], ['llm-synthetic', SYNTH_LLM]]) {
@@ -288,7 +288,6 @@ async function main() {
     for (const p of people) await p.browser.close().catch(() => {});
     await client.close().catch(() => {});
     site.close();
-    fs.rmSync(work, { recursive: true, force: true });
   }
   say(failures ? failures + ' FAILURE(S)' : 'ALL PASS');
   say('screenshots in ' + PROOF);

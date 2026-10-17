@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { packApp, startSite } from './site.js';
+import { workDir } from './work.js';
 import { SYNTH_LINE, SYNTH_STT, SYNTH_TTS, SYNTH_LLM } from './synth.js';
 import { sleep, procsUnder, usage, peopleBrowser, personIn, waitTiles, SPEECH_PATH } from './people.js';
 
@@ -95,7 +96,7 @@ async function main() {
   if (!STEPS.length) { console.error('e2e setup: E2E_ROOMS must list room counts, e.g. 1,4,8'); process.exit(2); }
   const max = STEPS[STEPS.length - 1];
   fs.mkdirSync(PROOF, { recursive: true });
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-load-'));
+  const work = workDir('gifos-mcp-load-');
   const logo = fs.readFileSync(path.join(REPO, 'assets', 'logo-512.png'));
   const extra = [];
   const synth = [['tts-synthetic', SYNTH_TTS], ['llm-synthetic', SYNTH_LLM]];
@@ -258,7 +259,6 @@ async function main() {
     for (const b of browsers) await b.close().catch(() => {});
     await client.close().catch(() => {});
     site.close();
-    fs.rmSync(work, { recursive: true, force: true });
   }
   say(failures ? failures + ' FAILURE(S)' : 'ALL PASS');
   say('results in ' + path.join(PROOF, 'load.json'));

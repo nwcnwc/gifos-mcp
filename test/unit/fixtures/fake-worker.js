@@ -1,5 +1,7 @@
 // A stage B worker with a fake Meet Bot, forked by stage-b.test.js. Same IPC
 // protocol and serveWorker as src/worker.js; no browser.
+import fs from 'node:fs';
+import path from 'node:path';
 import { serveWorker } from '../../../src/worker.js';
 
 class FakeDriver {
@@ -9,7 +11,11 @@ class FakeDriver {
     this.log = [];
     this.seq = 0;
   }
-  async ensureStarted() { this.log.push(['ensureStarted']); }
+  // A started browser keeps the worker's event loop alive, as Chromium does.
+  async ensureStarted() {
+    this.log.push(['ensureStarted']);
+    if (!this.browser) this.browser = setInterval(() => {}, 1000);
+  }
   async join(link, password) {
     this.log.push(['join', link, password]);
     if (this.held) await this.held.promise;
@@ -32,7 +38,11 @@ class FakeDriver {
   async setVoice(s) { this.log.push(['setVoice', s]); return { applied: true }; }
   async list() { return Array.from({ length: this.seq }, (_, i) => ({ id: 'mt_' + (i + 1) })); }
   async info() { return { state: 'ready', connected: true, bot_name: this.boot.creds.name, bot_sessions: [] }; }
-  async close() {}
+  async close() {
+    clearInterval(this.browser);
+    this.browser = null;
+    fs.writeFileSync(path.join(this.boot.cfg.home, 'closed-w' + this.boot.index), String(process.pid));
+  }
   // Test-only methods, allowed by the extra list below.
   async calls() { return this.log; }
   async whoami() { return { name: this.boot.creds.name, profile: this.boot.cfg.profile, argv: process.argv, env: Object.keys(process.env).filter((k) => String(process.env[k]).includes(this.boot.creds.password)) }; }

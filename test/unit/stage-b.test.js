@@ -458,3 +458,22 @@ test('while a lost worker waits out its restart, orders it cannot seat wait once
   assert.equal(missed.missed_reason, 'capacity');
   await client.close();
 });
+
+test('a worker whose supervisor is killed closes its browser and exits instead of keeping the seat', { timeout: 15000 }, async () => {
+  const PARENT = fileURLToPath(new URL('./fixtures/pool-parent.js', import.meta.url));
+  const parent = fork(PARENT, [home], { stdio: ['ignore', 'pipe', 'inherit', 'ipc'] });
+  const pid = await new Promise((resolve, reject) => {
+    let out = '';
+    parent.stdout.on('data', (d) => { out += d; if (out.includes('\n')) resolve(Number(out.trim())); });
+    parent.once('exit', (code) => reject(new Error('parent exited ' + code)));
+  });
+  const alive = () => { try { process.kill(pid, 0); return true; } catch (e) { return false; } };
+  assert.equal(alive(), true);
+  parent.kill('SIGKILL');
+  const until = Date.now() + 5000;
+  while (alive() && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+  const orphaned = alive();
+  if (orphaned) process.kill(pid, 'SIGKILL');
+  assert.equal(orphaned, false, 'worker ' + pid + ' outlived its supervisor');
+  assert.equal(fs.readFileSync(path.join(home, 'closed-w0'), 'utf8'), String(pid));
+});

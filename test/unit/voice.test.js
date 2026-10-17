@@ -15,7 +15,7 @@ import { MeetingStore } from '../../src/meetings.js';
 import { MeetingBotDriver } from '../../src/driver.js';
 import { LiveTranscript, watchCaptions } from '../../src/voice/live.js';
 import { voiceSettings, scrub } from '../../src/voice/settings.js';
-import { bridgeScript } from '../../src/voice/providers.js';
+import { bridgeScript, hostRoles } from '../../src/voice/providers.js';
 
 const KEY = 'sk-test-key-which-must-stay-here';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -211,22 +211,15 @@ test('say and the transcript go through Meet Bot, and the key stays out of tool 
 
   const created = await json('create_meeting', { topic: 'Demo meeting' });
   await json('start_meeting', { meeting_id: created.meeting_id });
-  assert.equal(bot.voice.conversation_voice, 'local');
-  assert.equal(bot.voice.llm.provider, 'smartest');
-  assert.equal('key' in bot.voice.llm, false);
-  assert.equal('url' in bot.voice.llm, false);
-  assert.equal(bot.voice.tts.provider, 'tts');
-  assert.equal(bot.voice.tts.engine, 'http');
-  assert.equal('url' in bot.voice.tts, false);
-  assert.equal(bot.voice.stt.provider, 'stt');
-  assert.equal('url' in bot.voice.stt, false);
+  assert.equal(bot.voice, null);
+  assert.equal(bot.calls.some((c) => c[0] === 'setVoice'), false);
   assert.equal(bot.calls.some((c) => c[0] === 'say'), false);
 
   const status = await json('status');
-  assert.equal(status.voice.handed, true);
+  assert.equal(status.voice.handed, false);
   assert.equal(status.voice.conversation_voice, 'local');
   assert.equal(status.voice.model, 'local-model');
-  assert.equal(status.voice.gap, null);
+  assert.match(status.voice.gap, /setVoice/);
   assert.equal(JSON.stringify(status).includes(KEY), false);
   assert.equal(JSON.stringify(status).includes('127.0.0.1:9'), false);
   assert.equal(JSON.stringify(status).includes('127.0.0.1:10'), false);
@@ -282,6 +275,60 @@ test('say and the transcript go through Meet Bot, and the key stays out of tool 
   const file = path.join(home, 'transcripts', created.meeting_id + '.jsonl');
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(fs.readFileSync(file, 'utf8').includes(KEY), false);
+  await client.close();
+});
+
+// gifos-apps-source a83ff5c. MeetingBot.setVoice throws this when the
+// argument still carries the old voice object (conversation_voice, llm, tts,
+// or stt, including a URL). Smartest and Text to speech come from the host.
+const NEW_MEET_BOT_VOICE = 'Voice uses the GifOS AI settings (Smartest and Text to speech).';
+
+function oldVoiceCall(settings) {
+  return !!(settings && (settings.conversation_voice != null || settings.llm || settings.tts || settings.stt));
+}
+
+test('join_meeting does not send the old voice call the new Meet Bot refuses', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-newvoice-'));
+  const cfg = loadConfig({
+    GIFOS_MCP_HOME: home,
+    GIFOS_URL: 'http://127.0.0.1:19510',
+    GIFOS_LLM_URL: 'http://127.0.0.1:9/v1',
+    GIFOS_LLM_KEY: KEY,
+    GIFOS_LLM_MODEL: 'local-model',
+  });
+  assert.deepEqual(hostRoles(cfg), ['tts', 'smartest']);
+  const bot = {
+    calls: [],
+    seq: 0,
+    async ensureStarted() {},
+    async join() {
+      const id = 'mt_' + (++this.seq);
+      this.calls.push(['join', id]);
+      return id;
+    },
+    async transcribe() {},
+    async setVoice(settings) {
+      this.calls.push(['setVoice', settings]);
+      if (oldVoiceCall(settings)) throw new Error(NEW_MEET_BOT_VOICE);
+      return { applied: true, result: settings };
+    },
+    async info() { return { state: 'ready', bot_name: 'notes-test' }; },
+  };
+  const meetings = new MeetingStore(home);
+  const server = createServer({ cfg, meetings, bot, botName: 'notes-test' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(a), client.connect(b)]);
+  const joined = await client.callTool({
+    name: 'join_meeting',
+    arguments: { link: 'https://gifos.app/meet/voice-room-1', password: 'room-secret' },
+  });
+  assert.notEqual(joined.isError, true, joined.content[0].text);
+  const body = JSON.parse(joined.content[0].text);
+  assert.equal(body.state, 'live');
+  assert.equal(joined.content[0].text.includes(NEW_MEET_BOT_VOICE), false);
+  assert.equal(bot.calls.some((c) => c[0] === 'setVoice'), false);
+  assert.equal(bot.calls.some((c) => c[0] === 'join'), true);
   await client.close();
 });
 

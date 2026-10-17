@@ -3,11 +3,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-function writePrivate(file, text) {
-  fs.writeFileSync(file, text, { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
-}
-
 export class EventLog {
   constructor(home) {
     this.home = home;
@@ -30,6 +25,10 @@ export class EventLog {
         if (row.seq > this.seq) this.seq = row.seq;
       } catch (e) { /* torn line */ }
     }
+    // A process killed mid-append leaves a torn last line with no newline.
+    // End it, so the next append starts a line of its own instead of being
+    // glued onto one that will never parse (and losing its seq at next start).
+    if (raw && !raw.endsWith('\n')) fs.appendFileSync(this.file, '\n');
   }
 
   append({ type, meeting_id, data }) {
@@ -61,13 +60,5 @@ export class EventLog {
     const n = Number(since) || 0;
     const events = this.items.filter((row) => row.seq > n);
     return { since: n, next: events.length ? events[events.length - 1].seq : n, events };
-  }
-
-  replace(items) {
-    this.items = items;
-    this.seq = items.reduce((max, row) => Math.max(max, row.seq || 0), 0);
-    if (!this.home) return;
-    fs.mkdirSync(this.home, { recursive: true, mode: 0o700 });
-    writePrivate(this.file, items.map((row) => JSON.stringify(row)).join('\n') + (items.length ? '\n' : ''));
   }
 }

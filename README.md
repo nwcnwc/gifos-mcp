@@ -180,7 +180,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `meeting_status` | `meeting_id` | One meeting: phase, people, thinking, line counts. No passwords. |
 | `tail_lines` | `meeting_id?`, `since?`, `kinds?` | Speech, chat, and spoken lines. |
 | `meetings_report` | `since?`, `meeting_ids?` | Raw rows across meetings. Not a written summary. |
-| `tail_events` | `since?` | Connector events, including `capacity.near`, `capacity.reached`, and `capacity.cleared`. |
+| `tail_events` | `since?` | Connector events, including `capacity.near`, `capacity.reached`, and `capacity.cleared`. They are appended to `GIFOS_MCP_HOME/events.jsonl` (mode 0600); a torn last line left by a process killed mid-write is skipped and ended at the next start, so later events stay readable and no `seq` is handed out twice. |
 | `capacity_status` | none | Who is seated, who is waiting, and future clashes inside the horizon. |
 
 The resource `gifos://meeting/{id}/transcript` is the same live transcript as `tail_transcript`, as newline-delimited JSON tailed from Meet Bot. A client can subscribe and receive `notifications/resources/updated`.

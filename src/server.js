@@ -94,8 +94,15 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     const sessionId = await bot.join(plainLink(m.link, roomPassword), roomPassword);
     if (job.cancelled) {
       // Ended while the join was on its way. Leave the seat it just took.
-      await bot.leave(sessionId).catch(() => {});
-      return meetings.get(m.meeting_id);
+      const stuck = await bot.leave(sessionId).then(() => null, (le) => (GONE_RE.test((le && le.message) || '') ? null : le));
+      if (!stuck) return meetings.get(m.meeting_id);
+      // It could not leave: the meeting holds the seat again, captions off,
+      // so another end_meeting can reach it. Its order stays left_early.
+      const kept = meetings.update(m.meeting_id, {
+        state: 'live', session_id: sessionId, transcribing: false, muted: false, reseat: false, ended_at: null,
+      });
+      emit({ type: 'meeting.error', meeting_id: m.meeting_id, data: { text: 'The bot could not leave the room; call end_meeting again.' } });
+      return kept;
     }
     try { await bot.transcribe(sessionId, true); }
     catch (e) {

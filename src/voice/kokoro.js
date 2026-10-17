@@ -41,7 +41,9 @@ export function installKokoro({ home, voice, host } = {}) {
 // A part file left by a process that died (a worker killed when its boot
 // ran out of time) is kept: the next match() claims it and asks only for
 // the missing bytes, so a slow link gets further on each start instead of
-// starting from zero. A bad join still fails the load, which fetches anew.
+// starting from zero. The part keeps the ETag its bytes came with in
+// <part>.tag; a part with no strong ETag, or whose file has a different
+// ETag now, is dropped rather than joined to bytes of another version.
 export function weightsCache(dir, host) {
   const base = String(host).replace(/\/+$/, '') + '/';
   const fileFor = (key) => {
@@ -72,8 +74,14 @@ export function weightsCache(dir, host) {
 
 // Streams response into <file>.<pid>.part from byte `from` on, then renames
 // it into place. A failure removes the part; a kill leaves it for resume().
+// A fresh part records the response's ETag; a resumed one keeps its own.
 async function writePart(file, response, from, total, progress) {
   const part = file + '.' + process.pid + '.part';
+  if (!from) {
+    const tag = strongTag(response);
+    if (tag) await fs.promises.writeFile(part + '.tag', tag);
+    else await fs.promises.rm(part + '.tag', { force: true });
+  }
   const out = fs.createWriteStream(part, from ? { flags: 'a' } : {});
   try {
     const reader = response.body.getReader();
@@ -88,11 +96,22 @@ async function writePart(file, response, from, total, progress) {
     await new Promise((resolve, reject) => out.end((e) => (e ? reject(e) : resolve())));
     if (total && loaded !== total) throw new Error('Kokoro: ' + path.basename(file) + ' ended at ' + loaded + ' of ' + total + ' bytes.');
     await fs.promises.rename(part, file);
+    await fs.promises.rm(part + '.tag', { force: true });
   } catch (e) {
     out.destroy();
-    await fs.promises.rm(part, { force: true });
+    await rmPart(part);
     throw e;
   }
+}
+
+// If-Range needs a strong ETag; a weak one (W/"...") cannot vouch for bytes.
+function strongTag(response) {
+  const tag = response.headers.get('etag');
+  return tag && /^"[^"]*"$/.test(tag) ? tag : null;
+}
+
+function rmPart(part) {
+  return Promise.all([part, part + '.tag'].map((p) => fs.promises.rm(p, { force: true })));
 }
 
 // Part files of `file` whose process is gone, biggest first.
@@ -118,20 +137,28 @@ function alive(pid) {
 // Finishes the biggest dead part of file with a Range request. Several
 // workers may start at once: the rename claims a part for one of them, and
 // the rest download as usual. Returns true when file is in place.
+// The Hugging Face CDN answers 206 even when If-Range does not match, so
+// the 206's own ETag must be the one the kept bytes came with.
 async function resume(key, file) {
   const parts = deadParts(file);
   const mine = file + '.' + process.pid + '.part';
   let from = -1;
+  let tag = null;
   for (const p of parts) {
     if (from < 0) {
-      try { await fs.promises.rename(p.path, mine); from = p.size; continue; } catch { continue; }
+      try { await fs.promises.rename(p.path, mine); from = p.size; } catch { continue; }
+      tag = await fs.promises.readFile(p.path + '.tag', 'utf8').catch(() => null);
+      await fs.promises.rm(p.path + '.tag', { force: true });
+      if (tag) await fs.promises.writeFile(mine + '.tag', tag);
+      continue;
     }
-    await fs.promises.rm(p.path, { force: true });
+    await rmPart(p.path);
   }
   if (from < 0) return false;
   try {
-    const res = from > 0 ? await fetch(key, { headers: { Range: 'bytes=' + from + '-' } }) : null;
-    const range = res && res.status === 206 && /^bytes (\d+)-\d+\/(\d+)$/.exec(res.headers.get('content-range') || '');
+    const res = from > 0 && tag ? await fetch(key, { headers: { Range: 'bytes=' + from + '-', 'If-Range': tag } }) : null;
+    const range = res && res.status === 206 && res.headers.get('etag') === tag
+      && /^bytes (\d+)-\d+\/(\d+)$/.exec(res.headers.get('content-range') || '');
     if (range && Number(range[1]) === from) {
       log('Kokoro: resuming ' + path.basename(file) + ' at ' + from + ' of ' + range[2] + ' bytes');
       await writePart(file, res, from, Number(range[2]));
@@ -143,20 +170,23 @@ async function resume(key, file) {
       return true;
     }
     if (res && res.body) await res.body.cancel().catch(() => {});
+    if (from > 0) log('Kokoro: ' + path.basename(file) + (tag ? ' changed since its kept bytes' : ' has no version tag for its kept bytes') + '; downloading it again');
   } catch (e) {
     log('Kokoro: could not resume ' + path.basename(file) + ' (' + oneLine(e) + '); downloading it again');
   }
-  await fs.promises.rm(mine, { force: true });
+  await rmPart(mine);
   return false;
 }
 
 // Part files left by a process that was killed while downloading: the
 // biggest of each file is kept for resume(), the rest are dropped, and so
-// is any part of a file that is already whole.
+// is any part of a file that is already whole, and any tag whose part is gone.
 function dropDeadParts(dir) {
   if (!fs.existsSync(dir)) return;
   const kept = new Set();
   for (const rel of fs.readdirSync(dir, { recursive: true })) {
+    const t = /^(.+\.(\d+)\.part)\.tag$/.exec(String(rel));
+    if (t && !alive(Number(t[2])) && !fs.existsSync(path.join(dir, t[1]))) fs.rmSync(path.join(dir, String(rel)), { force: true });
     const m = /^(.+)\.(\d+)\.part$/.exec(String(rel));
     if (!m) continue;
     const file = path.join(dir, m[1]);
@@ -164,7 +194,7 @@ function dropDeadParts(dir) {
     kept.add(file);
     const parts = deadParts(file);
     const keep = fs.existsSync(file) ? 0 : 1;
-    for (const p of parts.slice(keep)) fs.rmSync(p.path, { force: true });
+    for (const p of parts.slice(keep)) for (const f of [p.path, p.path + '.tag']) fs.rmSync(f, { force: true });
   }
 }
 

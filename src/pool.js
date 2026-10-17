@@ -13,7 +13,9 @@
 // - A worker that stops answering the heartbeat is killed and counts as lost.
 // - A call that gets no answer within callMs (joinMs for a browser start or
 //   a join) fails, but a worker that still answers the heartbeat stays up.
-//   A join that lands after its caller gave up is left at once.
+//   A join that lands after its caller gave up is left at once. Until that
+//   leave works the room keeps its seat, and it is left again every
+//   leaveRetryMs, so the bot is not stranded in a room nobody can reach.
 // - A leave that fails or times out keeps the room on its worker, so the
 //   seat stays taken and a second leave can still reach it. A late leave
 //   that lands, or Meet Bot saying the room is gone, frees it.
@@ -77,6 +79,7 @@ class Worker {
     this.pending = new Map();
     this.late = new Map();    // call id -> { method, args }, for calls that timed out
     this.rooms = new Set();   // local session ids seated on this worker
+    this.stray = new Map();   // late joins still to leave: local id -> { timer, told }
     this.reserved = 0;        // joins in flight
     this.booting = null;
     this.voice = null;
@@ -92,7 +95,7 @@ class Worker {
     this.beat = null;
   }
 
-  get used() { return this.rooms.size + this.reserved; }
+  get used() { return this.rooms.size + this.stray.size + this.reserved; }
 
   restartInMs() {
     return this.state === 'lost' ? Math.max(0, this.nextStartAt - this.pool.now()) : 0;
@@ -198,6 +201,7 @@ class Worker {
     clearTimeout(this.voiceTimer);
     this.voiceTimer = null;
     this.late.clear();
+    this.clearStray();        // the process and its browser are gone
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Worker ' + this.index + ' stopped: ' + why)); }
     this.pending.clear();
     const gone = [...this.rooms].map((s) => 'w' + this.index + ':' + s);
@@ -235,11 +239,41 @@ class Worker {
   landedLate(msg) {
     const { method, args } = this.late.get(msg.id);
     this.late.delete(msg.id);
-    if (method === 'leave' && (msg.ok || GONE_RE.test(msg.error || ''))) { this.rooms.delete(String(args[0])); return; }
+    if (method === 'leave' && (msg.ok || GONE_RE.test(msg.error || ''))) { this.rooms.delete(String(args[0])); this.dropStray(String(args[0])); return; }
     if (method !== 'join' || !msg.ok || msg.value == null) return;
     const local = String(msg.value);
     log('worker ' + this.index + ': a join landed after it timed out; leaving ' + local);
-    this.call('leave', local).catch((e) => log('worker ' + this.index + ': late leave failed: ' + ((e && e.message) || e)));
+    this.stray.set(local, { timer: null, told: false });
+    this.leaveStray(local);
+  }
+
+  // One log line per stranded room, not one per retry.
+  leaveStray(local) {
+    const child = this.child;
+    this.call('leave', local).then(() => this.dropStray(local), (e) => {
+      const text = String((e && e.message) || e);
+      if (GONE_RE.test(text)) { this.dropStray(local); return; }
+      const s = this.stray.get(local);
+      if (this.child !== child || !s || s.timer) return;
+      if (!s.told) log('worker ' + this.index + ': late leave of ' + local + ' failed, trying again every ' + this.pool.leaveRetryMs + 'ms: ' + text);
+      s.told = true;
+      s.timer = setTimeout(() => {
+        s.timer = null;
+        if (this.child === child && this.stray.get(local) === s) this.leaveStray(local);
+      }, this.pool.leaveRetryMs);
+      s.timer.unref();
+    });
+  }
+
+  dropStray(local) {
+    const s = this.stray.get(local);
+    if (s) clearTimeout(s.timer);
+    this.stray.delete(local);
+  }
+
+  clearStray() {
+    for (const s of this.stray.values()) clearTimeout(s.timer);
+    this.stray.clear();
   }
 
   async ready() {
@@ -302,6 +336,7 @@ class Worker {
     clearInterval(this.beat);
     clearTimeout(this.voiceTimer);
     this.voiceTimer = null;
+    this.clearStray();
     const exited = new Promise((r) => child.once('exit', r));
     try { child.send({ type: 'close' }); } catch (e) { /* already gone */ }
     const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* gone */ } }, this.pool.closeMs);
@@ -312,7 +347,8 @@ class Worker {
 
 export class WorkerPool {
   // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
-  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs, voiceRetryMs }
+  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs, voiceRetryMs,
+  //         leaveRetryMs }
   constructor(cfg, creds, opts = {}) {
     this.cfg = cfg;
     this.creds = creds;
@@ -333,6 +369,7 @@ export class WorkerPool {
     this.joinMs = opts.joinMs > 0 ? opts.joinMs : 5 * (cfg.timeoutMs || 120000);
     this.infoMs = opts.infoMs > 0 ? opts.infoMs : 3000;
     this.voiceRetryMs = opts.voiceRetryMs > 0 ? opts.voiceRetryMs : 10000;
+    this.leaveRetryMs = opts.leaveRetryMs > 0 ? opts.leaveRetryMs : 10000;
     const script = opts.workerScript || WORKER_SCRIPT;
     this.forkWorker = typeof opts.forkWorker === 'function'
       ? opts.forkWorker
@@ -502,6 +539,7 @@ export class WorkerPool {
       if (w.restartInMs() > 0) row.restart_in_ms = w.restartInMs();
       if (w.startRetryInMs() > 0) { row.start_retry_in_ms = w.startRetryInMs(); row.error = w.startError; }
       if (w.state === 'ready' && w.voicePending()) row.voice = 'pending';
+      if (w.stray.size) row.stray_rooms = w.stray.size;
       const got = asked[i] && await asked[i];
       if (got && got.e) row.error = String((got.e && got.e.message) || got.e);
       else if (got) {

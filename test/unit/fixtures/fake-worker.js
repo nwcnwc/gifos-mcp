@@ -48,7 +48,11 @@ class FakeDriver {
     // Meet Bot left the room, but the answer never gets back.
     if (this.leaveStalled) return new Promise(() => {});
   }
-  async transcribe(id, on) { this.log.push(['transcribe', id, on]); }
+  async transcribe(id, on) {
+    this.log.push(['transcribe', id, on]);
+    // cfg.failTranscribe: Meet Bot takes the room but will not start captions, until fixTranscribe().
+    if (this.boot.cfg.failTranscribe && !this.transcribeFixed) throw new Error('captions would not start');
+  }
   async say(id, text) { this.log.push(['say', id, text]); }
   async interject(id, text) {
     this.log.push(['interject', id, text]);
@@ -107,6 +111,7 @@ class FakeDriver {
   // setVoice never answers.
   async holdVoice() { this.voiceHeld = true; }
   async fixStart() { this.startFixed = true; }
+  async fixTranscribe() { this.transcribeFixed = true; }
   // Blocks the event loop for good, the way a wedged worker would: no reply, no pong.
   async hang() { for (;;) { /* stuck */ } }
 }
@@ -115,6 +120,6 @@ process.once('message', (boot) => {
   // cfg.hangBoot lists workers whose boot never finishes, the way a stalled
   // Kokoro download would: the process is alive but never says up.
   if ((boot.cfg.hangBoot || []).includes(boot.index)) { setInterval(() => {}, 1000); return; }
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stallJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'stallLeaves', 'fixStart', 'tmp']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stallJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'stallLeaves', 'fixStart', 'fixTranscribe', 'tmp']);
 });
 process.send({ event: 'boot' });

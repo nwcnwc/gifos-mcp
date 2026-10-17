@@ -18,6 +18,8 @@
 //   so one stuck worker shows as an error row instead of holding status.
 // - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
 //   up to a minute), and joins go to another worker meanwhile.
+// - Voice settings go to every ready worker at once and again to any worker
+//   that restarts or missed them, before its next join.
 import path from 'node:path';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -162,6 +164,7 @@ class Worker {
     if (was !== 'closing') this.error = why;
     this.child = null;
     this.booting = null;
+    this.voice = null;        // a new process starts with Meet Bot's defaults
     this.late.clear();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Worker ' + this.index + ' stopped: ' + why)); }
     this.pending.clear();
@@ -208,10 +211,15 @@ class Worker {
   async ready() {
     await this.call('ensureStarted');
     if (this.state === 'up') this.state = 'ready';
-    if (this.pool.voice && this.voice !== this.pool.voice) {
-      this.voice = this.pool.voice;
-      await this.call('setVoice', this.pool.voice).catch(() => {});
-    }
+    if (this.pool.voice && this.voice !== this.pool.voice) await this.pushVoice(this.pool.voice).catch(() => {});
+  }
+
+  // Marked as carrying settings only once the worker took them, so one that
+  // refused or timed out is asked again on its next join.
+  async pushVoice(settings) {
+    const r = await this.call('setVoice', settings);
+    this.voice = settings;
+    return r;
   }
 
   async close() {
@@ -374,18 +382,19 @@ export class WorkerPool {
     return out;
   }
 
-  // Voice switches stay global (open question 7). A worker that starts
-  // later gets the same settings in ready().
+  // Voice switches stay global (open question 7). Every ready worker is
+  // asked at once, so one that refuses or never answers does not keep the
+  // rest on the old voice. A worker that starts later, restarts, or missed
+  // this call gets the same settings in ready().
   async setVoice(settings) {
     this.voice = settings;
-    let first = null;
-    for (const w of this.workers) {
-      if (w.state !== 'ready') continue;
-      w.voice = settings;
-      const r = await w.call('setVoice', settings);
-      if (!first) first = r;
-    }
-    return first || { applied: true, result: null };
+    const ready = this.workers.filter((w) => w.state === 'ready');
+    const got = await Promise.all(ready.map((w) => w.pushVoice(settings).then((v) => ({ v }), (e) => ({ e }))));
+    const first = got.find((g) => !g.e);
+    got.forEach((g, i) => { if (g.e) log('worker ' + ready[i].index + ': setVoice failed: ' + ((g.e && g.e.message) || g.e)); });
+    if (first) return first.v;
+    if (got.length) throw got[0].e;
+    return { applied: true, result: null };
   }
 
   async info() {

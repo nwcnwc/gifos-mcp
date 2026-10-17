@@ -537,7 +537,7 @@ test('set_voice reaches every ready worker even when one refuses it, and the one
   assert.deepEqual(await voiceCalls(pool.workers[0]), [local, local]);
 });
 
-test('set_voice is not held by a worker that never answers it', { timeout: 10000 }, async () => {
+test('set_voice still reaches the other workers when one never answers it, after one call timeout', { timeout: 10000 }, async () => {
   makePool({ callMs: 300 });
   await pool.join('https://gifos.app/run.html#v=roomA', '');
   await pool.join('https://gifos.app/run.html#v=roomB', '');

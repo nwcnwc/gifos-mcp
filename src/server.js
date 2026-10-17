@@ -11,6 +11,7 @@ import { CAMERA_GAP, CONTROLS_GAP, HAND_GAP, INTERJECT_GAP, MIC_GAP, SNAPSHOT_GA
 import { ScheduleStore, publicOrder, capacityAt, localStamp, DEFAULT_SPAN_MS } from './schedule.js';
 import { EventLog } from './events.js';
 import { createClock } from './clock.js';
+import { log } from './log.js';
 
 export const VERSION = '0.4.0';
 
@@ -88,6 +89,17 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return job.promise;
   }
 
+  // Once a join lands the bot holds a seat. A meetings.json save that fails
+  // then (disk nearly full: it holds every transcript) must not lose it: the
+  // store already took the fields in memory and its next save writes them.
+  function holdSeat(id, fields) {
+    try { return meetings.update(id, fields); }
+    catch (e) {
+      log('meetings.json not saved (' + e.message + '); the seat is kept in memory until the next save.');
+      return meetings.get(id);
+    }
+  }
+
   async function enterOnce(m, password, job) {
     await bot.ensureStarted();
     const roomPassword = password || schedule.passwordFor(m.room) || '';
@@ -98,7 +110,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
       if (!stuck) return meetings.get(m.meeting_id);
       // It could not leave: the meeting holds the seat again, captions off,
       // so another end_meeting can reach it. Its order stays left_early.
-      const kept = meetings.update(m.meeting_id, {
+      const kept = holdSeat(m.meeting_id, {
         state: 'live', session_id: sessionId, transcribing: false, muted: false, reseat: false, ended_at: null,
       });
       emit({ type: 'meeting.error', meeting_id: m.meeting_id, data: { text: 'The bot could not leave the room; call end_meeting again.' } });
@@ -112,14 +124,14 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
       if (!stuck) throw e;
       // It could not leave: keep the meeting live with captions off, so
       // unmute and end_meeting can still reach that seat.
-      const kept = meetings.update(m.meeting_id, {
+      const kept = holdSeat(m.meeting_id, {
         state: 'live', session_id: sessionId, transcribing: false, muted: false, reseat: false,
         started_at: new Date().toISOString(), ended_at: null, transcript: null,
       });
       emit({ type: 'meeting.error', meeting_id: m.meeting_id, data: { text: 'Transcription could not be started; unmute to try again.' } });
       return kept;
     }
-    const updated = meetings.update(m.meeting_id, {
+    const updated = holdSeat(m.meeting_id, {
       state: 'live', session_id: sessionId, transcribing: true, muted: false, reseat: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
     });

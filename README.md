@@ -224,7 +224,9 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 - **Transcripts are stored** in `GIFOS_MCP_HOME/meetings.json` (mode 0600) so they survive restarts. Delete the
   file to forget them. It is written to a temp file then renamed, so a save cut short keeps the last good file;
   a file that cannot be read at start is kept as `meetings.json.bad-<ms>` (mode 0600, logged) and not
-  overwritten. Delete any `*.bad-*` file too (a `bot.json.bad-*` holds an old bot password).
+  overwritten. Delete any `*.bad-*` file too (a `bot.json.bad-*` holds an old bot password). A join
+  whose save fails (disk nearly full) still holds its seat and reads its captions; the failure is
+  logged and the next save writes it.
 - **The key stays in this process.** When this server hosts `smartest`, it calls the model. The page does
   not, and `GIFOS_LLM_KEY` is not written into Settings. `MeetingBot.setVoice` receives the provider role
   `smartest` and never the URL or the key. Leave the key unset and conversation voice stays `none` unless

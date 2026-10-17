@@ -6,6 +6,7 @@ import path from 'node:path';
 import { loadConfig, botCredentials, credentialProblem, generateCredentials, DEFAULT_GIFOS_URL, voiceConfig, SUGGESTED_LLM_URL, SUGGESTED_LLM_MODEL } from '../../src/config.js';
 import { voicePublic, voiceSettings } from '../../src/voice/settings.js';
 import { MeetingStore, newRoom, linkFor, roomFromLink } from '../../src/meetings.js';
+import { EventLog } from '../../src/events.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-cfg-'));
 
@@ -198,6 +199,32 @@ test('a meetings save cut short keeps the last good meetings.json', () => {
     }
     assert.deepEqual(new MeetingStore(home).all().map((x) => x.meeting_id), [m.meeting_id]);
     assert.deepEqual(fs.readdirSync(home).filter((f) => f.endsWith('.tmp')), []);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// A process killed mid-append leaves events.jsonl ending in a torn line with
+// no newline. The next event must not be glued onto it: that line would not
+// parse at the next start, the event would be lost, and its seq handed out
+// again, so a client whose cursor already passed it never sees the new one.
+test('an event appended after a torn last line survives a restart and its seq is not reused', () => {
+  const home = tmp();
+  try {
+    const file = path.join(home, 'events.jsonl');
+    const good = [1, 2, 3].map((seq) => JSON.stringify({ seq, ts: 't', meeting_id: '', type: 'meeting.joined', data: {} }));
+    fs.writeFileSync(file, good.join('\n') + '\n{"seq":4,"ts":"t","meeting_id":"","ty', { mode: 0o600 });
+    const first = new EventLog(home);
+    assert.equal(first.seq, 3);
+    const a = first.append({ type: 'meeting.left', meeting_id: 'm_1' });
+    const cursor = first.tail(3).next;
+    assert.equal(cursor, a.seq);
+    const again = new EventLog(home);
+    assert.deepEqual(again.tail(3).events.map((row) => [row.seq, row.type]), [[a.seq, 'meeting.left']]);
+    const b = again.append({ type: 'meeting.ended', meeting_id: 'm_1' });
+    assert.deepEqual(again.tail(cursor).events.map((row) => row.seq), [b.seq]);
+    assert.deepEqual(new EventLog(home).tail(0).events.map((row) => row.type),
+      ['meeting.joined', 'meeting.joined', 'meeting.joined', 'meeting.left', 'meeting.ended']);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }

@@ -550,3 +550,34 @@ test('set_voice still reaches the other workers when one never answers it, after
   assert.equal(got.applied, true);
   assert.deepEqual(await voiceCalls(pool.workers[1]), [local]);
 });
+
+const until = async (fn, ms = 3000) => {
+  const end = Date.now() + ms;
+  for (;;) {
+    if (await fn()) return true;
+    if (Date.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+};
+
+test('a worker that refused set_voice is asked again on its own, without a new join, and status shows it pending until it takes it', { timeout: 10000 }, async () => {
+  makePool({ voiceRetryMs: 100 });
+  await pool.join('https://gifos.app/run.html#v=roomA', '');
+  await pool.join('https://gifos.app/run.html#v=roomB', '');
+  await pool.join('https://gifos.app/run.html#v=roomC', '');
+  await pool.workers[0].call('breakVoice');
+  const local = { respond_to_command: true, conversation_voice: 'local' };
+  await pool.setVoice(local);
+  // The rooms worker 0 already holds would stay on the old voice.
+  const row = async (i) => (await pool.info()).workers[i];
+  assert.equal((await row(0)).voice, 'pending');
+  assert.equal((await row(1)).voice, undefined);
+  assert.ok(await until(async () => (await voiceCalls(pool.workers[0])).length >= 3), 'worker 0 was not asked again while refusing');
+  await pool.workers[0].call('fixVoice');
+  assert.ok(await until(async () => (await row(0)).voice === undefined), 'worker 0 still pending after it would take the settings');
+  // Once it took them, the asking stops.
+  const n = (await voiceCalls(pool.workers[0])).length;
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await voiceCalls(pool.workers[0])).length, n);
+  assert.deepEqual(await voiceCalls(pool.workers[1]), [local]);
+});

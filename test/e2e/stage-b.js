@@ -24,11 +24,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { packApp, startSite } from './site.js';
 import { SYNTH_LINE, SYNTH_STT, SYNTH_TTS, SYNTH_LLM } from './synth.js';
+import { sleep, procsUnder, alive, usage, peopleBrowser, personIn, botTiles, waitTiles } from './people.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -50,115 +50,13 @@ const check = (name, cond, detail) => {
   if (!cond) failures++;
   return cond;
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const text = (r) => (r && r.content && r.content[0] && r.content[0].text) || '';
 
-// Every process under root, from /proc. RSS in MB, CPU as ticks so far.
-function tree(root) {
-  const kids = new Map();
-  const stat = new Map();
-  for (const d of fs.readdirSync('/proc')) {
-    if (!/^\d+$/.test(d)) continue;
-    try {
-      const raw = fs.readFileSync('/proc/' + d + '/stat', 'utf8');
-      const f = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
-      const ppid = Number(f[1]);
-      stat.set(Number(d), { ticks: Number(f[11]) + Number(f[12]), rssPages: Number(f[21]) });
-      if (!kids.has(ppid)) kids.set(ppid, []);
-      kids.get(ppid).push(Number(d));
-    } catch (e) { /* the process exited */ }
-  }
-  const all = [];
-  const walk = (p) => { all.push(p); for (const c of kids.get(p) || []) walk(c); };
-  walk(root);
-  const page = 4096 / (1024 * 1024);
-  let rss = 0, ticks = 0;
-  for (const p of all) { const s = stat.get(p); if (s) { rss += s.rssPages * page; ticks += s.ticks; } }
-  return { pids: all.length, rssMb: Math.round(rss), ticks };
-}
-
-// Every pid under root, root included.
-function procsUnder(root) {
-  const kids = new Map();
-  for (const d of fs.readdirSync('/proc')) {
-    if (!/^\d+$/.test(d)) continue;
-    try {
-      const raw = fs.readFileSync('/proc/' + d + '/stat', 'utf8');
-      const ppid = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
-      if (!kids.has(ppid)) kids.set(ppid, []);
-      kids.get(ppid).push(Number(d));
-    } catch (e) { /* the process exited */ }
-  }
-  const all = [];
-  const walk = (p) => { all.push(p); for (const c of kids.get(p) || []) walk(c); };
-  walk(root);
-  return all;
-}
-
-function alive(pid) {
-  try {
-    // A zombie still answers kill 0; it holds no browser and no seat.
-    return !/^\S+ \(.*\) Z/.test(fs.readFileSync('/proc/' + pid + '/stat', 'utf8'));
-  } catch (e) { return false; }
-}
-
-async function usage(pid, ms) {
-  const a = tree(pid);
-  await sleep(ms);
-  const b = tree(pid);
-  const hz = 100;
-  return { processes: b.pids, rss_mb: b.rssMb, cpu_pct: Math.round(((b.ticks - a.ticks) / hz) / (ms / 1000) * 100) };
-}
-
-// A fake microphone that plays a loud tone for 2s, then 1.2s of quiet, so
-// the synthetic speech-to-text hears one line per burst.
-const TONE = `(() => {
-  const md = navigator.mediaDevices;
-  if (!md || !md.getUserMedia) return;
-  const orig = md.getUserMedia.bind(md);
-  md.getUserMedia = async (c) => {
-    const s = await orig(c);
-    if (!c || !c.audio) return s;
-    const ac = new AudioContext();
-    const o = ac.createOscillator(); o.frequency.value = 440;
-    const g = ac.createGain(); g.gain.value = 0;
-    const d = ac.createMediaStreamDestination();
-    o.connect(g); g.connect(d); o.start();
-    let on = false;
-    setInterval(() => { ac.resume(); on = !on; g.gain.value = on ? 0.6 : 0; }, 1600);
-    for (const t of s.getAudioTracks()) { s.removeTrack(t); t.stop(); }
-    s.addTrack(d.stream.getAudioTracks()[0]);
-    return s;
-  };
-})();`;
-
 async function person(name, slot) {
-  const args = ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'];
   const ws = HUMAN_WS[slot];
-  const browser = ws
-    ? await chromium.connect(ws, { headers: { 'x-playwright-launch-options': JSON.stringify({ headless: true, args }) }, timeout: 60000 })
-    : await chromium.launch({ headless: true, args });
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, permissions: ['camera', 'microphone'] });
-  await ctx.addInitScript({ content: 'try{localStorage.setItem("gifos_name",' + JSON.stringify(name) + ');localStorage.setItem("gifos_meet_bar","0");}catch(e){}' });
-  await ctx.addInitScript({ content: TONE });
-  const page = await ctx.newPage();
-  page.on('pageerror', (e) => say('  [' + name + '] ' + e.message));
-  return { name, browser, page, where: ws ? 'remote ' + (slot + 1) : 'local' };
-}
-
-async function botTiles(page) {
-  return page.locator('.tile', { has: page.locator('.botbadge') }).allInnerTexts().catch(() => []);
-}
-
-async function waitTiles(page, want, ms) {
-  const end = Date.now() + ms;
-  let tiles = [];
-  while (Date.now() < end) {
-    tiles = await botTiles(page);
-    if (want(tiles)) return { ok: true, tiles };
-    await sleep(500);
-  }
-  return { ok: false, tiles };
+  const browser = await peopleBrowser(ws);
+  const p = await personIn(browser, name, say);
+  return { ...p, browser, where: ws ? 'remote ' + (slot + 1) : 'local' };
 }
 
 async function main() {

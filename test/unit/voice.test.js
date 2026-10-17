@@ -350,3 +350,36 @@ test('captions are not stored twice, and the bot line is spoken', async () => {
   assert.equal(live.tail(id, 0).lines.filter((l) => l.kind === 'speech').length, 3);
   assert.equal(live.tail(id, 0).lines.filter((l) => l.kind === 'spoken').length, 1);
 });
+
+// A busy Chromium can take longer than pollMs to hand back a caption snapshot.
+// setInterval must not stack a second transcript call on the first: with 8
+// rooms at 500ms each, calls pile up behind the page (or behind a stuck
+// worker's 60s call limit) and old snapshots land after new ones.
+test('caption poll waits for the last transcript call before the next one', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-poll-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const room = { meeting_id: 'm-poll', state: 'live', session_id: 's-poll' };
+  const meetings = { get: (id) => (id === room.meeting_id ? room : null) };
+  let inFlight = 0;
+  let most = 0;
+  let calls = 0;
+  const bot = {
+    async transcript() {
+      calls++;
+      inFlight++;
+      most = Math.max(most, inFlight);
+      await delay(150);
+      inFlight--;
+      return 'Ada: line ' + calls;
+    },
+  };
+  const live = new LiveTranscript(home);
+  const captions = watchCaptions({ meetings, bot, live, intervalMs: 10, botName: 'poll-test' });
+  t.after(() => captions.stopAll());
+  captions.start(room);
+  await delay(700);
+  captions.stopAll();
+  await delay(200);
+  assert.equal(most, 1, 'transcript calls in flight at once');
+  assert.ok(calls >= 3, 'the poll kept going: ' + calls + ' calls');
+});

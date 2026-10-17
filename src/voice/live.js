@@ -145,23 +145,38 @@ export class LiveTranscript {
 // Polls Meeting Bot's caption text while a meeting is live.
 export function watchCaptions({ meetings, bot, live, intervalMs, botName, scrubText }) {
   const timers = new Map();
+  // One transcript call per poll at a time: a slow page (or a stuck
+  // worker's call limit) must not stack a call every interval. Keyed by
+  // timer, so a restarted poll (reseat) does not wait on the old call.
+  const busy = new Map();
   const gap = intervalMs > 0 ? intervalMs : 500;
   const hide = typeof scrubText === 'function' ? scrubText : (s) => s;
-  async function tick(id) {
+  async function poll(id, timer) {
     const m = meetings.get(id);
     if (!m || m.state !== 'live' || !m.session_id) return;
+    const session = m.session_id;
     try {
-      const text = hide(await bot.transcript(m.session_id));
-      live.ingestCaption(m.meeting_id, text, botName);
+      const text = hide(await bot.transcript(session));
+      // Stopped, restarted or reseated while the call was out: drop it.
+      const now = meetings.get(id);
+      if (timers.get(id) !== timer || !now || now.state !== 'live' || now.session_id !== session) return;
+      live.ingestCaption(id, text, botName);
     } catch (e) { /* the next poll retries */ }
+  }
+  function tick(id, timer) {
+    if (busy.has(timer)) return busy.get(timer);
+    const p = poll(id, timer).finally(() => busy.delete(timer));
+    busy.set(timer, p);
+    return p;
   }
   return {
     start(meeting) {
-      this.stop(meeting.meeting_id);
-      const timer = setInterval(() => { tick(meeting.meeting_id); }, gap);
+      const id = meeting.meeting_id;
+      this.stop(id);
+      const timer = setInterval(() => { tick(id, timer); }, gap);
       if (timer.unref) timer.unref();
-      timers.set(meeting.meeting_id, timer);
-      return tick(meeting.meeting_id);
+      timers.set(id, timer);
+      return tick(id, timer);
     },
     stop(id) {
       const timer = timers.get(id);

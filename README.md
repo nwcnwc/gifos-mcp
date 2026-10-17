@@ -137,7 +137,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_CONVERSATION_VOICE` | `local` when a key or URL is set, otherwise `none` | `none`, `grok` (Grok Voice), or `local` (the configured LLM, then Kokoro). Meet Bot owns the voice. |
 | `GIFOS_RESPOND_TO_COMMAND` | on | `0` tells Meet Bot not to answer commands it hears. |
 | `GIFOS_VOICE` | follows the settings above | `0` forces conversation voice `none`. Tailing the transcript still works. |
-| `GIFOS_TRANSCRIPT_POLL_MS` | `500` | How often captions are copied from Meet Bot into the live transcript. |
+| `GIFOS_TRANSCRIPT_POLL_MS` | `500` | How often captions are copied from Meet Bot into the live transcript. A room waits for its last copy to answer before asking again. |
 | `GIFOS_TTS_ENGINE` | `kokoro` | `auto` and `kokoro` run Kokoro in this process (voice `af_heart`) and the host binding answers the GifOS `tts` role. The first start downloads the weights into `GIFOS_MCP_HOME/kokoro`. `none` does not. |
 | `GIFOS_TTS_APP` | empty | A store provider app to install and assign for speech instead of Kokoro in this process. |
 | `GIFOS_TTS_VOICE` | `af_heart` | Kokoro voice name, passed through with local voice. |

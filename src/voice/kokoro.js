@@ -38,6 +38,10 @@ export function installKokoro({ home, voice, host } = {}) {
 // writes its own part file and the last rename wins with a whole file.
 // Keys are the remote URLs; files keep the old <model>/<file> layout, so
 // weights downloaded before this change are still found.
+// A part file left by a process that died (a worker killed when its boot
+// ran out of time) is kept: the next match() claims it and asks only for
+// the missing bytes, so a slow link gets further on each start instead of
+// starting from zero. A bad join still fails the load, which fetches anew.
 export function weightsCache(dir, host) {
   const base = String(host).replace(/\/+$/, '') + '/';
   const fileFor = (key) => {
@@ -51,7 +55,8 @@ export function weightsCache(dir, host) {
   return {
     async match(key) {
       const file = fileFor(key);
-      if (!file || !fs.existsSync(file)) return undefined;
+      if (!file) return undefined;
+      if (!fs.existsSync(file) && !(await resume(key, file))) return undefined;
       const bytes = await fs.promises.readFile(file);
       return new Response(bytes, { headers: { 'content-length': String(bytes.length) } });
     },
@@ -59,40 +64,107 @@ export function weightsCache(dir, host) {
       const file = fileFor(key);
       if (!file) return;
       await fs.promises.mkdir(path.dirname(file), { recursive: true });
-      const part = file + '.' + process.pid + '.part';
       const total = parseInt(response.headers.get('content-length') || '0', 10);
-      const out = fs.createWriteStream(part);
-      try {
-        const reader = response.body.getReader();
-        let loaded = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          await new Promise((resolve, reject) => out.write(value, (e) => (e ? reject(e) : resolve())));
-          loaded += value.length;
-          if (progress) progress({ progress: total ? (loaded / total) * 100 : 0, loaded, total });
-        }
-        await new Promise((resolve, reject) => out.end((e) => (e ? reject(e) : resolve())));
-        if (total && loaded !== total) throw new Error('Kokoro: ' + path.basename(file) + ' ended at ' + loaded + ' of ' + total + ' bytes.');
-        await fs.promises.rename(part, file);
-      } catch (e) {
-        out.destroy();
-        await fs.promises.rm(part, { force: true });
-        throw e;
-      }
+      await writePart(file, response, 0, total, progress);
     },
   };
 }
 
-// Part files left by a process that was killed while downloading.
+// Streams response into <file>.<pid>.part from byte `from` on, then renames
+// it into place. A failure removes the part; a kill leaves it for resume().
+async function writePart(file, response, from, total, progress) {
+  const part = file + '.' + process.pid + '.part';
+  const out = fs.createWriteStream(part, from ? { flags: 'a' } : {});
+  try {
+    const reader = response.body.getReader();
+    let loaded = from;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await new Promise((resolve, reject) => out.write(value, (e) => (e ? reject(e) : resolve())));
+      loaded += value.length;
+      if (progress) progress({ progress: total ? (loaded / total) * 100 : 0, loaded, total });
+    }
+    await new Promise((resolve, reject) => out.end((e) => (e ? reject(e) : resolve())));
+    if (total && loaded !== total) throw new Error('Kokoro: ' + path.basename(file) + ' ended at ' + loaded + ' of ' + total + ' bytes.');
+    await fs.promises.rename(part, file);
+  } catch (e) {
+    out.destroy();
+    await fs.promises.rm(part, { force: true });
+    throw e;
+  }
+}
+
+// Part files of `file` whose process is gone, biggest first.
+function deadParts(file) {
+  const dir = path.dirname(file);
+  if (!fs.existsSync(dir)) return [];
+  const name = path.basename(file);
+  const found = [];
+  for (const entry of fs.readdirSync(dir)) {
+    if (!entry.startsWith(name + '.')) continue;
+    const m = /^\.(\d+)\.part$/.exec(entry.slice(name.length));
+    if (!m || Number(m[1]) === process.pid || alive(Number(m[1]))) continue;
+    const p = path.join(dir, entry);
+    try { found.push({ path: p, size: fs.statSync(p).size }); } catch { /* gone meanwhile */ }
+  }
+  return found.sort((a, b) => b.size - a.size);
+}
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+// Finishes the biggest dead part of file with a Range request. Several
+// workers may start at once: the rename claims a part for one of them, and
+// the rest download as usual. Returns true when file is in place.
+async function resume(key, file) {
+  const parts = deadParts(file);
+  const mine = file + '.' + process.pid + '.part';
+  let from = -1;
+  for (const p of parts) {
+    if (from < 0) {
+      try { await fs.promises.rename(p.path, mine); from = p.size; continue; } catch { continue; }
+    }
+    await fs.promises.rm(p.path, { force: true });
+  }
+  if (from < 0) return false;
+  try {
+    const res = from > 0 ? await fetch(key, { headers: { Range: 'bytes=' + from + '-' } }) : null;
+    const range = res && res.status === 206 && /^bytes (\d+)-\d+\/(\d+)$/.exec(res.headers.get('content-range') || '');
+    if (range && Number(range[1]) === from) {
+      log('Kokoro: resuming ' + path.basename(file) + ' at ' + from + ' of ' + range[2] + ' bytes');
+      await writePart(file, res, from, Number(range[2]));
+      return true;
+    }
+    if (res && res.status === 200) {
+      // No Range support: this answer is the whole file.
+      await writePart(file, res, 0, parseInt(res.headers.get('content-length') || '0', 10));
+      return true;
+    }
+    if (res && res.body) await res.body.cancel().catch(() => {});
+  } catch (e) {
+    log('Kokoro: could not resume ' + path.basename(file) + ' (' + oneLine(e) + '); downloading it again');
+  }
+  await fs.promises.rm(mine, { force: true });
+  return false;
+}
+
+// Part files left by a process that was killed while downloading: the
+// biggest of each file is kept for resume(), the rest are dropped, and so
+// is any part of a file that is already whole.
 function dropDeadParts(dir) {
   if (!fs.existsSync(dir)) return;
+  const kept = new Set();
   for (const rel of fs.readdirSync(dir, { recursive: true })) {
-    const m = /\.(\d+)\.part$/.exec(String(rel));
+    const m = /^(.+)\.(\d+)\.part$/.exec(String(rel));
     if (!m) continue;
-    let alive = true;
-    try { process.kill(Number(m[1]), 0); } catch (e) { alive = e.code === 'EPERM'; }
-    if (!alive || Number(m[1]) === process.pid) fs.rmSync(path.join(dir, String(rel)), { force: true });
+    const file = path.join(dir, m[1]);
+    if (kept.has(file)) continue;
+    kept.add(file);
+    const parts = deadParts(file);
+    const keep = fs.existsSync(file) ? 0 : 1;
+    for (const p of parts.slice(keep)) fs.rmSync(p.path, { force: true });
   }
 }
 

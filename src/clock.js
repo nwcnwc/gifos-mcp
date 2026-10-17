@@ -45,16 +45,22 @@ export function createClock(deps) {
   // A room whose join took down the workers it reached (stage B) is not
   // joined again until its wait is over: one minute, doubling to 30. Joining
   // it every tick would drop every other meeting on those workers each time.
-  const crashed = new Map(); // order key or meeting id -> { count, at }
-  const crashWaits = (key, now) => crashed.has(key) && now < crashed.get(key).at;
-  function joinFailed(key, meetingId, e, now) {
+  // Keyed by room, so a start_meeting by hand waits on the same clock.
+  const crashed = new Map(); // room -> { count, at }
+  const crashLeft = (room, now) => (crashed.has(room) ? Math.max(0, crashed.get(room).at - now) : 0);
+  const crashWaits = (room, now) => crashLeft(room, now) > 0;
+  function crashFound(room, now) {
+    const count = (crashed.has(room) ? crashed.get(room).count : 0) + 1;
+    const ms = Math.min(CRASH_MAX_MS, crashMs * 2 ** (count - 1));
+    crashed.set(room, { count, at: now + ms });
+    return ms;
+  }
+  function joinFailed(room, meetingId, e, now) {
     if (!(e && e.code === 'worker_died')) {
       emit('meeting.error', meetingId, { text: 'The room could not be entered.' });
       return;
     }
-    const count = (crashed.has(key) ? crashed.get(key).count : 0) + 1;
-    const ms = Math.min(CRASH_MAX_MS, crashMs * 2 ** (count - 1));
-    crashed.set(key, { count, at: now + ms });
+    const ms = crashFound(room, now);
     emit('meeting.error', meetingId, { text: 'The room crashed the bot; trying again in ' + Math.ceil(ms / 60000) + ' min.', retry_in_ms: ms });
   }
 
@@ -149,13 +155,13 @@ export function createClock(deps) {
       const seated = meeting && meeting.state === 'live';
       if ((order.phase === 'upcoming' || order.phase === 'waiting_for_capacity') && now >= end) {
         const reason = order.phase === 'waiting_for_capacity' ? 'capacity' : 'late';
-        crashed.delete(orderKey(order));
+        crashed.delete(order.room);
         deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'missed', missed_reason: reason });
         emit('schedule.missed', order.meeting_id, { ...briefOrder(order), reason });
         continue;
       }
       if ((order.phase === 'upcoming' || order.phase === 'waiting_for_capacity') && now >= joinAt && now < end) {
-        if (crashWaits(orderKey(order), now)) continue;
+        if (crashWaits(order.room, now)) continue;
         const full = fullReason();
         if (full) {
           wait(order, full);
@@ -166,18 +172,18 @@ export function createClock(deps) {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
           waited.delete(orderKey(order));
-          crashed.delete(orderKey(order));
+          crashed.delete(order.room);
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
           if (isNoSeat(e)) wait(order, 'worker');
-          else joinFailed(orderKey(order), order.meeting_id, e, now);
+          else joinFailed(order.room, order.meeting_id, e, now);
         }
         continue;
       }
       const restarted = (order.phase === 'live' || order.phase === 'overrun') && !seated;
       if (restarted) {
-        if (crashWaits(orderKey(order), now)) continue;
+        if (crashWaits(order.room, now)) continue;
         const full = fullReason();
         if (full) {
           wait(order, full);
@@ -187,12 +193,12 @@ export function createClock(deps) {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
           waited.delete(orderKey(order));
-          crashed.delete(orderKey(order));
+          crashed.delete(order.room);
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: now >= end ? 'overrun' : 'live', meeting_id: joined.meeting_id, overrun_at: now >= end ? new Date(now).toISOString() : '' });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
           if (isNoSeat(e)) wait(order, 'worker');
-          else joinFailed(orderKey(order), order.meeting_id, e, now);
+          else joinFailed(order.room, order.meeting_id, e, now);
         }
       }
       const fresh = deps.schedule.get(order.occurrence_id || order.schedule_id) || order;
@@ -221,16 +227,16 @@ export function createClock(deps) {
     if (typeof deps.reseat === 'function') {
       for (const m of deps.meetings.all()) {
         if (!m.reseat || m.state !== 'scheduled' || deps.schedule.forMeeting(m.meeting_id)) continue;
-        if (crashWaits(m.meeting_id, now)) continue;
+        if (crashWaits(m.room, now)) continue;
         // meeting.disconnected already told the owner; no seat is a quiet wait.
         if (fullReason()) break;
         try {
           const joined = await deps.reseat(m);
           if (!joined || joined.state !== 'live') continue; // ended while joining
-          crashed.delete(m.meeting_id);
+          crashed.delete(m.room);
           emit('meeting.joined', joined.meeting_id, { topic: joined.topic, link: joined.link, state: 'live', reason: 'worker' });
         } catch (e) {
-          if (!isNoSeat(e)) joinFailed(m.meeting_id, m.meeting_id, e, now);
+          if (!isNoSeat(e)) joinFailed(m.room, m.meeting_id, e, now);
         }
       }
     }
@@ -240,6 +246,11 @@ export function createClock(deps) {
   return {
     tick,
     emitCapacity,
+    // For joins by hand: ms until a room that crashed the bot may be tried,
+    // record a new crash (returns its wait), forget it after a good join.
+    crashLeft,
+    crashFound,
+    crashCleared: (room) => crashed.delete(room),
     picture(now = Date.now()) {
       return capacityPicture({
         orders: deps.schedule.all(),

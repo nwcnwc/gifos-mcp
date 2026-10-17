@@ -108,6 +108,23 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return updated;
   }
 
+  // A join by hand waits out the clock's wait on a room that crashed the
+  // bot, and a crash it finds starts that wait, so asking again at once does
+  // not take down the workers (and every meeting on them) a second time.
+  async function enterByHand(m, password) {
+    const left = clock.crashLeft(m.room, Date.now());
+    if (left) throw new Error('The room crashed the bot; it can be tried again in ' + Math.ceil(left / 60000) + ' min.');
+    try {
+      const joined = await enter(m, password);
+      if (joined && joined.state === 'live') clock.crashCleared(m.room);
+      return joined;
+    } catch (e) {
+      if (!(e && e.code === 'worker_died')) throw e;
+      const ms = clock.crashFound(m.room, Date.now());
+      throw new Error('The room crashed the bot; it can be tried again in ' + Math.ceil(ms / 60000) + ' min.');
+    }
+  }
+
   function rememberJoin(meeting, password, topic) {
     const existing = schedule.all().find((o) => o.room === meeting.room && o.phase !== 'cancelled' && o.phase !== 'ended' && o.phase !== 'missed' && o.phase !== 'left_early' && o.phase !== 'series');
     if (existing) {
@@ -174,7 +191,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
     if (m.state === 'live') return ok({ ...publicView(m), note: 'Already live.' });
-    return ok(publicView(await enter(m)));
+    return ok(publicView(await enterByHand(m)));
   }));
 
   server.registerTool('join_meeting', {
@@ -205,7 +222,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     }
     if (!m) m = meetings.add({ topic: topic || '', room, link: clean });
     else if (m.link !== clean) meetings.update(m.meeting_id, { link: clean, topic: topic || m.topic });
-    const joined = await enter(meetings.get(m.meeting_id), password);
+    const joined = await enterByHand(meetings.get(m.meeting_id), password);
     if (password) rememberJoin(joined, password, topic);
     emit({ type: 'meeting.joined', meeting_id: joined.meeting_id, data: { topic: joined.topic, link: joined.link, state: 'live' } });
     return ok(publicView(joined));

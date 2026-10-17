@@ -6,7 +6,12 @@
 //
 // Serves the gifos-app checkout on 127.0.0.1:19510 with the synthetic speech
 // apps, spawns bin/gifos-mcp.js with one worker (the bot in-process, as in
-// stage A), transcription on and conversation voice off. For each step n in
+// stage A), transcription on and conversation voice off.
+//
+// E2E_STT=whisper swaps the synthetic speech-to-text for Offline Captions
+// (Whisper, the real default): each person's mic plays E2E_SPEECH_WAV (served
+// by the site, so remote browsers need no copy) and a room counts as heard
+// when its own person's line matches E2E_EXPECT. For each step n in
 // E2E_ROOMS: n meetings are live -> status shows n bot sessions -> cost of
 // the bot alone -> one person joins each room and talks -> each transcript
 // holds its own person and nobody else -> cost with everyone talking. Cost
@@ -25,7 +30,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { packApp, startSite } from './site.js';
 import { SYNTH_LINE, SYNTH_STT, SYNTH_TTS, SYNTH_LLM } from './synth.js';
-import { sleep, procsUnder, usage, peopleBrowser, personIn, waitTiles } from './people.js';
+import { sleep, procsUnder, usage, peopleBrowser, personIn, waitTiles, SPEECH_PATH } from './people.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -38,6 +43,9 @@ const STEPS = String(process.env.E2E_ROOMS || '1,4,8').split(',').map(Number).fi
 const SAMPLE_MS = Number(process.env.E2E_SAMPLE_MS || 10000);
 const WAIT_MS = Number(process.env.E2E_TRANSCRIPT_WAIT_MS || 180000);
 const CALL = { timeout: 600000 }; // a first join installs apps and starts a browser
+const STT = process.env.E2E_STT || 'synthetic';              // synthetic | whisper
+const SPEECH = process.env.E2E_SPEECH_WAV ? path.resolve(process.env.E2E_SPEECH_WAV) : '';
+const EXPECT = STT === 'whisper' ? new RegExp(process.env.E2E_EXPECT || '[A-Za-z]{3,}', 'i') : null;
 const BOT = { name: 'load-e2e-bot', password: 'load-e2e-pass-' + process.pid };
 
 let failures = 0;
@@ -74,20 +82,25 @@ async function main() {
     console.error('e2e setup: set GIFOS_APP_DIR to a gifos-app checkout (0.9.23 or later) that lists apps/meeting-bot');
     process.exit(2);
   }
+  if (STT !== 'synthetic' && STT !== 'whisper') { console.error('e2e setup: E2E_STT is synthetic or whisper'); process.exit(2); }
+  if (STT === 'whisper' && !(SPEECH && fs.existsSync(SPEECH))) { console.error('e2e setup: E2E_STT=whisper needs E2E_SPEECH_WAV, a WAV of someone speaking'); process.exit(2); }
   if (!STEPS.length) { console.error('e2e setup: E2E_ROOMS must list room counts, e.g. 1,4,8'); process.exit(2); }
   const max = STEPS[STEPS.length - 1];
   fs.mkdirSync(PROOF, { recursive: true });
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-load-'));
   const logo = fs.readFileSync(path.join(REPO, 'assets', 'logo-512.png'));
   const extra = [];
-  for (const [slug, files] of [['stt-synthetic', SYNTH_STT], ['tts-synthetic', SYNTH_TTS], ['llm-synthetic', SYNTH_LLM]]) {
+  const synth = [['tts-synthetic', SYNTH_TTS], ['llm-synthetic', SYNTH_LLM]];
+  if (STT === 'synthetic') synth.unshift(['stt-synthetic', SYNTH_STT]);
+  for (const [slug, files] of synth) {
     const dir = path.join(work, slug);
     fs.mkdirSync(dir);
     for (const [n, t] of Object.entries(files)) fs.writeFileSync(path.join(dir, n), t);
     extra.push({ slug, ...(await packApp(dir, SITE_DIR, ['manifest.json', 'index.html'])), cover: logo });
   }
-  const site = await startSite({ siteDir: SITE_DIR, port: SITE_PORT, extraApps: extra });
-  say('site ' + BASE + '; steps ' + STEPS.join(',') + '; people: ' + (HUMAN_WS.length ? HUMAN_WS.length + ' remote browser(s)' : 'one local browser') + '; ' + os.cpus().length + ' cores, ' + Math.round(os.totalmem() / 2 ** 30) + ' GB');
+  const site = await startSite({ siteDir: SITE_DIR, port: SITE_PORT, extraApps: extra,
+    files: STT === 'whisper' ? { [SPEECH_PATH]: { type: 'audio/wav', body: fs.readFileSync(SPEECH) } } : {} });
+  say('site ' + BASE + '; STT ' + STT + (STT === 'whisper' ? ' (' + path.basename(SPEECH) + ', expect ' + EXPECT + ')' : '') + '; steps ' + STEPS.join(',') + '; people: ' + (HUMAN_WS.length ? HUMAN_WS.length + ' remote browser(s)' : 'one local browser') + '; ' + os.cpus().length + ' cores, ' + Math.round(os.totalmem() / 2 ** 30) + ' GB');
 
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -101,7 +114,7 @@ async function main() {
       GIFOS_BOT_PASSWORD: BOT.password,
       GIFOS_WORKERS: '1',
       GIFOS_MAX_MEETINGS: String(max),
-      GIFOS_STT_APP: 'stt-synthetic',
+      GIFOS_STT_APP: STT === 'whisper' ? 'offline-stt-whisper' : 'stt-synthetic',
       GIFOS_TTS_APP: 'tts-synthetic',
       GIFOS_TTS_ENGINE: 'kokoro',
       GIFOS_LLM_APP: 'llm-synthetic',
@@ -149,7 +162,7 @@ async function main() {
       // ---- one person talking in each room ----
       const people = [];
       for (let i = 0; i < n; i++) {
-        const p = await personIn(browsers[i % browsers.length], 'Person ' + (i + 1), say);
+        const p = await personIn(browsers[i % browsers.length], 'Person ' + (i + 1), say, STT === 'whisper');
         people.push(p);
         await p.page.goto(rooms[i].link + '&DEBUG=on', { waitUntil: 'domcontentloaded', timeout: 90000 });
       }
@@ -165,6 +178,7 @@ async function main() {
 
       const heard = new Array(n).fill(false);
       const others = new Array(n).fill(false);
+      const sample = new Array(n).fill('');
       const end = Date.now() + WAIT_MS;
       while (Date.now() < end && heard.some((h) => !h)) {
         for (let i = 0; i < n; i++) {
@@ -172,17 +186,20 @@ async function main() {
           await call('get_transcript', { meeting_id: rooms[i].meeting_id }).catch(() => null);
           const lines = (await call('tail_lines', { meeting_id: rooms[i].meeting_id })).lines || [];
           const speech = lines.filter((l) => l.kind === 'speech');
-          heard[i] = speech.some((l) => l.speaker === people[i].name && l.text.includes(SYNTH_LINE));
+          const mine = speech.find((l) => l.speaker === people[i].name && (EXPECT ? EXPECT.test(l.text) : l.text.includes(SYNTH_LINE)));
+          heard[i] = !!mine;
+          if (mine) sample[i] = mine.text;
           others[i] = speech.some((l) => l.speaker !== people[i].name);
         }
         if (heard.some((h) => !h)) await sleep(3000);
       }
       check('the bot hears all ' + n + ' room(s), each transcript only its own person', heard.every(Boolean) && !others.some(Boolean),
         JSON.stringify({ heard, others }));
+      say('heard, room 1: ' + JSON.stringify(sample[0]) + (n > 1 ? '; room ' + n + ': ' + JSON.stringify(sample[n - 1]) : ''));
       const talking = await cost(transport.pid);
       say('cost, ' + n + ' room(s), one person talking in each: ' + JSON.stringify(talking));
       results.push({ rooms: n, alone, talking, heard: heard.filter(Boolean).length });
-      fs.writeFileSync(path.join(PROOF, 'load.json'), JSON.stringify({ cores: os.cpus().length, mem_gb: Math.round(os.totalmem() / 2 ** 30), sample_ms: SAMPLE_MS, results }, null, 2) + '\n');
+      fs.writeFileSync(path.join(PROOF, 'load.json'), JSON.stringify({ stt: STT, cores: os.cpus().length, mem_gb: Math.round(os.totalmem() / 2 ** 30), sample_ms: SAMPLE_MS, results }, null, 2) + '\n');
       for (const p of people) await p.ctx.close().catch(() => {});
     }
 

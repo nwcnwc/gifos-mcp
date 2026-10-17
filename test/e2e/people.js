@@ -1,6 +1,7 @@
 // Shared by the live e2e runs: process-tree cost from /proc, and "people"
 // in Chromium (local or on another machine) whose fake microphone plays a
-// tone the synthetic speech-to-text hears as one line per burst.
+// tone the synthetic speech-to-text hears as one line per burst, or a speech
+// clip for Whisper.
 import fs from 'node:fs';
 import { chromium } from 'playwright';
 
@@ -80,6 +81,36 @@ export const TONE = `(() => {
   };
 })();`;
 
+// A fake microphone that plays the site's SPEECH_PATH clip, then 3s of quiet,
+// over and over. The clip comes from the page's own origin, so a browser on
+// another machine needs no file of its own.
+export const SPEECH_PATH = '/e2e/speech.wav';
+export const SPEECH = `(() => {
+  const md = navigator.mediaDevices;
+  if (!md || !md.getUserMedia) return;
+  const orig = md.getUserMedia.bind(md);
+  md.getUserMedia = async (c) => {
+    const s = await orig(c);
+    if (!c || !c.audio) return s;
+    const ac = new AudioContext();
+    const d = ac.createMediaStreamDestination();
+    const clip = fetch(${JSON.stringify(SPEECH_PATH)}).then((r) => r.arrayBuffer()).then((b) => ac.decodeAudioData(b));
+    const play = async () => {
+      const buf = await clip;
+      ac.resume();
+      const src = ac.createBufferSource();
+      src.buffer = buf;
+      src.connect(d);
+      src.onended = () => setTimeout(play, 3000);
+      src.start();
+    };
+    play();
+    for (const t of s.getAudioTracks()) { s.removeTrack(t); t.stop(); }
+    s.addTrack(d.stream.getAudioTracks()[0]);
+    return s;
+  };
+})();`;
+
 export const MEDIA_ARGS = ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'];
 
 // A browser for people: chromium.connect(ws) when ws is set, else local.
@@ -89,11 +120,12 @@ export async function peopleBrowser(ws) {
     : chromium.launch({ headless: true, args: MEDIA_ARGS });
 }
 
-// One person: its own context (name, mic) in the given browser.
-export async function personIn(browser, name, log) {
+// One person: its own context (name, mic) in the given browser. speech: the
+// mic plays SPEECH instead of TONE.
+export async function personIn(browser, name, log, speech = false) {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, permissions: ['camera', 'microphone'] });
   await ctx.addInitScript({ content: 'try{localStorage.setItem("gifos_name",' + JSON.stringify(name) + ');localStorage.setItem("gifos_meet_bar","0");}catch(e){}' });
-  await ctx.addInitScript({ content: TONE });
+  await ctx.addInitScript({ content: speech ? SPEECH : TONE });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => log('  [' + name + '] ' + e.message));
   return { name, ctx, page };

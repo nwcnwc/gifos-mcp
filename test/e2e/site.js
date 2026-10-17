@@ -60,8 +60,9 @@ export function listingFor(slug, manifest, listing, bytes, cover) {
   };
 }
 
-export async function startSite({ siteDir, port, extraApps }) {
-  const overlay = new Map(); // url path -> { type, body }
+// files: extra url path -> { type, body } served as they are.
+export async function startSite({ siteDir, port, extraApps, files = {} }) {
+  const overlay = new Map(Object.entries(files)); // url path -> { type, body }
   const index = JSON.parse(fs.readFileSync(path.join(siteDir, 'apps', 'index.json'), 'utf8'));
   for (const a of extraApps) {
     const app = listingFor(a.slug, a.manifest, a.listing, a.bytes, '/apps/' + a.slug + '/cover.png');

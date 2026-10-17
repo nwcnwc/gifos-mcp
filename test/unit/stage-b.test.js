@@ -685,7 +685,8 @@ test('a late join whose leave fails keeps its seat and is left again on its own,
 });
 
 test('a join that timed out and has not landed yet keeps its seat, so the worker is not given more rooms than its budget', { timeout: 10000 }, async () => {
-  makePool({ workers: 1, rooms: 1, callMs: 2000, joinMs: 200 });
+  makePool({ workers: 1, rooms: 1, callMs: 2000, joinMs: 200, lateJoinMs: 60000 });
+  // lateJoinMs: no list check during this test; the tests below cover it.
   await pool.ensureStarted();
   await pool.workers[0].call('holdJoins');
   await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /did not answer join within 200ms/);

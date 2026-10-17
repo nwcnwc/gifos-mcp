@@ -17,6 +17,9 @@
 //   may still be walking into the room. One that lands is left at once.
 //   Until that leave works the room keeps its seat, and it is left again
 //   every leaveRetryMs, so the bot is not stranded in a room nobody can reach.
+//   One that has not answered after lateJoinMs is checked against Meet Bot's
+//   own room list: a room the pool does not hold is left, and the seat is
+//   freed, so a join that never answers does not hold it until the worker dies.
 // - A leave that fails or times out keeps the room on its worker, so the
 //   seat stays taken and a second leave can still reach it. A late leave
 //   that lands, or Meet Bot saying the room is gone, frees it.
@@ -83,6 +86,7 @@ class Worker {
     this.stray = new Map();   // late joins still to leave: local id -> { timer, told }
     this.reserved = 0;        // joins in flight
     this.lateJoins = 0;       // joins that timed out and have not answered yet
+    this.lateTimer = null;    // the next check of those joins against Meet Bot's list
     this.booting = null;
     this.voice = null;
     this.voicing = null;      // { settings, promise } for the push in flight
@@ -204,6 +208,8 @@ class Worker {
     this.voiceTimer = null;
     this.late.clear();
     this.lateJoins = 0;
+    clearTimeout(this.lateTimer);
+    this.lateTimer = null;
     this.clearStray();        // the process and its browser are gone
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Worker ' + this.index + ' stopped: ' + why)); }
     this.pending.clear();
@@ -226,12 +232,12 @@ class Worker {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
-        this.late.set(id, { method, args });
-        if (method === 'join') this.lateJoins++;
+        this.late.set(id, { method, args, settled: false });
+        if (method === 'join') { this.lateJoins++; this.checkLate(); }
         reject(new Error('Worker ' + this.index + ' did not answer ' + method + ' within ' + ms + 'ms.'));
       }, ms);
       timer.unref();
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { method, resolve, reject, timer });
       try { this.child.send({ type: 'call', id, method, args }); }
       catch (e) { clearTimeout(timer); this.pending.delete(id); reject(e); }
     });
@@ -241,15 +247,49 @@ class Worker {
   // a late join, so leave it rather than keep a seat no one can reach. A
   // late leave that worked frees the seat it kept.
   landedLate(msg) {
-    const { method, args } = this.late.get(msg.id);
+    const { method, args, settled } = this.late.get(msg.id);
     this.late.delete(msg.id);
-    if (method === 'join') this.lateJoins--;
+    if (method === 'join' && !settled) this.lateJoins--;
     if (method === 'leave' && (msg.ok || GONE_RE.test(msg.error || ''))) { this.rooms.delete(String(args[0])); this.dropStray(String(args[0])); return; }
     if (method !== 'join' || !msg.ok || msg.value == null) return;
     const local = String(msg.value);
+    // The list check may have found this room already.
+    if (this.rooms.has(local) || this.stray.has(local)) return;
     log('worker ' + this.index + ': a join landed after it timed out; leaving ' + local);
     this.stray.set(local, { timer: null, told: false });
     this.leaveStray(local);
+  }
+
+  // A late join holds its seat while the bot may still be walking in, but
+  // not for good. After lateJoinMs, Meet Bot's list says where the bot sits:
+  // a room the pool does not hold is a late join's, so it is left, and every
+  // late join asked about stops holding a seat. A join still inside its own
+  // time limit may already show in the list, so the check waits for it.
+  checkLate() {
+    if (this.lateTimer || ![...this.late.values()].some((l) => l.method === 'join' && !l.settled)) return;
+    const child = this.child;
+    this.lateTimer = setTimeout(async () => {
+      const again = () => { this.lateTimer = null; if (this.child === child) this.checkLate(); };
+      const joining = () => [...this.pending.values()].some((p) => p.method === 'join');
+      if (this.child !== child) return;
+      if (joining()) { again(); return; }
+      const asked = [...this.late.values()].filter((l) => l.method === 'join' && !l.settled);
+      let rows;
+      try { rows = await this.callWithin(this.pool.infoMs, 'list'); }
+      catch (e) { log('worker ' + this.index + ': could not check late joins: ' + ((e && e.message) || e)); again(); return; }
+      if (this.child !== child) return;
+      if (joining()) { again(); return; }
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const local = String((row && row.id) || '');
+        if (!local || this.rooms.has(local) || this.stray.has(local)) continue;
+        log('worker ' + this.index + ': a join that never answered left the bot in ' + local + '; leaving it');
+        this.stray.set(local, { timer: null, told: false });
+        this.leaveStray(local);
+      }
+      for (const l of asked) { if (!l.settled) { l.settled = true; this.lateJoins--; } }
+      again();
+    }, this.pool.lateJoinMs);
+    this.lateTimer.unref();
   }
 
   // One log line per stranded room, not one per retry.
@@ -341,6 +381,8 @@ class Worker {
     clearInterval(this.beat);
     clearTimeout(this.voiceTimer);
     this.voiceTimer = null;
+    clearTimeout(this.lateTimer);
+    this.lateTimer = null;
     this.clearStray();
     const exited = new Promise((r) => child.once('exit', r));
     try { child.send({ type: 'close' }); } catch (e) { /* already gone */ }
@@ -353,7 +395,7 @@ class Worker {
 export class WorkerPool {
   // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
   //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs, voiceRetryMs,
-  //         leaveRetryMs }
+  //         leaveRetryMs, lateJoinMs }
   constructor(cfg, creds, opts = {}) {
     this.cfg = cfg;
     this.creds = creds;
@@ -375,6 +417,8 @@ export class WorkerPool {
     this.infoMs = opts.infoMs > 0 ? opts.infoMs : 3000;
     this.voiceRetryMs = opts.voiceRetryMs > 0 ? opts.voiceRetryMs : 10000;
     this.leaveRetryMs = opts.leaveRetryMs > 0 ? opts.leaveRetryMs : 10000;
+    // A late join gets one more join window to answer before the list check.
+    this.lateJoinMs = opts.lateJoinMs > 0 ? opts.lateJoinMs : this.joinMs;
     const script = opts.workerScript || WORKER_SCRIPT;
     this.forkWorker = typeof opts.forkWorker === 'function'
       ? opts.forkWorker

@@ -22,7 +22,8 @@
 //   freed, so a join that never answers does not hold it until the worker dies.
 // - A leave that fails or times out keeps the room on its worker, so the
 //   seat stays taken and a second leave can still reach it. A late leave
-//   that lands, or Meet Bot saying the room is gone, frees it.
+//   that lands, or Meet Bot saying the room is gone, frees it. A leave of a
+//   room a late leave already freed counts as left, so the meeting can end.
 // - status and list ask every ready worker at once and wait at most infoMs,
 //   so one stuck worker shows as an error row instead of holding status.
 // - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
@@ -84,6 +85,7 @@ class Worker {
     this.late = new Map();    // call id -> { method, args }, for calls that timed out
     this.rooms = new Set();   // local session ids seated on this worker
     this.stray = new Map();   // late joins still to leave: local id -> { timer, told }
+    this.leftLate = new Set(); // rooms a leave that timed out did leave
     this.reserved = 0;        // joins in flight
     this.lateJoins = 0;       // joins that timed out and have not answered yet
     this.lateTimer = null;    // the next check of those joins against Meet Bot's list
@@ -211,6 +213,7 @@ class Worker {
     clearTimeout(this.lateTimer);
     this.lateTimer = null;
     this.clearStray();        // the process and its browser are gone
+    this.leftLate.clear();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Worker ' + this.index + ' stopped: ' + why)); }
     this.pending.clear();
     const gone = [...this.rooms].map((s) => 'w' + this.index + ':' + s);
@@ -250,7 +253,12 @@ class Worker {
     const { method, args, settled } = this.late.get(msg.id);
     this.late.delete(msg.id);
     if (method === 'join' && !settled) this.lateJoins--;
-    if (method === 'leave' && (msg.ok || GONE_RE.test(msg.error || ''))) { this.rooms.delete(String(args[0])); this.dropStray(String(args[0])); return; }
+    if (method === 'leave' && (msg.ok || GONE_RE.test(msg.error || ''))) {
+      const local = String(args[0]);
+      if (this.rooms.delete(local)) this.leftLate.add(local);
+      this.dropStray(local);
+      return;
+    }
     if (method !== 'join' || !msg.ok || msg.value == null) return;
     const local = String(msg.value);
     // The list check may have found this room already.
@@ -501,6 +509,7 @@ export class WorkerPool {
         try { await w.ready(); } catch (e) { err = err || e; continue; }
         const local = await w.call('join', link, password || '');
         w.rooms.add(String(local));
+        w.leftLate.delete(String(local));
         return 'w' + w.index + ':' + local;
       } finally {
         w.reserved--;
@@ -531,6 +540,9 @@ export class WorkerPool {
   }
 
   async leave(sessionId) {
+    const s = splitSession(sessionId);
+    const left = s && this.workers[s.index];
+    if (left && left.leftLate.delete(s.local)) { this.setThinking(String(sessionId), false); return; }
     const { w, local } = this.route(sessionId);
     this.setThinking(String(sessionId), false);
     try { await w.call('leave', local); }

@@ -96,3 +96,26 @@ rooms (about 40 MB PSS per extra talking room from 1 to 8); CPU does, about 20% 
 after the first room's ~80%. This run does not set the `GIFOS_MAX_MEETINGS` default: the synthetic speech-to-text
 costs almost nothing, so the real Whisper cost per talking room, and two overlapping `say` calls (the 0.9.23
 listing lacks `MeetingBot.interject`), are still to be measured.
+
+### With Whisper (2026-10-17)
+
+`E2E_STT=whisper E2E_SPEECH_WAV=<clip> E2E_EXPECT='budget|garden|morning|lunch' E2E_ROOMS=1,4,8 npm run test:e2e:load`
+at `3b03cf3`, same machine, same `gifos-app` 0.9.23 tree, people split the same way. Transcription is the real
+default, Offline Captions (Whisper). Each person's mic plays one 10.5 s spoken clip (made with this repo's Kokoro),
+then 3 s of quiet, over and over; the site serves the clip, so the remote browser needs no copy. Two runs, both 13/13
+checks: every one of the 8 rooms heard its own person in words ("Let us review the budget for the Garden Project
+before we begin.", "the Garden project before lunch") and no room held anyone else's line. Run 1 sampled cost over
+10 s, run 2 over 30 s.
+
+| Rooms | Bot alone: PSS / RSS | Bot alone: CPU | One person talking in each: PSS / RSS | Talking: CPU | `gifos-mcp` alone RSS |
+|---|---|---|---|---|---|
+| 1 | 647–824 / 1160–1342 MB | 8–9% | 706–707 / 1258–1260 MB | 14–77% | 153–156 MB |
+| 4 | 752–769 / 1288–1298 MB | 14–19% | 907–942 / 1469–1505 MB | 49–156% | 166–169 MB |
+| 8 | 954–992 / 1492–1526 MB | 22–23% | 1428–2407 / 2008–2988 MB | 198–220% | 180–184 MB |
+
+Whisper speech comes in bursts, so one sample window can land between them (one talking room read 77% over 10 s
+and 14% over 30 s). At 8 talking rooms CPU is about 2 cores, the same as with the synthetic provider, still the
+same 9 processes. Memory is new: with 8 rooms talking at once PSS reached 1.4 GB in run 1 and 2.4 GB in run 2,
+where the synthetic provider stayed under 1 GB. Two runs do not show whether that levels off or keeps growing (a
+caption backlog behind one shared engine would keep growing), so the `GIFOS_MAX_MEETINGS` default stays at 4 until
+a longer run with 8 rooms talking answers it.

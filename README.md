@@ -295,7 +295,9 @@ Variants:
 - `RELAY_SCRIPT=<path>` starts a local GifOS relay on `127.0.0.1:19511` instead of using `E2E_RELAY`.
 - `npm run test:e2e:load` (`E2E_ROOMS=1,4,8`) measures one Chromium and Meeting Bot holding more and more rooms,
   the bot alone and with one person talking in each, and checks every room is still heard. Results go to
-  `.e2e/proof-load/load.json`; see [PROOF.md](PROOF.md).
+  `.e2e/proof-load/load.json`; see [PROOF.md](PROOF.md). It uses the synthetic provider unless `E2E_STT=whisper`,
+  which needs `E2E_SPEECH_WAV` (each person's mic plays it) and counts a room heard when its person's line
+  matches `E2E_EXPECT`.
 
 ## License
 

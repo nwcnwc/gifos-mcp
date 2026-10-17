@@ -20,16 +20,29 @@ function errorText(e) {
 // channel: { send(msg), on('message', fn) }, normally `process`.
 // makeDriver(queue) builds the driver once the queue exists, so thinking in
 // this worker is reported to the supervisor under this worker's session ids.
-export function serveWorker(channel, makeDriver, extra = []) {
+export function serveWorker(channel, makeDriver, extra = [], closeMs = 10000) {
   const queue = new SpeechQueue({
     onThinking(id, on) { channel.send({ event: 'thinking', id: String(id), on: !!on }); },
   });
   const driver = makeDriver(queue);
   const allowed = new Set(WORKER_METHODS.concat(extra));
+  let closing = null;
+  const shut = () => {
+    if (!closing) closing = Promise.resolve().then(() => (typeof driver.close === 'function' ? driver.close() : null)).catch(() => { /* exiting anyway */ });
+    return closing;
+  };
+  // A supervisor that dies without sending close (SIGKILL, OOM) drops the
+  // IPC channel. Chromium would keep this process and its seats alive with
+  // nobody to route to them, so close the browser and go.
+  channel.on('disconnect', () => {
+    const t = setTimeout(() => process.exit(1), closeMs);
+    t.unref();
+    shut().then(() => process.exit(0));
+  });
   channel.on('message', async (msg) => {
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'close') {
-      try { if (typeof driver.close === 'function') await driver.close(); } catch (e) { /* exiting anyway */ }
+      await shut();
       channel.send({ event: 'closed' });
       process.exit(0);
     }

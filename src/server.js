@@ -89,14 +89,26 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return job.promise;
   }
 
-  // Once a join lands the bot holds a seat. A meetings.json save that fails
-  // then (disk nearly full: it holds every transcript) must not lose it: the
-  // store already took the fields in memory and its next save writes them.
+  // Once a join lands the bot holds a seat, and once a leave lands it does
+  // not. A meetings.json save that fails then (disk nearly full: it holds
+  // every transcript) must not lose that: the store already took the fields
+  // in memory and its next save writes them.
   function holdSeat(id, fields) {
     try { return meetings.update(id, fields); }
     catch (e) {
       log('meetings.json not saved (' + e.message + '); the seat is kept in memory until the next save.');
       return meetings.get(id);
+    }
+  }
+
+  // The same for an order's phase once the bot has joined or left: the
+  // schedule store already took it in memory, so the clock sees it and the
+  // next save writes it. Throwing here would hide a leave that happened.
+  function holdPhase(order, fields) {
+    try { return schedule.setPhase(order.occurrence_id || order.schedule_id, fields); }
+    catch (e) {
+      log('schedule.json not saved (' + e.message + '); the order is kept in memory until the next save.');
+      return schedule.get(order.occurrence_id || order.schedule_id);
     }
   }
 
@@ -319,13 +331,13 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     // Any other failure keeps the meeting live, so a retry can still reach it.
     await bot.leave(m.session_id).catch((e) => { if (!GONE_RE.test((e && e.message) || '')) throw e; });
     if (bot.queue && typeof bot.queue.leave === 'function') bot.queue.leave(m.meeting_id);
-    const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false, thinking: false,
+    const done = holdSeat(m.meeting_id, { state: 'ended', session_id: null, transcribing: false, thinking: false,
       transcript: text, ended_at: new Date().toISOString() });
     const order = schedule.forMeeting(m.meeting_id);
     const why = reason || 'manual';
     if (order) {
       const phase = (why === 'manual' || why === 'cancel') && Date.now() < Date.parse(order.end) ? 'left_early' : 'ended';
-      schedule.setPhase(order.occurrence_id || order.schedule_id, { phase });
+      holdPhase(order, { phase });
     }
     emit({ type: 'meeting.left', meeting_id: m.meeting_id, data: { state: 'ended', reason: why } });
     return { done, lines: text ? text.split('\n').length : 0 };
@@ -337,9 +349,9 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     const pending = entering.get(m.meeting_id);
     if (m.state === 'live' || !(pending || (m.reseat && m.state === 'scheduled'))) return null;
     if (pending) pending.cancelled = true;
-    const done = meetings.update(m.meeting_id, { state: 'ended', reseat: false, ended_at: new Date().toISOString() });
+    const done = holdSeat(m.meeting_id, { state: 'ended', reseat: false, ended_at: new Date().toISOString() });
     const order = schedule.forMeeting(m.meeting_id);
-    if (order) schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: Date.now() < Date.parse(order.end) ? 'left_early' : 'ended' });
+    if (order) holdPhase(order, { phase: Date.now() < Date.parse(order.end) ? 'left_early' : 'ended' });
     emit({ type: 'meeting.left', meeting_id: m.meeting_id, data: { state: 'ended', reason: 'manual' } });
     return ok({ ...publicView(done), note: pending ? 'The bot was joining; it left again.' : 'The bot was waiting to rejoin; it will not.' });
   }
@@ -579,7 +591,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     leave: (order, reason) => {
       const m = order.meeting_id && meetings.get(order.meeting_id);
       if (!m || m.state !== 'live') {
-        schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'ended' });
+        holdPhase(order, { phase: 'ended' });
         return null;
       }
       return depart(m, reason);

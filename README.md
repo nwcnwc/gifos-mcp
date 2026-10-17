@@ -228,7 +228,9 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
   whose save fails (disk nearly full) still holds its seat and reads its captions; the failure is
   logged and the next save writes it. The same holds for `schedule.json`: a clock tick whose save fails
   still seats, waits and ends its orders, logs the failure once until a save works, and the next save
-  writes their phases.
+  writes their phases. An `end_meeting` (or a clock leave) whose saves fail still reports the leave,
+  raises `meeting.left`, and keeps the meeting ended and its order `left_early` or `ended` in memory, so no
+  tick seats the bot again.
 - **The key stays in this process.** When this server hosts `smartest`, it calls the model. The page does
   not, and `GIFOS_LLM_KEY` is not written into Settings. `MeetingBot.setVoice` receives the provider role
   `smartest` and never the URL or the key. Leave the key unset and conversation voice stays `none` unless

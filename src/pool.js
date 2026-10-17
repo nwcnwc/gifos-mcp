@@ -35,7 +35,8 @@
 // - A worker that is up but whose browser will not start waits the same way
 //   before its next start, and the join that found it out tries the next
 //   worker, so one broken Chromium does not fail every join.
-// - A join whose worker dies under it goes to the next worker, once.
+// - A join whose worker dies under it goes to the next worker, once, and
+//   fails with code worker_died if that one dies too.
 // - Voice settings go to every ready worker at once and again to any worker
 //   that restarts or missed them, before its next join. A ready worker that
 //   refused them is asked again every voiceRetryMs until it takes them.
@@ -576,7 +577,10 @@ export class WorkerPool {
         let local;
         try { local = await w.call('join', link, password || ''); }
         catch (e) {
-          if (died || this.closed || w.child === child) throw e;
+          if (this.closed || w.child === child) throw e;
+          // The clock waits longer before it brings such a room back.
+          e.code = 'worker_died';
+          if (died) throw e;
           died = true;
           log('worker ' + w.index + ' died during a join; trying the next worker');
           err = e;

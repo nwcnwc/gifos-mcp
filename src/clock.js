@@ -6,8 +6,12 @@ function idKey(rows) {
   return (rows || []).map((row) => row.occurrence_id || row.schedule_id || row.meeting_id || '').join(',');
 }
 
+const CRASH_MS = 60 * 1000;
+const CRASH_MAX_MS = 30 * 60 * 1000;
+
 export function createClock(deps) {
   const quietMs = deps.quietMs > 0 ? deps.quietMs : QUIET_MS;
+  const crashMs = deps.crashMs > 0 ? deps.crashMs : CRASH_MS;
   const seen = new Set();
   let booted = false;
   let timer = null;
@@ -36,6 +40,22 @@ export function createClock(deps) {
       leaveFailed.add(key);
       emit('meeting.error', order.meeting_id, { text: 'The room could not be left; trying again.' });
     }
+  }
+
+  // A room whose join took down the workers it reached (stage B) is not
+  // joined again until its wait is over: one minute, doubling to 30. Joining
+  // it every tick would drop every other meeting on those workers each time.
+  const crashed = new Map(); // order key or meeting id -> { count, at }
+  const crashWaits = (key, now) => crashed.has(key) && now < crashed.get(key).at;
+  function joinFailed(key, meetingId, e, now) {
+    if (!(e && e.code === 'worker_died')) {
+      emit('meeting.error', meetingId, { text: 'The room could not be entered.' });
+      return;
+    }
+    const count = (crashed.has(key) ? crashed.get(key).count : 0) + 1;
+    const ms = Math.min(CRASH_MAX_MS, crashMs * 2 ** (count - 1));
+    crashed.set(key, { count, at: now + ms });
+    emit('meeting.error', meetingId, { text: 'The room crashed the bot; trying again in ' + Math.ceil(ms / 60000) + ' min.', retry_in_ms: ms });
   }
 
   // 'capacity' when the cap is reached, 'worker' when every worker is full
@@ -129,11 +149,13 @@ export function createClock(deps) {
       const seated = meeting && meeting.state === 'live';
       if ((order.phase === 'upcoming' || order.phase === 'waiting_for_capacity') && now >= end) {
         const reason = order.phase === 'waiting_for_capacity' ? 'capacity' : 'late';
+        crashed.delete(orderKey(order));
         deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'missed', missed_reason: reason });
         emit('schedule.missed', order.meeting_id, { ...briefOrder(order), reason });
         continue;
       }
       if ((order.phase === 'upcoming' || order.phase === 'waiting_for_capacity') && now >= joinAt && now < end) {
+        if (crashWaits(orderKey(order), now)) continue;
         const full = fullReason();
         if (full) {
           wait(order, full);
@@ -144,16 +166,18 @@ export function createClock(deps) {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
           waited.delete(orderKey(order));
+          crashed.delete(orderKey(order));
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
           if (isNoSeat(e)) wait(order, 'worker');
-          else emit('meeting.error', order.meeting_id, { text: 'The room could not be entered.' });
+          else joinFailed(orderKey(order), order.meeting_id, e, now);
         }
         continue;
       }
       const restarted = (order.phase === 'live' || order.phase === 'overrun') && !seated;
       if (restarted) {
+        if (crashWaits(orderKey(order), now)) continue;
         const full = fullReason();
         if (full) {
           wait(order, full);
@@ -163,11 +187,12 @@ export function createClock(deps) {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
           waited.delete(orderKey(order));
+          crashed.delete(orderKey(order));
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: now >= end ? 'overrun' : 'live', meeting_id: joined.meeting_id, overrun_at: now >= end ? new Date(now).toISOString() : '' });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
           if (isNoSeat(e)) wait(order, 'worker');
-          else emit('meeting.error', order.meeting_id, { text: 'The room could not be entered.' });
+          else joinFailed(orderKey(order), order.meeting_id, e, now);
         }
       }
       const fresh = deps.schedule.get(order.occurrence_id || order.schedule_id) || order;
@@ -196,14 +221,16 @@ export function createClock(deps) {
     if (typeof deps.reseat === 'function') {
       for (const m of deps.meetings.all()) {
         if (!m.reseat || m.state !== 'scheduled' || deps.schedule.forMeeting(m.meeting_id)) continue;
+        if (crashWaits(m.meeting_id, now)) continue;
         // meeting.disconnected already told the owner; no seat is a quiet wait.
         if (fullReason()) break;
         try {
           const joined = await deps.reseat(m);
           if (!joined || joined.state !== 'live') continue; // ended while joining
+          crashed.delete(m.meeting_id);
           emit('meeting.joined', joined.meeting_id, { topic: joined.topic, link: joined.link, state: 'live', reason: 'worker' });
         } catch (e) {
-          if (!isNoSeat(e)) emit('meeting.error', m.meeting_id, { text: 'The room could not be entered.' });
+          if (!isNoSeat(e)) joinFailed(m.meeting_id, m.meeting_id, e, now);
         }
       }
     }

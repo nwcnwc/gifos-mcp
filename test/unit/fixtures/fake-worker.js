@@ -1,6 +1,7 @@
 // A stage B worker with a fake Meet Bot, forked by stage-b.test.js. Same IPC
 // protocol and serveWorker as src/worker.js; no browser.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { serveWorker } from '../../../src/worker.js';
 
@@ -17,7 +18,12 @@ class FakeDriver {
     this.log.push(['ensureStarted']);
     // cfg.failStart lists workers whose browser will not start, until fixStart().
     if ((this.boot.cfg.failStart || []).includes(this.boot.index) && !this.startFixed) throw new Error('Chromium would not start on worker ' + this.boot.index);
-    if (!this.browser) this.browser = setInterval(() => {}, 1000);
+    if (!this.browser) {
+      this.browser = setInterval(() => {}, 1000);
+      // Playwright makes playwright-artifacts-* in TMPDIR at each launch and
+      // removes it only when the browser closes.
+      this.artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'playwright-artifacts-'));
+    }
   }
   async join(link, password) {
     this.log.push(['join', link, password]);
@@ -69,10 +75,12 @@ class FakeDriver {
   async close() {
     clearInterval(this.browser);
     this.browser = null;
+    if (this.artifacts) fs.rmSync(this.artifacts, { recursive: true, force: true });
     fs.writeFileSync(path.join(this.boot.cfg.home, 'closed-w' + this.boot.index), String(process.pid));
   }
   // Test-only methods, allowed by the extra list below.
   async calls() { return this.log; }
+  async tmp() { return { tmpdir: os.tmpdir(), artifacts: this.artifacts || null }; }
   async whoami() { return { name: this.boot.creds.name, profile: this.boot.cfg.profile, argv: process.argv, env: Object.keys(process.env).filter((k) => String(process.env[k]).includes(this.boot.creds.password)) }; }
   async think(id, on) { this.queue.setThinking(id, on); }
   async slow() { return new Promise(() => {}); }
@@ -107,6 +115,6 @@ process.once('message', (boot) => {
   // cfg.hangBoot lists workers whose boot never finishes, the way a stalled
   // Kokoro download would: the process is alive but never says up.
   if ((boot.cfg.hangBoot || []).includes(boot.index)) { setInterval(() => {}, 1000); return; }
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stallJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'stallLeaves', 'fixStart']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stallJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'stallLeaves', 'fixStart', 'tmp']);
 });
 process.send({ event: 'boot' });

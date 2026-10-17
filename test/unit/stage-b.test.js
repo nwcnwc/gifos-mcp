@@ -4,6 +4,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fork } from 'node:child_process';
@@ -478,6 +479,31 @@ test('a worker whose supervisor is killed closes its browser and exits instead o
   if (orphaned) process.kill(pid, 'SIGKILL');
   assert.equal(orphaned, false, 'worker ' + pid + ' outlived its supervisor');
   assert.equal(fs.readFileSync(path.join(home, 'closed-w0'), 'utf8'), String(pid));
+});
+
+test('a worker killed under its browser leaves no browser temp folder behind', async () => {
+  makePool();
+  await pool.join('https://gifos.app/run.html#v=roomA', '');
+  const { tmpdir, artifacts } = await pool.workers[0].call('tmp');
+  assert.ok(artifacts && fs.existsSync(artifacts));
+  // Each worker gets a TMPDIR of its own, so nothing its Chromium leaves
+  // lands in the supervisor's (a shared /tmp with a per-user quota).
+  assert.notEqual(path.resolve(tmpdir), path.resolve(os.tmpdir()));
+  // A crash or OOM kill gives the worker no chance to close its browser.
+  const child = pool.workers[0].child;
+  const exited = new Promise((r) => child.once('exit', r));
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(fs.existsSync(artifacts), false, 'left ' + artifacts);
+  assert.equal(fs.existsSync(tmpdir), false, 'left ' + tmpdir);
+  // The restarted worker gets a clean one, and close() removes it.
+  await pool.join('https://gifos.app/run.html#v=roomB', '');
+  const again = await pool.workers[0].call('tmp');
+  assert.equal(again.tmpdir, tmpdir);
+  assert.deepEqual(fs.readdirSync(tmpdir), [path.basename(again.artifacts)]);
+  await pool.close();
+  pool = null;
+  assert.equal(fs.existsSync(tmpdir), false, 'close left ' + tmpdir);
 });
 
 const until = async (fn, ms = 3000) => {

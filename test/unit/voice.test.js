@@ -408,3 +408,55 @@ test('a caption snapshot that lands after its poll stopped or the room was resea
   await delay(10);
   assert.deepEqual(live.tail('m-late', 0).lines.map((l) => l.text), ['from the new seat']);
 });
+
+// The transcript files are the big ones on disk. An append that fails there
+// (disk full) comes after Meet Bot already sent the chat or showed the caption.
+test('a transcript append that fails (disk full) keeps every caption line and the chat that was sent, and writes them once the disk has room', async (t) => {
+  const home = tmpHome('gifos-mcp-fullcap-');
+  const cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510', GIFOS_VOICE: '0' });
+  const meetings = new MeetingStore(home);
+  const bot = new FakeBot();
+  bot.say = async (id, text) => { bot.calls.push(['say', id, text]); };
+  const live = new LiveTranscript(home);
+  const captions = watchCaptions({ meetings, bot, live, intervalMs: 20, botName: 'notes-test' });
+  t.after(() => captions.stopAll());
+  const server = createServer({ cfg, meetings, bot, live, captions, botName: 'notes-test' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(a), client.connect(b)]);
+  const call = async (name, args) => client.callTool({ name, arguments: args });
+  const json = async (name, args) => JSON.parse((await call(name, args)).content[0].text);
+  const m = await json('join_meeting', { link: 'https://gifos.app/meet/full-captions', password: 'room-secret' });
+  const speech = () => live.tail(m.meeting_id, 0).lines.filter((l) => l.kind === 'speech').map((l) => l.text);
+
+  const persist = live.persist;
+  live.persist = () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); };
+  bot.lines.mt_1.push('Ada: one', 'Bob: two', 'Ada: three');
+  for (let i = 0; i < 50 && speech().length < 3; i++) await delay(20);
+  assert.deepEqual(speech(), ['one', 'two', 'three'], 'no caption line is lost after the first failed append');
+  const events = (await json('tail_events', { limit: 200 })).events;
+  assert.deepEqual(events.filter((e) => e.type === 'line.speech').map((e) => e.data.text), ['one', 'two', 'three']);
+  const sent = await call('send_chat', { meeting_id: m.meeting_id, text: 'notes are on' });
+  assert.notEqual(sent.isError, true, 'the chat went out, so send_chat says so: ' + sent.content[0].text);
+  assert.equal(bot.calls.filter((c) => c[0] === 'say').length, 1);
+
+  // Once the disk has room, the next append writes the kept lines first, in order.
+  live.persist = persist;
+  bot.lines.mt_1.push('Bob: four');
+  for (let i = 0; i < 50 && speech().length < 4; i++) await delay(20);
+  const again = new LiveTranscript(home);
+  assert.deepEqual(again.query({ meetingId: m.meeting_id }).lines.map((l) => l.kind + ':' + l.text),
+    ['speech:one', 'speech:two', 'speech:three', 'chat:notes are on', 'speech:four']);
+  await client.close();
+});
+
+test('a transcript file whose last line was torn (killed or disk full mid-append) is ended at load, so the next line is not lost', () => {
+  const home = tmpHome('gifos-mcp-torn-');
+  const id = 'm_abcdef0123';
+  const first = new LiveTranscript(home);
+  first.append({ meeting_id: id, speaker: 'Ada', text: 'kept', kind: 'speech' });
+  fs.appendFileSync(path.join(home, 'transcripts', id + '.jsonl'), '{"seq":2,"ts":"x","meeting_id":"' + id + '","spe');
+  const second = new LiveTranscript(home);
+  second.append({ meeting_id: id, speaker: 'Bob', text: 'after the tear', kind: 'speech' });
+  assert.deepEqual(new LiveTranscript(home).tail(id, 0).lines.map((l) => l.text), ['kept', 'after the tear']);
+});

@@ -7,6 +7,14 @@ import crypto from 'node:crypto';
 
 const ROOM_RE = /^[A-Za-z0-9-]{1,64}$/;
 
+function stripSecrets(fields) {
+  const out = { ...(fields || {}) };
+  delete out.room_password;
+  delete out.admin_password;
+  delete out.password;
+  return out;
+}
+
 export function newRoom() {
   // 120 random bits. The room name is what the meeting key derives from.
   const b = crypto.randomBytes(15);
@@ -66,7 +74,8 @@ export class MeetingStore {
       created_at: new Date().toISOString(),
       started_at: null,
       ended_at: null,
-      ...fields,
+      thinking: false,
+      ...stripSecrets(fields),
     };
     this.items.push(m);
     this.save();
@@ -89,7 +98,7 @@ export class MeetingStore {
   update(id, fields) {
     const m = this.get(id);
     if (!m) return null;
-    Object.assign(m, fields);
+    Object.assign(m, stripSecrets(fields));
     this.save();
     return m;
   }
@@ -105,7 +114,7 @@ export function publicView(m) {
     state: m.state,
     transcribing: !!m.transcribing,
     muted: !!m.muted,
-    ...(m.room_password ? { room_password: m.room_password } : {}),
+    thinking: !!m.thinking,
     created_at: m.created_at,
     started_at: m.started_at,
     ended_at: m.ended_at,

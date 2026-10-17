@@ -109,12 +109,20 @@ export class LiveTranscript {
 
   tail(meetingId, since) {
     const n = Number(since) || 0;
-    const lines = this.lines.filter((l) => l.meeting_id === meetingId && l.seq > n).map(publicLine);
+    const lines = this.lines.filter((l) => l.meeting_id === meetingId && l.kind === 'speech' && l.seq > n).map(publicLine);
     return { meeting_id: meetingId, lines, next: lines.length ? lines[lines.length - 1].seq : n };
   }
 
+  query({ meetingId, since, kinds } = {}) {
+    const n = Number(since) || 0;
+    const allow = kinds && kinds.length ? new Set(kinds) : null;
+    const lines = this.lines.filter((l) => l.seq > n && (!meetingId || l.meeting_id === meetingId) && (!allow || allow.has(l.kind)))
+      .map((l) => ({ seq: l.seq, ts: l.ts, meeting_id: l.meeting_id, kind: l.kind, speaker: l.speaker, text: l.text }));
+    return { since: n, next: lines.length ? lines[lines.length - 1].seq : n, lines };
+  }
+
   ndjson(meetingId) {
-    return this.lines.filter((l) => l.meeting_id === meetingId).map((l) => JSON.stringify(publicLine(l))).join('\n');
+    return this.lines.filter((l) => l.meeting_id === meetingId && l.kind === 'speech').map((l) => JSON.stringify(publicLine(l))).join('\n');
   }
 
   meetings() {

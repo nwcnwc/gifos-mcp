@@ -9,6 +9,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { loadConfig, botCredentials } from '../src/config.js';
 import { MeetingStore } from '../src/meetings.js';
 import { MeetingBotDriver } from '../src/driver.js';
+import { ScheduleStore } from '../src/schedule.js';
+import { EventLog } from '../src/events.js';
+import { SpeechQueue } from '../src/voice/queue.js';
 import { createServer, VERSION } from '../src/server.js';
 import { LiveTranscript, watchCaptions } from '../src/voice/live.js';
 import { scrub } from '../src/voice/settings.js';
@@ -23,7 +26,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
     'Environment: GIFOS_URL, GIFOS_RELAY, GIFOS_BOT_NAME, GIFOS_BOT_PASSWORD, GIFOS_STT_APP,\n' +
     'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN,\n' +
     'GIFOS_LLM_URL, GIFOS_LLM_MODEL, GIFOS_LLM_APP, GIFOS_CONVERSATION_VOICE, GIFOS_RESPOND_TO_COMMAND,\n' +
-    'GIFOS_VOICE, GIFOS_TRANSCRIPT_POLL_MS, GIFOS_TTS_ENGINE, GIFOS_TTS_APP, GIFOS_TTS_URL, GIFOS_TTS_VOICE, GIFOS_STT_URL.\n' +
+    'GIFOS_VOICE, GIFOS_TRANSCRIPT_POLL_MS, GIFOS_TTS_ENGINE, GIFOS_TTS_APP, GIFOS_TTS_URL, GIFOS_TTS_VOICE, GIFOS_STT_URL,\n' +
+    'GIFOS_MAX_MEETINGS, GIFOS_CAPACITY_NEAR, GIFOS_SCHEDULE_HORIZON_MS.\n' +
     'GIFOS_LLM_KEY stays in this process. It is not passed to Meet Bot, not written into the page, and not printed.\n' +
     'Kokoro (voice af_heart) is downloaded into GIFOS_MCP_HOME/kokoro on first start. This process injects itself as the tts, stt, and smartest provider. The page does not fetch those calls.\n' +
     'See https://github.com/nwcnwc/gifos-mcp#readme\n');
@@ -39,13 +43,25 @@ if (cfg.voice.tts.source === 'mcp') {
   kokoro = await installKokoro({ home: cfg.home, voice: cfg.voice.tts.voice });
 }
 const meetings = new MeetingStore(cfg.home);
+const schedule = new ScheduleStore(cfg.home);
+const events = new EventLog(cfg.home);
 const reset = meetings.resetLive();
 if (reset) log(reset + ' meeting(s) were live in the last run; they are back to scheduled');
-const bot = new MeetingBotDriver(cfg, creds, kokoro);
+const queue = new SpeechQueue({
+  onThinking(id, on) {
+    const m = meetings.all().find((row) => row.meeting_id === id || row.session_id === id);
+    if (!m) return;
+    meetings.update(m.meeting_id, { thinking: !!on });
+    events.append({ type: 'meeting.state', meeting_id: m.meeting_id, data: { thinking: !!on, transcribing: !!m.transcribing } });
+  },
+});
+const bot = new MeetingBotDriver(cfg, creds, kokoro, { queue });
 const live = new LiveTranscript(cfg.home);
 const hide = (text) => scrub(text, [cfg.voice.key, creds.password]);
 const captions = watchCaptions({ meetings, bot, live, intervalMs: cfg.voice.pollMs, botName: creds.name, scrubText: hide });
-const mcpArgs = { cfg, meetings, bot, live, captions, botName: creds.name, botPassword: creds.password };
+const mcpArgs = { cfg, meetings, bot, live, captions, botName: creds.name, botPassword: creds.password, schedule, events };
+const boot = createServer(mcpArgs);
+boot.clock.start();
 const voiceNote = cfg.voice.conversationVoice + (cfg.voice.conversationVoice === 'local' && cfg.voice.model ? ' (' + cfg.voice.model + ')' : '');
 log('gifos-mcp ' + VERSION + ' · GifOS ' + cfg.gifosUrl + ' · bot "' + creds.name + '" (' + creds.source + ') · voice ' +
   voiceNote + ' · commands ' + (cfg.voice.respondToCommand ? 'on' : 'off') + ' · data ' + cfg.home);
@@ -55,6 +71,7 @@ async function shutdown(code) {
   if (closing) return;
   closing = true;
   captions.stopAll();
+  boot.clock.stop();
   await bot.close().catch(() => {});
   process.exit(code);
 }
@@ -89,8 +106,7 @@ if (httpAt >= 0) {
   });
   srv.listen(port, '127.0.0.1', () => log('listening on http://127.0.0.1:' + port + '/mcp'));
 } else {
-  const server = createServer(mcpArgs);
-  await server.connect(new StdioServerTransport());
+  await boot.connect(new StdioServerTransport());
   process.stdin.on('close', () => shutdown(0));
   log('ready on stdio');
 }

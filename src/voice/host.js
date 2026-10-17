@@ -16,6 +16,12 @@ async function readError(res) {
 }
 
 export async function serveHost(services, role, req, fetchImpl) {
+  const work = () => serveHostOnce(services, role, req, fetchImpl);
+  if (services && services.queue) return services.queue.run(role, req, work);
+  return work();
+}
+
+async function serveHostOnce(services, role, req, fetchImpl) {
   const s = services || {};
   const fetchFn = fetchImpl || fetch;
   if (role === 'tts') {

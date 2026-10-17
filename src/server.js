@@ -4,17 +4,22 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
-import { formatInvite, plainLink, PASSWORD_LINK_NOTE } from './invite.js';
+import { plainLink } from './invite.js';
 import { LiveTranscript } from './voice/live.js';
 import { CAMERA_GAP, CONTROLS_GAP, HAND_GAP, INTERJECT_GAP, MIC_GAP, SNAPSHOT_GAP, VOICE_GAP, scrub, voicePublic, voiceSettings } from './voice/settings.js';
+import { ScheduleStore, publicOrder, capacityAt, localStamp, DEFAULT_SPAN_MS } from './schedule.js';
+import { EventLog } from './events.js';
+import { createClock } from './clock.js';
 
-export const VERSION = '0.3.3';
+export const VERSION = '0.4.0';
 
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
-export function createServer({ cfg, meetings, bot, live, captions, botName, botPassword }) {
+export function createServer({ cfg, meetings, bot, live, captions, botName, botPassword, schedule: scheduleIn, events: eventsIn }) {
   const server = new McpServer({ name: 'gifos-mcp', version: VERSION });
   const transcript = live || new LiveTranscript(cfg.home);
+  const schedule = scheduleIn || new ScheduleStore(cfg.home);
+  const events = eventsIn || new EventLog(cfg.home);
   const secret = [(cfg.voice && cfg.voice.key) || '', botPassword || ''];
   const choice = {
     respondToCommand: cfg.voice.respondToCommand,
@@ -32,17 +37,24 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return handed;
   }
 
+  function secrets() {
+    return secret.concat(schedule.all().map((o) => o.room_password).filter(Boolean));
+  }
   function ok(obj) {
     const raw = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
-    return { content: [{ type: 'text', text: scrub(raw, secret) }] };
+    return { content: [{ type: 'text', text: scrub(raw, secrets()) }] };
   }
   function fail(message) {
-    return { isError: true, content: [{ type: 'text', text: scrub(message, secret) }] };
+    return { isError: true, content: [{ type: 'text', text: scrub(message, secrets()) }] };
+  }
+  function emit(event) {
+    const data = JSON.parse(scrub(JSON.stringify((event && event.data) || {}), secrets()));
+    return events.append({ type: event.type, meeting_id: event.meeting_id, data });
   }
 
   // Wraps a handler: known meeting, readable errors.
   const guarded = (fn) => async (args) => {
-    try { return await fn(args); } catch (e) { return fail(scrub(String((e && e.message) || e), secret)); }
+    try { return await fn(args); } catch (e) { return fail(String((e && e.message) || e)); }
   };
   const need = (id) => {
     const m = meetings.get(id);
@@ -57,7 +69,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
 
   async function enter(m, password) {
     await bot.ensureStarted();
-    const roomPassword = password || m.room_password || '';
+    const roomPassword = password || schedule.passwordFor(m.room) || '';
     const sessionId = await bot.join(plainLink(m.link, roomPassword), roomPassword);
     await bot.transcribe(sessionId, true);
     const updated = meetings.update(m.meeting_id, {
@@ -69,29 +81,64 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return updated;
   }
 
+  function rememberJoin(meeting, password, topic) {
+    const existing = schedule.all().find((o) => o.room === meeting.room && o.phase !== 'cancelled' && o.phase !== 'ended' && o.phase !== 'missed' && o.phase !== 'left_early' && o.phase !== 'series');
+    if (existing) {
+      schedule.setPhase(existing.occurrence_id || existing.schedule_id, { room_password: password, meeting_id: meeting.meeting_id, phase: 'live', topic: topic || existing.topic || meeting.topic });
+      return;
+    }
+    const start = new Date();
+    const added = schedule.add({
+      link: meeting.link,
+      room: meeting.room,
+      room_password: password,
+      topic: topic || meeting.topic,
+      meeting_id: meeting.meeting_id,
+      start: start.toISOString(),
+      end: new Date(start.getTime() + DEFAULT_SPAN_MS).toISOString(),
+    });
+    schedule.setPhase(added.order.occurrence_id || added.order.schedule_id, { phase: 'live', meeting_id: meeting.meeting_id });
+  }
+
+  function counts(meetingId) {
+    const rows = transcript.lines.filter((l) => l.meeting_id === meetingId);
+    return {
+      speech: rows.filter((l) => l.kind === 'speech').length,
+      chat: rows.filter((l) => l.kind === 'chat').length,
+      spoken: rows.filter((l) => l.kind === 'spoken').length,
+    };
+  }
+
+  function thinkingOf(m) {
+    if (m.thinking) return true;
+    if (bot.queue && typeof bot.queue.isThinking === 'function') return bot.queue.isThinking(m.meeting_id) || bot.queue.isThinking(m.session_id);
+    return false;
+  }
+
+  function lastHumanAt(meetingId) {
+    const rows = transcript.lines.filter((l) => l.meeting_id === meetingId && (l.kind === 'speech' || l.kind === 'chat'));
+    if (!rows.length) return null;
+    return Date.parse(rows[rows.length - 1].ts);
+  }
+
   server.registerTool('create_meeting', {
     title: 'Create a GifOS meeting',
-    description: 'Creates a new GifOS meeting link. Nothing joins yet: share the link (for example in a calendar invite the user approves), then call start_meeting at meeting time. start_time is stored as given, for your own scheduling; this server does not schedule anything.',
+    description: 'Mints a GifOS room and returns its link. name is the room name. admin_password is the human\'s password from Grok Bot\'s secrets store, used for this call only. It is not stored, not logged, and not returned. Nothing joins yet. Grok Bot invents the room password, invites people with the link and that room password, then calls schedule_meeting.',
     inputSchema: {
-      topic: z.string().min(1).max(200).describe('What the meeting is about, e.g. "Demo meeting".'),
-      start_time: z.string().max(64).optional().describe('When it should start, e.g. "2026-10-15T17:00:00-07:00". Informational only.'),
-      room_password: z.string().max(200).optional().describe('Room password guests type to join. It is returned beside the link, never inside it.'),
+      name: z.string().min(1).max(200).describe('Room name, the topic of the meeting.'),
+      admin_password: z.string().min(1).max(200).describe('The human\'s admin password for this room. Passed for this call only. Never stored.'),
     },
-  }, guarded(async ({ topic, start_time, room_password }) => {
-    const room = newRoom();
-    const link = plainLink(linkFor(cfg.gifosUrl, room, cfg.relay), room_password || '');
-    const m = meetings.add({
-      topic, start_time: start_time || null, room, link,
-      room_password: room_password || '',
-    });
-    const invite = formatInvite({ topic, link: m.link, roomPassword: room_password || '', startTime: start_time || '' });
-    return ok({ meeting_id: m.meeting_id, link: invite.link, topic: m.topic, start_time: m.start_time,
-      room_password: room_password || '',
-      invite_email: invite.email,
-      invite_calendar: invite.calendar,
-      password_links: PASSWORD_LINK_NOTE,
-      note: 'The bot is not in the meeting yet. Call start_meeting(meeting_id) at meeting time; this server must be running then. Put invite_email in the email and invite_calendar in the calendar event. The link stays plain. This server does not send either.' });
-  }));
+  }, async ({ name, admin_password }) => {
+    try {
+      const room = newRoom();
+      const link = plainLink(linkFor(cfg.gifosUrl, room, cfg.relay), '');
+      meetings.add({ topic: name, room, link });
+      const body = JSON.stringify({ link }, null, 2);
+      return { content: [{ type: 'text', text: scrub(body, secrets().concat(admin_password || '')) }] };
+    } catch (e) {
+      return { isError: true, content: [{ type: 'text', text: scrub(String((e && e.message) || e), secrets().concat(admin_password || '')) }] };
+    }
+  });
 
   server.registerTool('start_meeting', {
     title: 'Start a meeting (the bot joins and transcribes)',
@@ -105,10 +152,10 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
 
   server.registerTool('join_meeting', {
     title: 'Join an existing GifOS meeting by link',
-    description: 'The Meeting Bot joins a GifOS meeting someone else created (a /run.html#v=… or /meet/… link) and starts transcribing. Returns a meeting_id for the other tools.',
+    description: 'The Meeting Bot joins a GifOS meeting now and starts transcribing. A scheduled join is schedule_meeting, not this tool. The room password is stored on the schedule when one is passed.',
     inputSchema: {
       link: z.string().url().max(2048).describe('The GifOS meeting link.'),
-      password: z.string().max(200).optional().describe('The meeting password, if the meeting has one.'),
+      password: z.string().max(200).optional().describe('The room password guests type, if the meeting has one.'),
       topic: z.string().max(200).optional(),
     },
   }, guarded(async ({ link, password, topic }) => {
@@ -117,9 +164,24 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     const clean = plainLink(link, password || '');
     let m = meetings.byRoom(room);
     if (m && m.state === 'live') return ok({ ...publicView(m), note: 'Already in this meeting.' });
-    if (!m) m = meetings.add({ topic: topic || '', room, link: clean, room_password: password || '' });
-    else if (m.link !== clean) meetings.update(m.meeting_id, { link: clean, room_password: password || m.room_password || '' });
-    return ok(publicView(await enter(meetings.get(m.meeting_id), password)));
+    const liveCount = meetings.all().filter((row) => row.state === 'live').length;
+    if (liveCount >= cfg.maxMeetings) {
+      emit({
+        type: 'capacity.reached',
+        data: {
+          when: 'live', at: new Date().toISOString(), cap: cfg.maxMeetings, near: cfg.capacityNear, seated: liveCount,
+          affected: meetings.all().filter((row) => row.state === 'live').map((row) => ({ meeting_id: row.meeting_id, topic: row.topic, phase: 'live' })),
+          waiting: [{ topic: topic || '', link: clean, phase: 'refused' }],
+        },
+      });
+      return fail('The meeting bot is at capacity.');
+    }
+    if (!m) m = meetings.add({ topic: topic || '', room, link: clean });
+    else if (m.link !== clean) meetings.update(m.meeting_id, { link: clean, topic: topic || m.topic });
+    const joined = await enter(meetings.get(m.meeting_id), password);
+    if (password) rememberJoin(joined, password, topic);
+    emit({ type: 'meeting.joined', meeting_id: joined.meeting_id, data: { topic: joined.topic, link: joined.link, state: 'live' } });
+    return ok(publicView(joined));
   }));
 
   server.registerTool('mute', {
@@ -171,14 +233,22 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return fail('Meeting ' + meeting_id + ' has not started, so there is no transcript.');
   }));
 
-  async function depart(m) {
+  async function depart(m, reason) {
     if (captions) captions.stop(m.meeting_id);
-    let text = scrub(m.transcript || '', secret);
-    try { text = scrub(await bot.transcript(m.session_id), secret); } catch (e) { /* keep the last copy */ }
+    let text = scrub(m.transcript || '', secrets());
+    try { text = scrub(await bot.transcript(m.session_id), secrets()); } catch (e) { /* keep the last copy */ }
     transcript.ingestCaption(m.meeting_id, text, botName);
     await bot.leave(m.session_id);
-    const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false,
+    if (bot.queue && typeof bot.queue.leave === 'function') bot.queue.leave(m.meeting_id);
+    const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false, thinking: false,
       transcript: text, ended_at: new Date().toISOString() });
+    const order = schedule.forMeeting(m.meeting_id);
+    const why = reason || 'manual';
+    if (order) {
+      const phase = (why === 'manual' || why === 'cancel') && Date.now() < Date.parse(order.end) ? 'left_early' : 'ended';
+      schedule.setPhase(order.occurrence_id || order.schedule_id, { phase });
+    }
+    emit({ type: 'meeting.left', meeting_id: m.meeting_id, data: { state: 'ended', reason: why } });
     return { done, lines: text ? text.split('\n').length : 0 };
   }
 
@@ -257,6 +327,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     if (typeof bot.interject !== 'function') throw new Error(INTERJECT_GAP);
     const said = await bot.interject(m.session_id, text);
     if (!said || said.applied === false) throw new Error((said && said.gap) || INTERJECT_GAP);
+    transcript.append({ meeting_id: m.meeting_id, speaker: botName || 'Meet Bot', text, kind: 'spoken' });
     return ok({ meeting_id: m.meeting_id, spoken: true });
   }));
 
@@ -280,6 +351,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
   }, guarded(async ({ meeting_id, text }) => {
     const m = needLive(meeting_id);
     await bot.say(m.session_id, text);
+    transcript.append({ meeting_id: m.meeting_id, speaker: botName || 'Meet Bot', text, kind: 'chat' });
     return ok({ meeting_id: m.meeting_id, sent: true, chars: text.length });
   }));
 
@@ -383,9 +455,312 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
-    const left = await depart(m);
+    const left = await depart(m, 'manual');
     return ok({ ...publicView(left.done), transcript_lines: left.lines });
   }));
+
+  const clock = createClock({
+    schedule,
+    meetings,
+    cap: cfg.maxMeetings,
+    near: cfg.capacityNear,
+    horizonMs: cfg.horizonMs,
+    emit,
+    join: async (order) => {
+      let m = order.meeting_id && meetings.get(order.meeting_id);
+      if (!m) m = meetings.byRoom(order.room);
+      if (!m) m = meetings.add({ topic: order.topic || '', room: order.room, link: order.link });
+      if (m.state === 'live') return m;
+      return enter(m, order.room_password);
+    },
+    leave: (order, reason) => {
+      const m = order.meeting_id && meetings.get(order.meeting_id);
+      if (!m || m.state !== 'live') {
+        schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'ended' });
+        return null;
+      }
+      return depart(m, reason);
+    },
+    people: async (meeting) => (typeof bot.people === 'function' ? bot.people(meeting.session_id) : null),
+    lastHumanAt,
+  });
+  server.clock = clock;
+
+  function orderView(order, zone) {
+    const row = publicOrder(order);
+    if (zone) {
+      row.local_start = localStamp(order.start, zone);
+      row.local_end = localStamp(order.end, zone);
+    }
+    return row;
+  }
+
+  function ensureMeeting(order) {
+    let m = order.meeting_id && meetings.get(order.meeting_id);
+    if (!m) m = meetings.byRoom(order.room);
+    if (!m) m = meetings.add({ topic: order.topic || '', room: order.room, link: order.link });
+    if (order.meeting_id !== m.meeting_id) schedule.setPhase(order.occurrence_id || order.schedule_id, { meeting_id: m.meeting_id });
+    return meetings.get(m.meeting_id);
+  }
+
+  server.registerTool('schedule_meeting', {
+    title: 'Schedule the bot to join a meeting',
+    description: 'Stores a join order for a link that already exists. room_password is the password Grok Bot put in the invite. The bot joins one minute before start unless early_margin says otherwise. end may be omitted; the stored end is then start plus 8 hours. This call does not join yet and does not send mail. The room password is kept on the schedule and is not returned.',
+    inputSchema: {
+      link: z.string().url().max(2048).describe('The plain GifOS meeting link from create_meeting.'),
+      room_password: z.string().min(1).max(200).describe('The room password guests type. Stored for rejoin. Not returned.'),
+      start: z.string().min(1).max(64).describe('When the bot should be in the room, as an ISO time.'),
+      end: z.string().max(64).optional().describe('When overrun starts. Omit for start plus 8 hours.'),
+      timezone: z.string().max(80).optional().describe('IANA time zone. Default UTC.'),
+      recurrence: z.string().max(500).optional().describe('The calendar recurrence rule, stored as sent. An RRULE this process understands is expanded. Anything else is refused.'),
+      early_margin: z.number().int().min(0).optional().describe('Milliseconds before start to join. Default 60000.'),
+      external_id: z.string().max(200).optional().describe('Caller id from a calendar import. A second write with the same id updates the order.'),
+      topic: z.string().max(200).optional().describe('Room name. Defaults to the name from create_meeting.'),
+    },
+  }, guarded(async (args) => {
+    const room = roomFromLink(args.link);
+    if (!room) throw new Error('That is not a GifOS meeting link.');
+    const known = meetings.byRoom(room);
+    const added = schedule.add({
+      ...args,
+      topic: args.topic || (known && known.topic) || '',
+      meeting_id: known ? known.meeting_id : '',
+    });
+    const order = added.order;
+    const meeting = ensureMeeting(order);
+    if (!order.meeting_id) schedule.setPhase(order.occurrence_id || order.schedule_id, { meeting_id: meeting.meeting_id });
+    const stored = schedule.get(order.occurrence_id || order.schedule_id) || order;
+    const capacity = capacityAt(schedule.all(), Date.parse(stored.start), cfg.maxMeetings);
+    emit({ type: added.updated ? 'schedule.updated' : 'schedule.created', data: { ...publicOrder(stored), capacity: { cap: capacity.cap, seated_at_start: capacity.seated_at_start, over_by: capacity.over_by } } });
+    await clock.emitCapacity(Date.now(), false);
+    const next = stored.phase === 'series'
+      ? schedule.all().find((o) => o.series_id === stored.schedule_id && o.phase === 'upcoming')
+      : null;
+    return ok({
+      ...orderView(stored),
+      meeting_id: meeting.meeting_id,
+      duplicate: !!added.duplicate,
+      next: next ? orderView(next) : null,
+      capacity: { cap: capacity.cap, seated_at_start: capacity.seated_at_start, over_by: capacity.over_by },
+    });
+  }));
+
+  server.registerTool('list_schedule', {
+    title: 'List scheduled meetings',
+    description: 'Orders in the window, soonest first. Recurrence is expanded inside the window. Rows do not include the room password or the admin password. conflicts lists instants where more orders overlap than the cap.',
+    inputSchema: {
+      from: z.string().max(64).optional().describe('ISO start of the window.'),
+      to: z.string().max(64).optional().describe('ISO end of the window.'),
+      timezone: z.string().max(80).optional().describe('IANA zone used to add local_start and local_end.'),
+      phase: z.string().max(40).optional().describe('Only rows in this phase.'),
+      flag_overlaps: z.boolean().optional().describe('When true, also list overlaps that are still under the cap.'),
+    },
+  }, guarded(async ({ from, to, timezone, phase, flag_overlaps }) => {
+    const fromMs = from ? Date.parse(from) : null;
+    const toMs = to ? Date.parse(to) : null;
+    if (from && !Number.isFinite(fromMs)) throw new Error('from must be a time.');
+    if (to && !Number.isFinite(toMs)) throw new Error('to must be a time.');
+    let rows = schedule.all().filter((o) => o.phase !== 'series');
+    if (phase) rows = rows.filter((o) => o.phase === phase);
+    if (fromMs != null) rows = rows.filter((o) => Date.parse(o.end) > fromMs);
+    if (toMs != null) rows = rows.filter((o) => Date.parse(o.start) < toMs);
+    rows.sort((a, b) => String(a.start).localeCompare(String(b.start)));
+    const conflicts = [];
+    const overlaps = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const at = Date.parse(row.start);
+      const picture = capacityAt(schedule.all(), at, cfg.maxMeetings);
+      const key = row.start;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (picture.over_by > 0) conflicts.push({ at: row.start, ...picture });
+      else if (flag_overlaps && picture.affected.length > 1) overlaps.push({ at: row.start, schedule_ids: picture.affected.map((o) => o.schedule_id) });
+    }
+    return ok({ orders: rows.map((row) => orderView(row, timezone)), conflicts, ...(flag_overlaps ? { overlaps } : {}) });
+  }));
+
+  server.registerTool('update_schedule', {
+    title: 'Update a scheduled meeting',
+    description: 'When occurrence is omitted, the change applies to the rule and the whole future series. When occurrence is set, only that occurrence changes. A transcript that already exists is not rewritten. The admin password is not accepted.',
+    inputSchema: {
+      schedule_id: z.string().min(3).max(80),
+      occurrence: z.string().max(80).optional().describe('One occurrence id. Omit to change the whole future series.'),
+      start: z.string().max(64).optional(),
+      end: z.string().max(64).optional(),
+      topic: z.string().max(200).optional(),
+      room_password: z.string().min(1).max(200).optional().describe('Replaces the stored join password. Not returned.'),
+      timezone: z.string().max(80).optional(),
+      recurrence: z.string().max(500).optional(),
+      early_margin: z.number().int().min(0).optional(),
+    },
+  }, guarded(async (args) => {
+    const { schedule_id, occurrence, ...patch } = args;
+    const order = schedule.update(schedule_id, occurrence, patch);
+    emit({ type: 'schedule.updated', data: publicOrder(order) });
+    await clock.emitCapacity(Date.now(), false);
+    return ok(orderView(order));
+  }));
+
+  server.registerTool('cancel_schedule', {
+    title: 'Cancel a scheduled meeting',
+    description: 'Cancels one occurrence, or the series when occurrence is omitted. Leaves a live occurrence unless leave_if_live is false.',
+    inputSchema: {
+      schedule_id: z.string().min(3).max(80),
+      occurrence: z.string().max(80).optional(),
+      leave_if_live: z.boolean().optional().describe('Default true. Leave if that occurrence is live or in overrun.'),
+    },
+  }, guarded(async ({ schedule_id, occurrence, leave_if_live }) => {
+    const before = schedule.all().filter((o) => o.schedule_id === schedule_id || o.occurrence_id === occurrence);
+    const live = before.filter((o) => (o.phase === 'live' || o.phase === 'overrun') && (!occurrence || o.occurrence_id === occurrence));
+    const touched = schedule.cancel(schedule_id, occurrence);
+    if (leave_if_live !== false) {
+      for (const order of live) {
+        const m = order.meeting_id && meetings.get(order.meeting_id);
+        if (m && m.state === 'live') await depart(m, 'cancel');
+      }
+    }
+    for (const order of touched) emit({ type: 'schedule.cancelled', data: publicOrder(order) });
+    await clock.emitCapacity(Date.now(), false);
+    return ok({ cancelled: touched.map(publicOrder) });
+  }));
+
+  server.registerTool('import_schedule', {
+    title: 'Import schedule orders',
+    description: 'Bulk path for a calendar Grok Bot has already read. Each item is a schedule_meeting body plus external_id. This process does not call a calendar. A recurrence rule it cannot expand is reported and not stored. Over capacity is stored and listed in conflicts.',
+    inputSchema: {
+      orders: z.array(z.object({
+        link: z.string().url().max(2048),
+        room_password: z.string().min(1).max(200),
+        start: z.string().min(1).max(64),
+        end: z.string().max(64).optional(),
+        timezone: z.string().max(80).optional(),
+        recurrence: z.string().max(500).optional(),
+        early_margin: z.number().int().min(0).optional(),
+        external_id: z.string().max(200).optional(),
+        topic: z.string().max(200).optional(),
+      })).max(500),
+    },
+  }, guarded(async ({ orders }) => {
+    const created = [];
+    const updated = [];
+    const unchanged = [];
+    const conflicts = [];
+    for (const item of orders) {
+      try {
+        const added = schedule.add(item);
+        const id = added.order.schedule_id;
+        if (added.updated) updated.push(id);
+        else if (added.duplicate) unchanged.push(id);
+        else created.push(id);
+        const meeting = ensureMeeting(schedule.get(added.order.occurrence_id || id) || added.order);
+        const capacity = capacityAt(schedule.all(), Date.parse(added.order.start), cfg.maxMeetings);
+        if (capacity.over_by > 0) conflicts.push({ external_id: item.external_id || '', schedule_id: id, over_by: capacity.over_by, reason: 'capacity' });
+        if (!added.order.meeting_id) schedule.setPhase(added.order.occurrence_id || id, { meeting_id: meeting.meeting_id });
+      } catch (e) {
+        conflicts.push({ external_id: item.external_id || '', reason: 'rule', error: String((e && e.message) || e) });
+      }
+    }
+    await clock.emitCapacity(Date.now(), false);
+    return ok({ created, updated, unchanged, conflicts });
+  }));
+
+  server.registerTool('meeting_status', {
+    title: 'Status of one meeting',
+    description: 'One meeting, one object: phase, people, whether the bot is thinking, speaking, or listening, and line counts. No room password, admin password, bot password, or model key.',
+    inputSchema: { meeting_id: meetingId },
+  }, guarded(async ({ meeting_id }) => {
+    const m = need(meeting_id);
+    const order = schedule.all().find((o) => o.meeting_id === meeting_id && o.phase !== 'series') || null;
+    let people = null;
+    let hand = null;
+    let mic = null;
+    let camera = null;
+    if (m.state === 'live' && m.session_id && typeof bot.people === 'function') people = await bot.people(m.session_id);
+    if (m.state === 'live' && m.session_id && typeof bot.meetingState === 'function') {
+      const extra = await bot.meetingState(m.session_id);
+      if (extra && extra.applied && extra.result) {
+        if ('hand' in extra.result) hand = !!extra.result.hand;
+        if ('mic' in extra.result) mic = !!extra.result.mic;
+        if ('camera' in extra.result) camera = !!extra.result.camera;
+      }
+    }
+    return ok({
+      meeting_id: m.meeting_id,
+      topic: m.topic,
+      state: m.state,
+      phase: order ? order.phase : m.state,
+      link: m.link,
+      people,
+      transcribing: !!m.transcribing,
+      thinking: thinkingOf(m),
+      speaking: !!(bot.queue && typeof bot.queue.isSpeaking === 'function' && (bot.queue.isSpeaking(m.meeting_id) || bot.queue.isSpeaking(m.session_id))),
+      listening: !!m.transcribing && !m.muted,
+      hand,
+      mic,
+      camera,
+      eyes: false,
+      counts: counts(m.meeting_id),
+      last_error: '',
+      started_at: m.started_at,
+      ended_at: m.ended_at,
+      schedule_id: order ? order.schedule_id : '',
+      start: order ? order.start : null,
+      end: order ? order.end : null,
+    });
+  }));
+
+  server.registerTool('tail_lines', {
+    title: 'Tail speech, chat, and spoken lines',
+    description: 'Lines with seq greater than since. kinds may be speech, chat, or spoken. Omit meeting_id to read every meeting. Lines are raw.',
+    inputSchema: {
+      meeting_id: meetingId.optional(),
+      since: z.number().int().min(0).optional(),
+      kinds: z.array(z.enum(['speech', 'chat', 'spoken'])).optional(),
+    },
+  }, guarded(async ({ meeting_id, since, kinds }) => {
+    if (meeting_id) need(meeting_id);
+    return ok(transcript.query({ meetingId: meeting_id, since, kinds }));
+  }));
+
+  server.registerTool('meetings_report', {
+    title: 'Cross-meeting lines',
+    description: 'Rows a summary is built from. This is not the summary. Grok Bot writes the prose.',
+    inputSchema: {
+      since: z.number().int().min(0).optional(),
+      meeting_ids: z.array(meetingId).optional(),
+    },
+  }, guarded(async ({ since, meeting_ids }) => {
+    const wanted = meeting_ids && meeting_ids.length ? meeting_ids : meetings.all().map((m) => m.meeting_id);
+    const window = transcript.query({ since, kinds: ['speech', 'chat', 'spoken'] });
+    return ok({
+      since: window.since,
+      next: window.next,
+      meetings: wanted.map((id) => {
+        const m = meetings.get(id);
+        if (!m) return null;
+        return {
+          meeting_id: id,
+          topic: m.topic,
+          state: m.state,
+          counts: counts(id),
+          lines: window.lines.filter((l) => l.meeting_id === id),
+        };
+      }).filter(Boolean),
+    });
+  }));
+
+  server.registerTool('tail_events', {
+    title: 'Tail connector events',
+    description: 'Ordered events for the whole connector, including capacity.near, capacity.reached, and capacity.cleared. Pass next back as since.',
+    inputSchema: { since: z.number().int().min(0).optional() },
+  }, guarded(async ({ since }) => ok(events.tail(since || 0))));
+
+  server.registerTool('capacity_status', {
+    title: 'Capacity of the meeting bot',
+    description: 'The latest capacity picture: level ok, near, or reached, who is seated, who is waiting, and future clashes inside the horizon. Grok Bot calls this on connect and when the human asks.',
+    inputSchema: {},
+  }, guarded(async () => ok(clock.picture(Date.now()))));
 
   const subs = new Set();
   server.server.registerCapabilities({ resources: { subscribe: true } });
@@ -398,7 +773,9 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return {};
   });
   const off = transcript.onLine((row) => {
-    if (!row || !row.meeting_id) return;
+    if (!row || !row.meeting_id || row._evented) return;
+    row._evented = true;
+    emit({ type: 'line.' + row.kind, meeting_id: row.meeting_id, data: { seq: row.seq, speaker: row.speaker, text: row.text, kind: row.kind } });
     const uri = 'gifos://meeting/' + row.meeting_id + '/transcript';
     if (!subs.has(uri)) return;
     server.server.sendResourceUpdated({ uri }).catch(() => {});

@@ -73,6 +73,14 @@ async function main() {
     import('./driver.js'),
     import('./voice/kokoro.js'),
   ]);
+  // Until serveWorker takes over, nothing else listens. A boot can sit in a
+  // stalled Kokoro download for good, and no browser is open yet, so a
+  // supervisor that dies or closes ends it at once (the part file is kept
+  // for the next start to resume).
+  const onDisconnect = () => process.exit(1);
+  const onClose = (msg) => { if (msg && msg.type === 'close') process.exit(0); };
+  process.on('disconnect', onDisconnect);
+  process.on('message', onClose);
   process.once('message', async (boot) => {
     const { cfg, creds } = boot || {};
     let kokoro = null;
@@ -85,6 +93,9 @@ async function main() {
         process.exit(1);
       }
     }
+    process.removeListener('disconnect', onDisconnect);
+    process.removeListener('message', onClose);
+    if (!process.connected) process.exit(1);
     serveWorker(process, (queue) => new MeetingBotDriver(cfg, creds, kokoro, { queue }));
   });
   process.send({ event: 'boot' });

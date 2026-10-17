@@ -37,7 +37,10 @@ class FakeDriver {
   async people() { return [{ name: 'Ada', bot: false }]; }
   async setVoice(s) { this.log.push(['setVoice', s]); return { applied: true }; }
   async list() { return Array.from({ length: this.seq }, (_, i) => ({ id: 'mt_' + (i + 1) })); }
-  async info() { return { state: 'ready', connected: true, bot_name: this.boot.creds.name, bot_sessions: [] }; }
+  async info() {
+    if (this.infoStuck) return new Promise(() => {});
+    return { state: 'ready', connected: true, bot_name: this.boot.creds.name, bot_sessions: [] };
+  }
   async close() {
     clearInterval(this.browser);
     this.browser = null;
@@ -51,11 +54,13 @@ class FakeDriver {
   // Joins wait until releaseJoins(), so a test can time one out and then let it land.
   async holdJoins() { let release; const promise = new Promise((r) => { release = r; }); this.held = { promise, release }; }
   async releaseJoins() { const h = this.held; this.held = null; if (h) h.release(); }
+  // info never answers, while pings and other calls still do.
+  async stickInfo() { this.infoStuck = true; }
   // Blocks the event loop for good, the way a wedged worker would: no reply, no pong.
   async hang() { for (;;) { /* stuck */ } }
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stickInfo']);
 });
 process.send({ event: 'boot' });

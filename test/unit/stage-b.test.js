@@ -477,3 +477,21 @@ test('a worker whose supervisor is killed closes its browser and exits instead o
   assert.equal(orphaned, false, 'worker ' + pid + ' outlived its supervisor');
   assert.equal(fs.readFileSync(path.join(home, 'closed-w0'), 'utf8'), String(pid));
 });
+
+test('status answers at once when workers never answer info; each such row says so and the workers stay up', { timeout: 15000 }, async () => {
+  makePool({ heartbeatMs: 50, stuckMs: 5000, callMs: 5000 });
+  await pool.join('https://gifos.app/run.html#v=roomA', '');
+  await pool.join('https://gifos.app/run.html#v=roomB', '');
+  await pool.join('https://gifos.app/run.html#v=roomC', '');
+  await pool.workers[0].call('stickInfo');
+  await pool.workers[1].call('stickInfo');
+  const t0 = Date.now();
+  const info = await pool.info();
+  const took = Date.now() - t0;
+  assert.ok(took < 2000, 'status took ' + took + 'ms');
+  assert.deepEqual(info.workers.map((w) => [w.worker, w.state, w.rooms]), [[0, 'ready', 2], [1, 'ready', 1]]);
+  for (const row of info.workers) assert.match(row.error, /did not answer info/);
+  // The workers are still up and still take calls.
+  await pool.say('w0:mt_1', 'still here');
+  await pool.say('w1:mt_1', 'still here');
+});

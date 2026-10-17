@@ -661,3 +661,24 @@ test('a one-worker pool whose browser will not start reports why on the join', a
   makePool({ workers: 1 });
   await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /Chromium would not start/);
 });
+
+test('a late join whose leave fails keeps its seat and is left again on its own, so the bot is not stranded in the room', { timeout: 10000 }, async () => {
+  makePool({ workers: 1, rooms: 1, callMs: 2000, joinMs: 200, leaveRetryMs: 100 });
+  await pool.ensureStarted();
+  await pool.workers[0].call('holdJoins');
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /did not answer join within 200ms/);
+  await pool.workers[0].call('breakLeave', 'Meeting Bot: the room did not answer');
+  await pool.workers[0].call('releaseJoins');
+  const leaves = async () => (await pool.workers[0].call('calls')).filter((r) => r[0] === 'leave').length;
+  assert.ok(await until(async () => (await leaves()) >= 1), 'the late join was never left');
+  // The bot still sits in roomA, so that seat is not free and status says so.
+  assert.ok(await until(() => pool.workers[0].used === 1), 'the stranded room does not hold a seat');
+  assert.equal(pool.hasSeat(), false);
+  assert.equal((await pool.info()).workers[0].stray_rooms, 1);
+  // It is left again without anyone calling leave_meeting, once the room answers.
+  assert.ok(await until(async () => (await leaves()) >= 2), 'the failed late leave was never tried again');
+  await pool.workers[0].call('fixLeave');
+  assert.ok(await until(() => pool.workers[0].used === 0), 'the seat stayed taken after the retry worked');
+  assert.equal((await pool.info()).workers[0].stray_rooms, undefined);
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w0:mt_2');
+});

@@ -1,6 +1,8 @@
 // The schedule clock. One tick decides who joins, who waits, and who leaves.
 // It does not read a calendar. Callers pass `now` so a test can move the clock.
 import { QUIET_MS, briefOrder, capacityPicture, publicOrder } from './schedule.js';
+import { readPrivate, writePrivate } from './private-file.js';
+import { log } from './log.js';
 
 function idKey(rows) {
   return (rows || []).map((row) => row.occurrence_id || row.schedule_id || row.meeting_id || '').join(',');
@@ -46,13 +48,30 @@ export function createClock(deps) {
   // joined again until its wait is over: one minute, doubling to 30. Joining
   // it every tick would drop every other meeting on those workers each time.
   // Keyed by room, so a start_meeting by hand waits on the same clock.
+  // Kept in deps.crashFile, so a supervisor restarted within the wait does
+  // not walk straight back in.
   const crashed = new Map(); // room -> { count, at }
+  if (deps.crashFile) {
+    const saved = readPrivate(deps.crashFile, 'starting with no crash waits', (x) => x && typeof x.rooms === 'object');
+    for (const [room, row] of Object.entries((saved && saved.rooms) || {})) {
+      if (row && row.count > 0 && Number.isFinite(row.at)) crashed.set(room, { count: row.count, at: row.at });
+    }
+  }
+  function saveCrashes() {
+    if (!deps.crashFile) return;
+    // A save that fails keeps the wait in memory; the tick goes on.
+    try { writePrivate(deps.crashFile, JSON.stringify({ rooms: Object.fromEntries(crashed) }, null, 2) + '\n'); } catch (e) { log('crash waits not saved: ' + e.message); }
+  }
+  function crashCleared(room) {
+    if (crashed.delete(room)) saveCrashes();
+  }
   const crashLeft = (room, now) => (crashed.has(room) ? Math.max(0, crashed.get(room).at - now) : 0);
   const crashWaits = (room, now) => crashLeft(room, now) > 0;
   function crashFound(room, now) {
     const count = (crashed.has(room) ? crashed.get(room).count : 0) + 1;
     const ms = Math.min(CRASH_MAX_MS, crashMs * 2 ** (count - 1));
     crashed.set(room, { count, at: now + ms });
+    saveCrashes();
     return ms;
   }
   function joinFailed(room, meetingId, e, now) {
@@ -155,7 +174,7 @@ export function createClock(deps) {
       const seated = meeting && meeting.state === 'live';
       if ((order.phase === 'upcoming' || order.phase === 'waiting_for_capacity') && now >= end) {
         const reason = order.phase === 'waiting_for_capacity' ? 'capacity' : 'late';
-        crashed.delete(order.room);
+        crashCleared(order.room);
         deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'missed', missed_reason: reason });
         emit('schedule.missed', order.meeting_id, { ...briefOrder(order), reason });
         continue;
@@ -172,7 +191,7 @@ export function createClock(deps) {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
           waited.delete(orderKey(order));
-          crashed.delete(order.room);
+          crashCleared(order.room);
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
@@ -193,7 +212,7 @@ export function createClock(deps) {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
           waited.delete(orderKey(order));
-          crashed.delete(order.room);
+          crashCleared(order.room);
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: now >= end ? 'overrun' : 'live', meeting_id: joined.meeting_id, overrun_at: now >= end ? new Date(now).toISOString() : '' });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
@@ -233,7 +252,7 @@ export function createClock(deps) {
         try {
           const joined = await deps.reseat(m);
           if (!joined || joined.state !== 'live') continue; // ended while joining
-          crashed.delete(m.room);
+          crashCleared(m.room);
           emit('meeting.joined', joined.meeting_id, { topic: joined.topic, link: joined.link, state: 'live', reason: 'worker' });
         } catch (e) {
           if (!isNoSeat(e)) joinFailed(m.room, m.meeting_id, e, now);
@@ -250,7 +269,7 @@ export function createClock(deps) {
     // record a new crash (returns its wait), forget it after a good join.
     crashLeft,
     crashFound,
-    crashCleared: (room) => crashed.delete(room),
+    crashCleared,
     picture(now = Date.now()) {
       return capacityPicture({
         orders: deps.schedule.all(),

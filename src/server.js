@@ -2,6 +2,7 @@
 // MeetingBotDriver in driver.js, or a fake in the unit tests).
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import path from 'node:path';
 import { z } from 'zod';
 import { newRoom, linkFor, roomFromLink, publicView } from './meetings.js';
 import { plainLink } from './invite.js';
@@ -526,6 +527,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
 
   const clock = createClock({
     schedule,
+    crashFile: cfg.home ? path.join(cfg.home, 'crashes.json') : '',
     meetings,
     cap: cfg.maxMeetings,
     near: cfg.capacityNear,

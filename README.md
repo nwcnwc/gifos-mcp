@@ -143,6 +143,9 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_TTS_VOICE` | `af_heart` | Kokoro voice name, passed through with local voice. |
 | `GIFOS_TTS_URL` | empty | HTTP speech stand-in. This process fetches it and answers `tts`. Replaces the Kokoro install. The page does not request it. `GIFOS_TTS_ENGINE=none` wins. |
 | `GIFOS_STT_URL` | empty | HTTP caption stand-in. This process posts the audio when `GIFOS_STT_APP=none`. Not passed to Meet Bot as a URL. |
+| `GIFOS_MAX_MEETINGS` | `4` | Provisional cap on seated meetings until a machine is measured. A manual join over the cap is refused. A scheduled join waits. |
+| `GIFOS_WORKERS` | `1` | Stage B. More than 1 makes this process a supervisor and runs each Meet Bot in its own child process and Chromium. Worker 0 keeps the bot name and `profile-bot`. Worker n is its own bot, named `<name>-wn`, with `profile-bot-wn`. A meeting stays on the worker that joined it. If a worker stops, its meetings go back to `scheduled` and the clock rejoins any order still in its window. |
+| `GIFOS_WORKER_ROOMS` | cap / workers, rounded up | Rooms per worker. Workers times rooms must cover `GIFOS_MAX_MEETINGS`. |
 
 ## Tools
 

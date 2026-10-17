@@ -9,6 +9,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { loadConfig, botCredentials } from '../src/config.js';
 import { MeetingStore } from '../src/meetings.js';
 import { MeetingBotDriver } from '../src/driver.js';
+import { WorkerPool } from '../src/pool.js';
+import { dropLostMeetings } from '../src/supervisor.js';
 import { ScheduleStore } from '../src/schedule.js';
 import { EventLog } from '../src/events.js';
 import { SpeechQueue } from '../src/voice/queue.js';
@@ -27,7 +29,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
     'GIFOS_MCP_HOME, GIFOS_HEADLESS, GIFOS_CHROME, GIFOS_TIMEOUT_MS, GIFOS_MCP_HTTP_TOKEN,\n' +
     'GIFOS_LLM_URL, GIFOS_LLM_MODEL, GIFOS_LLM_APP, GIFOS_CONVERSATION_VOICE, GIFOS_RESPOND_TO_COMMAND,\n' +
     'GIFOS_VOICE, GIFOS_TRANSCRIPT_POLL_MS, GIFOS_TTS_ENGINE, GIFOS_TTS_APP, GIFOS_TTS_URL, GIFOS_TTS_VOICE, GIFOS_STT_URL,\n' +
-    'GIFOS_MAX_MEETINGS, GIFOS_CAPACITY_NEAR, GIFOS_SCHEDULE_HORIZON_MS.\n' +
+    'GIFOS_MAX_MEETINGS, GIFOS_CAPACITY_NEAR, GIFOS_SCHEDULE_HORIZON_MS, GIFOS_WORKERS, GIFOS_WORKER_ROOMS.\n' +
     'GIFOS_LLM_KEY stays in this process. It is not passed to Meet Bot, not written into the page, and not printed.\n' +
     'Kokoro (voice af_heart) is downloaded into GIFOS_MCP_HOME/kokoro on first start. This process injects itself as the tts, stt, and smartest provider. The page does not fetch those calls.\n' +
     'See https://github.com/nwcnwc/gifos-mcp#readme\n');
@@ -38,7 +40,8 @@ if (argv.includes('--version')) { process.stdout.write(VERSION + '\n'); process.
 const cfg = loadConfig();
 const creds = botCredentials(cfg);
 let kokoro = null;
-if (cfg.voice.tts.source === 'mcp') {
+// With several workers, each worker loads its own Kokoro from the same weights.
+if (cfg.voice.tts.source === 'mcp' && cfg.workers === 1) {
   log('setting up Kokoro (weights, voice ' + cfg.voice.tts.voice + ')');
   kokoro = await installKokoro({ home: cfg.home, voice: cfg.voice.tts.voice });
 }
@@ -47,18 +50,21 @@ const schedule = new ScheduleStore(cfg.home);
 const events = new EventLog(cfg.home);
 const reset = meetings.resetLive();
 if (reset) log(reset + ' meeting(s) were live in the last run; they are back to scheduled');
-const queue = new SpeechQueue({
-  onThinking(id, on) {
-    const m = meetings.all().find((row) => row.meeting_id === id || row.session_id === id);
-    if (!m) return;
-    meetings.update(m.meeting_id, { thinking: !!on });
-    events.append({ type: 'meeting.state', meeting_id: m.meeting_id, data: { thinking: !!on, transcribing: !!m.transcribing } });
-  },
-});
-const bot = new MeetingBotDriver(cfg, creds, kokoro, { queue });
+function onThinking(id, on) {
+  const m = meetings.all().find((row) => row.meeting_id === id || row.session_id === id);
+  if (!m) return;
+  meetings.update(m.meeting_id, { thinking: !!on });
+  events.append({ type: 'meeting.state', meeting_id: m.meeting_id, data: { thinking: !!on, transcribing: !!m.transcribing } });
+}
+// One worker: the Meet Bot runs in this process, as in stage A. Several:
+// this process is the supervisor and each worker is a child with its own browser.
+const bot = cfg.workers > 1
+  ? new WorkerPool(cfg, creds, { workers: cfg.workers, rooms: cfg.workerRooms, onThinking })
+  : new MeetingBotDriver(cfg, creds, kokoro, { queue: new SpeechQueue({ onThinking }) });
 const live = new LiveTranscript(cfg.home);
 const hide = (text) => scrub(text, [cfg.voice.key, creds.password]);
 const captions = watchCaptions({ meetings, bot, live, intervalMs: cfg.voice.pollMs, botName: creds.name, scrubText: hide });
+if (bot instanceof WorkerPool) bot.onLost(dropLostMeetings({ meetings, events, captions }));
 const mcpArgs = { cfg, meetings, bot, live, captions, botName: creds.name, botPassword: creds.password, schedule, events };
 const boot = createServer(mcpArgs);
 boot.clock.start();

@@ -55,6 +55,10 @@ export function loadConfig(env = process.env) {
     maxMeetings: positiveInt(env.GIFOS_MAX_MEETINGS, 4, 'GIFOS_MAX_MEETINGS'),
     capacityNear: nearCount(env),
     horizonMs: positiveInt(env.GIFOS_SCHEDULE_HORIZON_MS, 24 * 60 * 60 * 1000, 'GIFOS_SCHEDULE_HORIZON_MS'),
+    // Stage B: more than one worker runs each Meet Bot in its own child
+    // process and Chromium. Rooms per worker defaults to an even share of the cap.
+    workers: positiveInt(env.GIFOS_WORKERS, 1, 'GIFOS_WORKERS'),
+    workerRooms: workerRooms(env),
     voice: voiceConfig(env),
   };
 }
@@ -73,6 +77,14 @@ function nearCount(env) {
   const near = positiveInt(env.GIFOS_CAPACITY_NEAR, 1, 'GIFOS_CAPACITY_NEAR');
   if (near > cap) throw new Error('GIFOS_CAPACITY_NEAR cannot be above GIFOS_MAX_MEETINGS.');
   return near;
+}
+
+function workerRooms(env) {
+  const cap = positiveInt(env.GIFOS_MAX_MEETINGS, 4, 'GIFOS_MAX_MEETINGS');
+  const workers = positiveInt(env.GIFOS_WORKERS, 1, 'GIFOS_WORKERS');
+  const rooms = positiveInt(env.GIFOS_WORKER_ROOMS, Math.ceil(cap / workers), 'GIFOS_WORKER_ROOMS');
+  if (rooms * workers < cap) throw new Error('GIFOS_WORKERS x GIFOS_WORKER_ROOMS must cover GIFOS_MAX_MEETINGS.');
+  return rooms;
 }
 
 const VOICES = new Set(['none', 'grok', 'local']);

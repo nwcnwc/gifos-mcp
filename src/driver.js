@@ -282,7 +282,7 @@ export class MeetingBotDriver {
     if (!audio) { audio = path.join(this.cfg.home, 'silence.wav'); if (!fs.existsSync(audio)) silenceWav(audio); }
 
     log('starting the bot browser for ' + this.cfg.gifosUrl);
-    const ctx = await this.launch('profile-bot', audio);
+    const ctx = await this.launch(this.cfg.profile || 'profile-bot', audio);
     this.bot = { ctx };
     const desk = await this.desktop(ctx);
     this.bot.desk = desk;

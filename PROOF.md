@@ -73,3 +73,26 @@ Cost per worker (its Node process, Chromium, and every child), sampled over 5 s 
 | One room, one person talking | 1.07–1.17 GB | 9–46% |
 
 `say` is not in this run: the 0.9.23 Meeting Bot listing has no `MeetingBot.interject`, so it reports that gap.
+
+## Rooms per Chromium: load run (2026-10-17)
+
+`GIFOS_APP_DIR=../gifos-app E2E_ROOMS=1,4,8 npm run test:e2e:load` at `999da12`, against `gifos-app`
+`release/0.9.23` (`546b855`) and its own Meeting Bot listing, one worker (one Chromium, one Meeting Bot),
+transcription on with the synthetic speech-to-text app, conversation voice off. Node v22.22.1, Playwright 1.61.1,
+a 32-core, 61 GB Linux machine. The people ran in two browsers, one on that machine and one on another machine
+(port-forwarded), and are not counted. Cost is the `gifos-mcp` process and its whole tree (Chromium included),
+sampled over 10 s. PSS splits pages shared between Chromium's processes; summed RSS counts them once per process.
+Two runs, both 13/13 checks (every room live, `status` shows every session, each person sees one bot, every
+transcript holds its own person and nobody else, every room ends).
+
+| Rooms | Bot alone: PSS / RSS | Bot alone: CPU | One person talking in each: PSS / RSS | Talking: CPU | `gifos-mcp` alone RSS |
+|---|---|---|---|---|---|
+| 1 | 906–927 / 1415–1440 MB | 8% | 657–660 / 1215 MB | 82–83% | 153–156 MB |
+| 4 | 745 / 1281–1282 MB | 16–17% | 744–794 / 1319–1365 MB | 142–165% | 159–162 MB |
+| 8 | 836–843 / 1374–1378 MB | 25–28% | 928–962 / 1509–1544 MB | 211–233% | 169–171 MB |
+
+CPU is percent of one core. Meeting Bot keeps every room in the same 9 processes, so memory hardly grows with
+rooms (about 40 MB PSS per extra talking room from 1 to 8); CPU does, about 20% of a core per extra talking room
+after the first room's ~80%. This run does not set the `GIFOS_MAX_MEETINGS` default: the synthetic speech-to-text
+costs almost nothing, so the real Whisper cost per talking room, and two overlapping `say` calls (the 0.9.23
+listing lacks `MeetingBot.interject`), are still to be measured.

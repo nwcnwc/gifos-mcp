@@ -293,6 +293,9 @@ Variants:
 
 - `E2E_STT=synthetic` swaps Whisper for a tiny test provider, so no WAV and no model download are needed.
 - `RELAY_SCRIPT=<path>` starts a local GifOS relay on `127.0.0.1:19511` instead of using `E2E_RELAY`.
+- `npm run test:e2e:load` (`E2E_ROOMS=1,4,8`) measures one Chromium and Meeting Bot holding more and more rooms,
+  the bot alone and with one person talking in each, and checks every room is still heard. Results go to
+  `.e2e/proof-load/load.json`; see [PROOF.md](PROOF.md).
 
 ## License
 

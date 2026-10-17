@@ -3,6 +3,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -479,6 +480,64 @@ test('a worker whose supervisor is killed closes its browser and exits instead o
   assert.equal(fs.readFileSync(path.join(home, 'closed-w0'), 'utf8'), String(pid));
 });
 
+const until = async (fn, ms = 3000) => {
+  const end = Date.now() + ms;
+  for (;;) {
+    if (await fn()) return true;
+    if (Date.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+};
+
+// A Kokoro mirror that takes every request and never answers, so a real
+// worker's boot (src/worker.js) stays in the weights download.
+async function stalledMirror(t) {
+  const asked = [];
+  const server = http.createServer((req) => { asked.push(req.url); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  return { host: 'http://127.0.0.1:' + server.address().port, asked };
+}
+
+const alivePid = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return false; } };
+
+test('a worker still booting (Kokoro download) exits when its supervisor is killed', { timeout: 30000 }, async (t) => {
+  const mirror = await stalledMirror(t);
+  const bootHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-stage-b-boot-'));
+  t.after(() => fs.rmSync(bootHome, { recursive: true, force: true }));
+  const PARENT = fileURLToPath(new URL('./fixtures/boot-parent.js', import.meta.url));
+  const parent = fork(PARENT, [bootHome, mirror.host], { stdio: ['ignore', 'pipe', 'inherit', 'ipc'] });
+  t.after(() => { try { parent.kill('SIGKILL'); } catch (e) { /* gone */ } });
+  const pid = await new Promise((resolve, reject) => {
+    let out = '';
+    parent.stdout.on('data', (d) => { out += d; if (out.includes('\n')) resolve(Number(out.trim())); });
+    parent.once('exit', (code) => reject(new Error('parent exited ' + code)));
+  });
+  t.after(() => { if (alivePid(pid)) process.kill(pid, 'SIGKILL'); });
+  assert.ok(await until(() => mirror.asked.length > 0, 20000), 'the worker never asked the mirror for weights');
+  assert.equal(alivePid(pid), true);
+  parent.kill('SIGKILL');
+  await until(() => !alivePid(pid), 5000);
+  assert.equal(alivePid(pid), false, 'worker ' + pid + ' outlived its supervisor while booting');
+});
+
+test('close() stops a worker still booting (Kokoro download) at once, not after closeMs', { timeout: 30000 }, async (t) => {
+  const mirror = await stalledMirror(t);
+  const bootHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-stage-b-boot-'));
+  t.after(() => fs.rmSync(bootHome, { recursive: true, force: true }));
+  const bootCfg = loadConfig({ GIFOS_MCP_HOME: bootHome, GIFOS_VOICE: '0', GIFOS_KOKORO_URL: mirror.host });
+  pool = new WorkerPool(bootCfg, CREDS, { workers: 1, rooms: 1, closeMs: 10000 });
+  pool.workers[0].spawn().catch(() => {});
+  const pid = pool.workers[0].child.pid;
+  t.after(() => { if (alivePid(pid)) process.kill(pid, 'SIGKILL'); });
+  assert.ok(await until(() => mirror.asked.length > 0, 20000), 'the worker never asked the mirror for weights');
+  const t0 = Date.now();
+  await pool.close();
+  const took = Date.now() - t0;
+  assert.ok(took < 3000, 'close took ' + took + 'ms (the worker ignored close while booting)');
+  assert.equal(alivePid(pid), false);
+});
+
 test('status answers at once when workers never answer info; each such row says so and the workers stay up', { timeout: 15000 }, async () => {
   makePool({ heartbeatMs: 50, stuckMs: 5000, callMs: 5000, infoMs: 500 });
   await pool.join('https://gifos.app/run.html#v=roomA', '');
@@ -551,15 +610,6 @@ test('set_voice still reaches the other workers when one never answers it, after
   assert.equal(got.applied, true);
   assert.deepEqual(await voiceCalls(pool.workers[1]), [local]);
 });
-
-const until = async (fn, ms = 3000) => {
-  const end = Date.now() + ms;
-  for (;;) {
-    if (await fn()) return true;
-    if (Date.now() > end) return false;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-};
 
 test('a worker that refused set_voice is asked again on its own, without a new join, and status shows it pending until it takes it', { timeout: 10000 }, async () => {
   makePool({ voiceRetryMs: 100 });

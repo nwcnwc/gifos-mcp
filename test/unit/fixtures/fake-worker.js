@@ -21,7 +21,11 @@ class FakeDriver {
     if (this.held) await this.held.promise;
     return 'mt_' + (++this.seq);
   }
-  async leave(id) { this.log.push(['leave', id]); }
+  async leave(id) {
+    this.log.push(['leave', id]);
+    if (this.leaveHeld) await this.leaveHeld.promise;
+    if (this.leaveFails) throw new Error(this.leaveFails);
+  }
   async transcribe(id, on) { this.log.push(['transcribe', id, on]); }
   async say(id, text) { this.log.push(['say', id, text]); }
   async interject(id, text) {
@@ -59,6 +63,12 @@ class FakeDriver {
   // Joins wait until releaseJoins(), so a test can time one out and then let it land.
   async holdJoins() { let release; const promise = new Promise((r) => { release = r; }); this.held = { promise, release }; }
   async releaseJoins() { const h = this.held; this.held = null; if (h) h.release(); }
+  // leave fails with this text until fixLeave().
+  async breakLeave(text) { this.leaveFails = String(text); }
+  async fixLeave() { this.leaveFails = null; }
+  // Leaves wait until releaseLeaves().
+  async holdLeaves() { let release; const promise = new Promise((r) => { release = r; }); this.leaveHeld = { promise, release }; }
+  async releaseLeaves() { const h = this.leaveHeld; this.leaveHeld = null; if (h) h.release(); }
   // info never answers, while pings and other calls still do.
   async stickInfo() { this.infoStuck = true; }
   // setVoice fails until fixVoice().
@@ -71,6 +81,6 @@ class FakeDriver {
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves']);
 });
 process.send({ event: 'boot' });

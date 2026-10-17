@@ -479,7 +479,7 @@ test('a worker whose supervisor is killed closes its browser and exits instead o
 });
 
 test('status answers at once when workers never answer info; each such row says so and the workers stay up', { timeout: 15000 }, async () => {
-  makePool({ heartbeatMs: 50, stuckMs: 5000, callMs: 5000 });
+  makePool({ heartbeatMs: 50, stuckMs: 5000, callMs: 5000, infoMs: 500 });
   await pool.join('https://gifos.app/run.html#v=roomA', '');
   await pool.join('https://gifos.app/run.html#v=roomB', '');
   await pool.join('https://gifos.app/run.html#v=roomC', '');

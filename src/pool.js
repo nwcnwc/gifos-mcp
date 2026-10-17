@@ -14,6 +14,8 @@
 // - A call that gets no answer within callMs (joinMs for a browser start or
 //   a join) fails, but a worker that still answers the heartbeat stays up.
 //   A join that lands after its caller gave up is left at once.
+// - status and list ask every ready worker at once and wait at most infoMs,
+//   so one stuck worker shows as an error row instead of holding status.
 // - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
 //   up to a minute), and joins go to another worker meanwhile.
 import path from 'node:path';
@@ -172,10 +174,13 @@ class Worker {
   }
 
   async call(method, ...args) {
+    return this.callWithin(SLOW_METHODS.has(method) ? this.pool.joinMs : this.pool.callMs, method, ...args);
+  }
+
+  async callWithin(ms, method, ...args) {
     await this.spawn();
     if (!this.child) throw new Error('Worker ' + this.index + ' is not running.');
     const id = ++this.seq;
-    const ms = SLOW_METHODS.has(method) ? this.pool.joinMs : this.pool.callMs;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
@@ -224,7 +229,7 @@ class Worker {
 
 export class WorkerPool {
   // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
-  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs }
+  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs }
   constructor(cfg, creds, opts = {}) {
     this.cfg = cfg;
     this.creds = creds;
@@ -243,6 +248,7 @@ export class WorkerPool {
     // A browser start chains several page waits of cfg.timeoutMs each.
     this.callMs = opts.callMs > 0 ? opts.callMs : 60000;
     this.joinMs = opts.joinMs > 0 ? opts.joinMs : 5 * (cfg.timeoutMs || 120000);
+    this.infoMs = opts.infoMs > 0 ? opts.infoMs : 3000;
     const script = opts.workerScript || WORKER_SCRIPT;
     this.forkWorker = typeof opts.forkWorker === 'function'
       ? opts.forkWorker
@@ -359,12 +365,12 @@ export class WorkerPool {
   async snapshot(id) { const r = this.route(id); return r.w.call('snapshot', r.local); }
 
   async list() {
+    const ready = this.workers.filter((w) => w.state === 'ready');
+    const all = await Promise.all(ready.map((w) => w.callWithin(this.infoMs, 'list').catch(() => [])));
     const out = [];
-    for (const w of this.workers) {
-      if (w.state !== 'ready') continue;
-      const rows = await w.call('list').catch(() => []);
-      for (const row of rows || []) out.push({ ...row, id: 'w' + w.index + ':' + row.id, worker: w.index });
-    }
+    ready.forEach((w, i) => {
+      for (const row of all[i] || []) out.push({ ...row, id: 'w' + w.index + ':' + row.id, worker: w.index });
+    });
     return out;
   }
 
@@ -383,20 +389,21 @@ export class WorkerPool {
   }
 
   async info() {
+    const asked = this.workers.map((w) => (w.state === 'ready' ? w.callWithin(this.infoMs, 'info').then((v) => ({ v }), (e) => ({ e })) : null));
     const workers = [];
     const sessions = [];
-    for (const w of this.workers) {
+    for (const [i, w] of this.workers.entries()) {
       const row = { worker: w.index, state: w.state, rooms: w.rooms.size, budget: this.rooms };
       if (w.botName) row.bot_name = w.botName;
       if (w.child && w.child.pid) row.pid = w.child.pid;
       if (w.error) row.error = w.error;
       if (w.restartInMs() > 0) row.restart_in_ms = w.restartInMs();
-      if (w.state === 'ready') {
-        try {
-          const inf = await w.call('info');
-          row.connected = !!(inf && inf.connected);
-          for (const s of (inf && inf.bot_sessions) || []) sessions.push({ ...s, session_id: 'w' + w.index + ':' + s.session_id, worker: w.index });
-        } catch (e) { row.error = String((e && e.message) || e); }
+      const got = asked[i] && await asked[i];
+      if (got && got.e) row.error = String((got.e && got.e.message) || got.e);
+      else if (got) {
+        const inf = got.v;
+        row.connected = !!(inf && inf.connected);
+        for (const s of (inf && inf.bot_sessions) || []) sessions.push({ ...s, session_id: 'w' + w.index + ':' + s.session_id, worker: w.index });
       }
       workers.push(row);
     }

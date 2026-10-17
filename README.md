@@ -169,7 +169,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `get_meeting_state` | `meeting_id` | Who is here (`people`). Hand, microphone, and camera when Meet Bot reports them. |
 | `snapshot` | `meeting_id` | Read-only. People, plus a PNG of the Meet Bot page this server already runs. |
 | `leave_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Same outcome as `end_meeting`. |
-| `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Everyone else can stay, because GifOS meetings have no owner who can close them. |
+| `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Everyone else can stay, because GifOS meetings have no owner who can close them. If Meet Bot already left the room on its own (ended from its page or the admin meeting), the meeting is ended here too. If the leave fails for any other reason the meeting stays `live`, so calling it again reaches the room. |
 | `list_meetings` | none | Every meeting this server created or joined, with its state (`scheduled`, `live` or `ended`). |
 | `status` | none | Browser state, bot name, the bot's live sessions, and whether the voice setting was handed over. The endpoint and the key are not included. |
 | `schedule_meeting` | `link`, `room_password`, `start`, `end?` | Stores the join order, including the room password, in `schedule.json` (mode 0600). The bot joins one minute before `start`. `end` defaults to `start` plus 8 hours. The password is not returned. |

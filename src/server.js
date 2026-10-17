@@ -13,6 +13,9 @@ import { createClock } from './clock.js';
 
 export const VERSION = '0.4.0';
 
+// Meet Bot's answer for a room it no longer holds (ended from its own page
+// or the admin meeting): the bot is already out.
+const GONE_RE = /No such meeting/;
 const meetingId = z.string().min(3).max(40).describe('The meeting_id returned by create_meeting or join_meeting.');
 
 export function createServer({ cfg, meetings, bot, live, captions, botName, botPassword, schedule: scheduleIn, events: eventsIn }) {
@@ -262,7 +265,8 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     let text = scrub(m.transcript || '', secrets());
     try { text = scrub(await bot.transcript(m.session_id), secrets()); } catch (e) { /* keep the last copy */ }
     transcript.ingestCaption(m.meeting_id, text, ourNames());
-    await bot.leave(m.session_id);
+    // Any other failure keeps the meeting live, so a retry can still reach it.
+    await bot.leave(m.session_id).catch((e) => { if (!GONE_RE.test((e && e.message) || '')) throw e; });
     if (bot.queue && typeof bot.queue.leave === 'function') bot.queue.leave(m.meeting_id);
     const done = meetings.update(m.meeting_id, { state: 'ended', session_id: null, transcribing: false, thinking: false,
       transcript: text, ended_at: new Date().toISOString() });

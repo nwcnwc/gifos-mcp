@@ -1368,3 +1368,46 @@ test('join_meeting with a password on a full disk (schedule.json save fails afte
   assert.equal(await sitting(), 0);
   await client.close();
 });
+
+test('mute, unmute and get_transcript on a full disk (meetings.json save fails after the call landed) still report what the bot did and keep it in memory until the next save', { timeout: 15000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  const schedule = new ScheduleStore(home);
+  makePool();
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events, schedule });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const call = (name, args = {}) => client.callTool({ name, arguments: args });
+  const m = JSON.parse((await call('join_meeting', { link: 'http://127.0.0.1:19510/run.html#v=fullmute', topic: 'Full mute' })).content[0].text);
+  const worker = pool.workers.find((w) => w.used > 0);
+  const transcribes = async () => (await worker.call('calls')).filter((c) => c[0] === 'transcribe').map((c) => c[2]);
+  const before = (await transcribes()).length;
+
+  const save = meetings.save;
+  meetings.save = () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); };
+  let res = await call('mute', { meeting_id: m.meeting_id });
+  assert.ok(!res.isError, 'the bot stopped listening, so mute says so: ' + res.content[0].text);
+  assert.equal(JSON.parse(res.content[0].text).transcribing, false);
+  assert.deepEqual((await transcribes()).slice(before), [false], 'the bot was muted');
+  assert.equal(meetings.get(m.meeting_id).muted, true, 'muted in memory');
+
+  res = await call('unmute', { meeting_id: m.meeting_id });
+  assert.ok(!res.isError, 'the bot listens again, so unmute says so: ' + res.content[0].text);
+  assert.equal(JSON.parse(res.content[0].text).transcribing, true);
+  assert.equal(meetings.get(m.meeting_id).muted, false, 'unmuted in memory');
+
+  res = await call('get_transcript', { meeting_id: m.meeting_id });
+  assert.ok(!res.isError, 'the transcript was read, so get_transcript returns it: ' + res.content[0].text);
+  assert.match(res.content[0].text, /Ada: hello/);
+
+  // Once the disk has room, the next save writes what memory kept.
+  meetings.save = save;
+  await call('mute', { meeting_id: m.meeting_id });
+  const kept = new MeetingStore(home).get(m.meeting_id);
+  assert.equal(kept.muted, true);
+  assert.match(kept.transcript || '', /Ada: hello/);
+  assert.ok(!(await call('end_meeting', { meeting_id: m.meeting_id })).isError);
+  await client.close();
+});

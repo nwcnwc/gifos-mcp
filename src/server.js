@@ -64,7 +64,9 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
       state: 'live', session_id: sessionId, transcribing: true, muted: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
     });
-    await applyVoice();
+    // Voice is the host-injected Smartest and Text to speech providers.
+    // The new Meet Bot refuses MeetingBot.setVoice when it carries
+    // conversation_voice, llm, tts, or stt (the old URL-style setup).
     if (captions) await captions.start(updated);
     return updated;
   }

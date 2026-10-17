@@ -12,7 +12,8 @@
 // say in the worker-1 room is a spoken line under <name>-w1, never speech ->
 // chat shared in room A is not seen in room B -> worker 1 is killed: room B
 // drops to scheduled, worker 0 is untouched, the clock seats B again on
-// the restarted worker 1 by itself, and start_meeting then does not seat it twice -> end both, the bots leave.
+// the restarted worker 1 by itself, and start_meeting then does not seat it twice -> end the worker-0
+// room -> SIGKILL the supervisor: both workers and their Chromium trees exit and the worker-1 bot leaves.
 //
 // E2E_HUMAN_WS=ws://127.0.0.1:39301/pw,ws://127.0.0.1:39302/pw runs the two
 // people in Chromium on other machines, started there with
@@ -74,6 +75,31 @@ function tree(root) {
   let rss = 0, ticks = 0;
   for (const p of all) { const s = stat.get(p); if (s) { rss += s.rssPages * page; ticks += s.ticks; } }
   return { pids: all.length, rssMb: Math.round(rss), ticks };
+}
+
+// Every pid under root, root included.
+function procsUnder(root) {
+  const kids = new Map();
+  for (const d of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(d)) continue;
+    try {
+      const raw = fs.readFileSync('/proc/' + d + '/stat', 'utf8');
+      const ppid = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
+      if (!kids.has(ppid)) kids.set(ppid, []);
+      kids.get(ppid).push(Number(d));
+    } catch (e) { /* the process exited */ }
+  }
+  const all = [];
+  const walk = (p) => { all.push(p); for (const c of kids.get(p) || []) walk(c); };
+  walk(root);
+  return all;
+}
+
+function alive(pid) {
+  try {
+    // A zombie still answers kill 0; it holds no browser and no seat.
+    return !/^\S+ \(.*\) Z/.test(fs.readFileSync('/proc/' + pid + '/stat', 'utf8'));
+  } catch (e) { return false; }
 }
 
 async function usage(pid, ms) {
@@ -334,15 +360,30 @@ async function main() {
     say('per-worker cost with one person in each room: ' + JSON.stringify(metrics));
     fs.writeFileSync(path.join(PROOF, 'worker-cost.json'), JSON.stringify(metrics, null, 2) + '\n');
 
-    // ---- end both ----
-    for (const r of rooms) {
-      const ended = await call('end_meeting', { meeting_id: r.meeting_id });
-      check('end_meeting ' + r.name, ended.state === 'ended', ended.state);
-    }
-    for (const p of people) {
-      const gone = await waitTiles(p.page, (t) => t.length === 0, 45000);
-      check(p.name + ' no longer sees a bot', gone.ok);
-    }
+    // ---- end the worker-0 room ----
+    const ended = await call('end_meeting', { meeting_id: r0.meeting_id });
+    check('end_meeting ' + r0.name, ended.state === 'ended', ended.state);
+    const gone0 = await waitTiles(people[1 - i1].page, (t) => t.length === 0, 45000);
+    check(people[1 - i1].name + ' no longer sees a bot', gone0.ok);
+
+    // ---- the supervisor dies with no shutdown (SIGKILL, OOM) ----
+    // Each worker and its Chromium must go too, and the seat with them,
+    // or a bot sits in the room that nothing can reach or end.
+    const before = (await call('status')).bot.workers.filter((w) => w.pid).map((w) => w.pid);
+    const trees = before.map((pid) => ({ pid, procs: procsUnder(pid) }));
+    say('supervisor pid ' + transport.pid + '; workers ' + JSON.stringify(trees.map((t) => ({ pid: t.pid, processes: t.procs.length }))));
+    process.kill(transport.pid, 'SIGKILL');
+    const exitBy = Date.now() + 30000;
+    let left = [];
+    do {
+      await sleep(500);
+      left = trees.flatMap((t) => t.procs).filter(alive);
+    } while (left.length && Date.now() < exitBy);
+    check('killing the supervisor stops every worker and its whole Chromium tree', trees.length === 2 && left.length === 0,
+      JSON.stringify({ workers: trees.map((t) => t.pid), still_running: left }));
+    for (const pid of left) { try { process.kill(pid, 'SIGKILL'); } catch (e) { /* gone */ } }
+    const gone1 = await waitTiles(people[i1].page, (t) => t.length === 0, 60000);
+    check(people[i1].name + ' sees the worker-1 bot leave when the supervisor dies', gone1.ok, JSON.stringify(gone1.tiles));
   } catch (e) {
     check('suite ran', false, e && e.stack ? e.stack.split('\n').slice(0, 5).join(' | ') : String(e));
   } finally {

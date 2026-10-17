@@ -890,3 +890,23 @@ test('close() while a join waits on a worker that is booting starts no other wor
   assert.equal(pool.workers[1].child, null, 'a worker was started after close');
   assert.deepEqual(pool.workers.map((w) => w.state), ['stopped', 'stopped']);
 });
+
+test('a join whose worker dies mid-join goes to the next worker instead of failing', { timeout: 10000 }, async () => {
+  cfg.crashJoin = [0];
+  makePool({ workers: 2, rooms: 2 });
+  await pool.ensureStarted();
+  assert.equal(pool.workers[0].state, 'ready');
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomA', ROOM), 'w1:mt_1');
+  const row = (await pool.info()).workers[0];
+  assert.equal(row.state, 'lost');
+  assert.match(row.error, /code 9/);
+  const log1 = await pool.workers[1].call('calls');
+  assert.deepEqual(log1.find((r) => r[0] === 'join').slice(1), ['https://gifos.app/run.html#v=roomA', ROOM]);
+});
+
+test('a join that takes down every worker it reaches is tried on one more worker only, then fails', { timeout: 10000 }, async () => {
+  cfg.crashJoin = [0, 1, 2];
+  makePool({ workers: 3, rooms: 1 });
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /Worker 1 stopped/);
+  assert.deepEqual(pool.workers.map((w) => w.state), ['lost', 'lost', 'stopped']);
+});

@@ -21,6 +21,9 @@
 //   so one stuck worker shows as an error row instead of holding status.
 // - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
 //   up to a minute), and joins go to another worker meanwhile.
+// - A worker that is up but whose browser will not start waits the same way
+//   before its next start, and the join that found it out tries the next
+//   worker, so one broken Chromium does not fail every join.
 // - Voice settings go to every ready worker at once and again to any worker
 //   that restarts or missed them, before its next join. A ready worker that
 //   refused them is asked again every voiceRetryMs until it takes them.
@@ -81,6 +84,9 @@ class Worker {
     this.voiceTimer = null;
     this.failures = 0;        // deaths in a row, for the restart backoff
     this.nextStartAt = 0;     // pool.now() before which spawn() refuses
+    this.startFailures = 0;   // browser starts failed in a row on this process
+    this.startRetryAt = 0;    // pool.now() before which joins skip this worker
+    this.startError = '';
     this.upAt = 0;
     this.lastPong = 0;
     this.beat = null;
@@ -92,7 +98,19 @@ class Worker {
     return this.state === 'lost' ? Math.max(0, this.nextStartAt - this.pool.now()) : 0;
   }
 
+  startRetryInMs() {
+    return this.startRetryAt && this.state !== 'lost' ? Math.max(0, this.startRetryAt - this.pool.now()) : 0;
+  }
+
+  // How long until a join may go to this worker.
+  waitMs() {
+    return Math.max(this.restartInMs(), this.startRetryInMs());
+  }
+
   waitText() {
+    if (this.restartInMs() === 0 && this.startRetryInMs() > 0) {
+      return 'Worker ' + this.index + ' tries its browser again in ' + Math.ceil(this.startRetryInMs() / 1000) + 's (it would not start: ' + this.startError + ').';
+    }
     return 'Worker ' + this.index + ' restarts in ' + Math.ceil(this.restartInMs() / 1000) + 's (it stopped: ' + this.error + ').';
   }
 
@@ -168,6 +186,9 @@ class Worker {
       this.nextStartAt = now + Math.min(this.pool.backoffMaxMs, this.pool.backoffMs * 2 ** (this.failures - 1));
     }
     this.upAt = 0;
+    this.startFailures = 0;   // a new process gets a fresh browser start
+    this.startRetryAt = 0;
+    this.startError = '';
     this.state = was === 'closing' ? 'stopped' : 'lost';
     if (was !== 'closing') this.error = why;
     this.child = null;
@@ -222,7 +243,22 @@ class Worker {
   }
 
   async ready() {
-    await this.call('ensureStarted');
+    const child = this.child;
+    try { await this.call('ensureStarted'); }
+    catch (e) {
+      // A process that died is handled by lost(). One still up whose browser
+      // failed (or timed out) backs off like a restart.
+      if (this.child && (!child || this.child === child) && this.state !== 'closing') {
+        this.startFailures++;
+        this.startRetryAt = this.pool.now() + Math.min(this.pool.backoffMaxMs, this.pool.backoffMs * 2 ** (this.startFailures - 1));
+        this.startError = String((e && e.message) || e);
+        log('worker ' + this.index + ': browser did not start: ' + this.startError);
+      }
+      throw e;
+    }
+    this.startFailures = 0;
+    this.startRetryAt = 0;
+    this.startError = '';
     if (this.state === 'up') this.state = 'ready';
     if (this.pool.voice && this.voice !== this.pool.voice) await this.pushVoice(this.pool.voice).catch(() => {});
   }
@@ -341,13 +377,20 @@ export class WorkerPool {
   async ensureStarted() {
     const up = this.workers.find((w) => w.state === 'ready');
     if (up) return;
-    await (this.pick() || this.workers[0]).ready();
+    const tried = new Set();
+    let err = null;
+    for (let w = this.pick(tried); w; w = this.pick(tried)) {
+      tried.add(w);
+      try { await w.ready(); return; } catch (e) { err = err || e; }
+    }
+    if (err) throw err;
+    await this.workers[0].ready();
   }
 
   // Most free rooms first. A worker that is already up beats one that would
   // have to start, so the second room does not wait for a second browser.
-  pick() {
-    const open = this.workers.filter((w) => w.used < this.rooms && w.restartInMs() === 0);
+  pick(skip = null) {
+    const open = this.workers.filter((w) => w.used < this.rooms && w.waitMs() === 0 && !(skip && skip.has(w)));
     if (!open.length) return null;
     const warm = (w) => (w.state === 'ready' || w.state === 'up' ? 0 : 1);
     open.sort((a, b) => warm(a) - warm(b) || a.used - b.used || a.index - b.index);
@@ -360,20 +403,27 @@ export class WorkerPool {
     return !!this.pick();
   }
 
+  // A worker whose browser fails to start is skipped for the next one. A
+  // join that fails in the room is the room's fault and is not retried.
   async join(link, password) {
-    const w = this.pick();
-    const waiting = !w && this.workers.find((x) => x.used < this.rooms && x.restartInMs() > 0);
-    if (waiting) throw waiting.waitError();
-    if (!w) throw noSeat('Every worker is full (' + this.size + ' workers, ' + this.rooms + ' rooms each).');
-    w.reserved++;
-    try {
-      await w.ready();
-      const local = await w.call('join', link, password || '');
-      w.rooms.add(String(local));
-      return 'w' + w.index + ':' + local;
-    } finally {
-      w.reserved--;
+    const tried = new Set();
+    let err = null;
+    for (let w = this.pick(tried); w; w = this.pick(tried)) {
+      tried.add(w);
+      w.reserved++;
+      try {
+        try { await w.ready(); } catch (e) { err = err || e; continue; }
+        const local = await w.call('join', link, password || '');
+        w.rooms.add(String(local));
+        return 'w' + w.index + ':' + local;
+      } finally {
+        w.reserved--;
+      }
     }
+    if (err) throw err;
+    const waiting = this.workers.find((x) => x.used < this.rooms && x.waitMs() > 0);
+    if (waiting) throw waiting.waitError();
+    throw noSeat('Every worker is full (' + this.size + ' workers, ' + this.rooms + ' rooms each).');
   }
 
   // Every name this machine's bots sit under. A caption from any of them is
@@ -450,6 +500,7 @@ export class WorkerPool {
       if (w.child && w.child.pid) row.pid = w.child.pid;
       if (w.error) row.error = w.error;
       if (w.restartInMs() > 0) row.restart_in_ms = w.restartInMs();
+      if (w.startRetryInMs() > 0) { row.start_retry_in_ms = w.startRetryInMs(); row.error = w.startError; }
       if (w.state === 'ready' && w.voicePending()) row.voice = 'pending';
       const got = asked[i] && await asked[i];
       if (got && got.e) row.error = String((got.e && got.e.message) || got.e);

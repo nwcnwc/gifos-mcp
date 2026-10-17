@@ -207,10 +207,10 @@ test('a worker that keeps dying waits longer before each restart, and joins go t
       return fork(index === 0 ? CRASH : FAKE, [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
     },
   });
-  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /worker 0 exited/);
-  assert.deepEqual(forks, [1, 0]);
-  // Worker 0 is waiting out its backoff, so the next join starts worker 1.
+  // Worker 0 dies on boot, so the same join starts worker 1 instead of failing.
   assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w1:mt_1');
+  assert.deepEqual(forks, [1, 1]);
+  // Worker 0 is waiting out its backoff, so the next join stays on worker 1.
   assert.equal(await pool.join('https://gifos.app/run.html#v=roomC', ''), 'w1:mt_2');
   assert.deepEqual(forks, [1, 1]);
   // Worker 1 is full and worker 0 may not start yet.

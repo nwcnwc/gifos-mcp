@@ -1011,3 +1011,51 @@ test('a start_meeting or join_meeting by hand on a room that just took down ever
   assert.equal(tail.filter((e) => e.type === 'meeting.disconnected' && e.meeting_id === g.meeting_id).length, 1, 'Good was knocked off once');
   await client.close();
 });
+
+test('a room that took down every worker is still waited on after the supervisor restarts, by the clock and by hand', { timeout: 15000 }, async () => {
+  let now = Date.now();
+  const boot = async () => {
+    const meetings = new MeetingStore(home);
+    const events = new EventLog(home);
+    makePool({ now: () => now });
+    pool.onLost(dropLostMeetings({ meetings, events }));
+    const deaths = { n: 0 };
+    pool.onLost(() => { deaths.n++; });
+    const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+    const [ta, tb] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'unit', version: '1' });
+    await Promise.all([server.connect(ta), client.connect(tb)]);
+    const call = (name, args = {}) => client.callTool({ name, arguments: args });
+    const json = async (name, args = {}) => JSON.parse((await call(name, args)).content[0].text);
+    return { meetings, server, client, call, json, deaths };
+  };
+
+  let s = await boot();
+  const bad = (await s.json('create_meeting', { name: 'Poison', admin_password: 'owner-77' })).link;
+  cfg.crashRoom = s.meetings.all().find((m) => m.link === bad).room;
+  const start = new Date(now - 60 * 1000).toISOString();
+  const end = new Date(now + 60 * 60 * 1000).toISOString();
+  await s.json('schedule_meeting', { link: bad, room_password: ROOM, start, end, topic: 'Poison' });
+  await s.server.clock.tick(now);
+  assert.equal(s.deaths.n, 2, 'the first try took down both workers');
+  await s.client.close();
+  await pool.close();
+
+  // The supervisor restarts within the wait. Neither the clock nor a hand
+  // join walks into the room again.
+  now += 5000;
+  s = await boot();
+  for (let i = 0; i < 3; i++) { now += 2000; await s.server.clock.tick(now); }
+  assert.equal(s.deaths.n, 0, 'the clock joined the room again after the restart');
+  const p = s.meetings.all().find((m) => m.link === bad);
+  const again = await s.call('start_meeting', { meeting_id: p.meeting_id });
+  assert.ok(again.isError);
+  assert.match(again.content[0].text, /crashed the bot/);
+  assert.equal(s.deaths.n, 0, 'a hand join walked into the room again after the restart');
+
+  // The wait still ends: after it the clock tries the room once more.
+  now += 60 * 1000;
+  await s.server.clock.tick(now);
+  assert.equal(s.deaths.n, 2, 'the room is tried again once its wait is over');
+  await s.client.close();
+});

@@ -92,7 +92,8 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
   // Once a join lands the bot holds a seat, and once a leave lands it does
   // not. A meetings.json save that fails then (disk nearly full: it holds
   // every transcript) must not lose that: the store already took the fields
-  // in memory and its next save writes them.
+  // in memory and its next save writes them. The same holds after a mute,
+  // unmute or transcript read has landed.
   function holdSeat(id, fields) {
     try { return meetings.update(id, fields); }
     catch (e) {
@@ -291,7 +292,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
   }, guarded(async ({ meeting_id }) => {
     const m = needLive(meeting_id);
     await bot.transcribe(m.session_id, false);
-    return ok(publicView(meetings.update(m.meeting_id, { transcribing: false, muted: true })));
+    return ok(publicView(holdSeat(m.meeting_id, { transcribing: false, muted: true })));
   }));
 
   server.registerTool('unmute', {
@@ -301,7 +302,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
   }, guarded(async ({ meeting_id }) => {
     const m = needLive(meeting_id);
     await bot.transcribe(m.session_id, true);
-    return ok(publicView(meetings.update(m.meeting_id, { transcribing: true, muted: false })));
+    return ok(publicView(holdSeat(m.meeting_id, { transcribing: true, muted: false })));
   }));
 
   server.registerTool('share_content', {
@@ -325,7 +326,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     const m = need(meeting_id);
     if (m.state === 'live' && m.session_id) {
       const text = scrub(await bot.transcript(m.session_id), secret);
-      meetings.update(m.meeting_id, { transcript: text });
+      holdSeat(m.meeting_id, { transcript: text });
       transcript.ingestCaption(m.meeting_id, text, ourNames());
       return ok(text || '(no transcript lines yet)');
     }

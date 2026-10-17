@@ -232,7 +232,8 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
   raises `meeting.left`, and keeps the meeting ended and its order `left_early` or `ended` in memory, so no
   tick seats the bot again. A `join_meeting` with a password whose `schedule.json` save fails still reports
   the join and raises `meeting.joined`; its order (with the room password) is kept `live` in memory and the
-  next save writes it.
+  next save writes it. A `mute`, `unmute` or `get_transcript` whose `meetings.json` save fails still
+  answers with what the bot did (muted, listening, the transcript); memory keeps it and the next save writes it.
 - **The key stays in this process.** When this server hosts `smartest`, it calls the model. The page does
   not, and `GIFOS_LLM_KEY` is not written into Settings. `MeetingBot.setVoice` receives the provider role
   `smartest` and never the URL or the key. Leave the key unset and conversation voice stays `none` unless

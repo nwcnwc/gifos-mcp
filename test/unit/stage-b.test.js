@@ -14,6 +14,7 @@ import { createServer } from '../../src/server.js';
 import { loadConfig } from '../../src/config.js';
 import { MeetingStore } from '../../src/meetings.js';
 import { EventLog } from '../../src/events.js';
+import { ScheduleStore } from '../../src/schedule.js';
 import { WorkerPool, splitSession, workerIdentity, workerTmpDir } from '../../src/pool.js';
 import { dropLostMeetings } from '../../src/supervisor.js';
 import { tmpHome } from './fixtures/tmp-home.js';
@@ -1226,6 +1227,48 @@ test('a join whose meetings.json save fails (disk nearly full: the transcripts f
   meetings.save = save;
   await json('mute', { meeting_id: m.meeting_id });
   assert.equal(new MeetingStore(home).get(m.meeting_id).state, 'live');
+  await json('end_meeting', { meeting_id: m.meeting_id });
+  assert.equal(await sitting(), 0);
+  await client.close();
+});
+
+test('a clock tick whose schedule.json save fails (disk full) still seats a due order, announces it once as joined, and saves its phase once the disk has room', { timeout: 15000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  const schedule = new ScheduleStore(home);
+  makePool();
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events, schedule });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const json = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  const link = (await json('create_meeting', { name: 'Full schedule', admin_password: 'owner-78' })).link;
+  const now = Date.now();
+  const order = (await json('schedule_meeting', { link, room_password: ROOM, start: new Date(now - 60 * 1000).toISOString(), end: new Date(now + 60 * 60 * 1000).toISOString(), topic: 'Full schedule' }));
+  const id = order.schedule_id || (order.order && order.order.schedule_id);
+  const m = meetings.all().find((row) => row.topic === 'Full schedule');
+
+  const save = schedule.save;
+  schedule.save = () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); };
+  for (let i = 0; i < 3; i++) await server.clock.tick(now + i * 1000);
+  const sitting = async () => {
+    let n = 0;
+    for (const w of pool.workers) if (w.state === 'ready') n += (await w.call('list')).length;
+    return n;
+  };
+  assert.equal(await sitting(), 1, 'the bot sits in the room once');
+  assert.equal(meetings.get(m.meeting_id).state, 'live');
+  assert.equal(schedule.get(id).phase, 'live', 'the order is live in memory');
+  const tail = (await json('tail_events', { limit: 200 })).events;
+  assert.equal(tail.filter((e) => e.type === 'meeting.joined' && e.meeting_id === m.meeting_id).length, 1, 'one meeting.joined');
+  assert.equal(tail.filter((e) => e.type === 'meeting.error').length, 0, 'the room was entered, not failed');
+
+  // Once the disk has room, the next tick writes the live order.
+  schedule.save = save;
+  await server.clock.tick(now + 4000);
+  assert.equal(new ScheduleStore(home).get(id).phase, 'live');
   await json('end_meeting', { meeting_id: m.meeting_id });
   assert.equal(await sitting(), 0);
   await client.close();

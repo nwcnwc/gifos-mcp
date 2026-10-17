@@ -703,3 +703,48 @@ test('a join that timed out and has not landed yet keeps its seat, so the worker
   assert.equal((await pool.info()).workers[0].late_joins, undefined);
   assert.equal((await pool.workers[0].call('calls')).filter((r) => r[0] === 'leave').length, 0);
 });
+
+test('a join that never answers is checked against the worker\'s own room list: Meet Bot has no such room, so the seat is freed', { timeout: 10000 }, async () => {
+  makePool({ workers: 1, rooms: 1, callMs: 2000, joinMs: 200, lateJoinMs: 300 });
+  await pool.ensureStarted();
+  await pool.workers[0].call('holdJoins');
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /did not answer join within 200ms/);
+  assert.equal(pool.workers[0].used, 1);
+  // The join never answers. Meet Bot lists no room the pool does not know, so the bot is not in one.
+  assert.ok(await until(() => pool.workers[0].used === 0), 'a join that never answered held its seat for good');
+  assert.equal(pool.hasSeat(), true);
+  assert.equal((await pool.info()).workers[0].late_joins, undefined);
+  // If it lands after all, it is left, and the count does not go below zero.
+  await pool.workers[0].call('releaseJoins');
+  const leaves = async () => (await pool.workers[0].call('calls')).filter((r) => r[0] === 'leave');
+  assert.ok(await until(async () => (await leaves()).length === 1), 'the join that landed after the check was never left');
+  assert.ok(await until(() => pool.workers[0].used === 0 && pool.workers[0].stray.size === 0));
+  assert.equal(pool.workers[0].lateJoins, 0);
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w0:mt_2');
+});
+
+test('a join that never answers but whose room Meet Bot holds is left, so the bot is not stranded there', { timeout: 10000 }, async () => {
+  makePool({ workers: 1, rooms: 1, callMs: 2000, joinMs: 200, lateJoinMs: 300 });
+  await pool.ensureStarted();
+  await pool.workers[0].call('stallJoins');
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /did not answer join within 200ms/);
+  const leaves = async () => (await pool.workers[0].call('calls')).filter((r) => r[0] === 'leave');
+  assert.ok(await until(async () => (await leaves()).some((r) => r[1] === 'mt_1')), 'the room the stalled join took was never left');
+  assert.ok(await until(() => pool.workers[0].used === 0), 'the seat stayed taken after the room was left');
+  assert.deepEqual(await pool.workers[0].call('list'), []);
+});
+
+test('the late-join check does not leave a room the pool holds or one a join still in time is walking into', { timeout: 10000 }, async () => {
+  makePool({ workers: 1, rooms: 3, callMs: 2000, joinMs: 200, lateJoinMs: 100 });
+  const a = await pool.join('https://gifos.app/run.html#v=roomA', '');
+  await pool.workers[0].call('stallJoins');
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomB', ''), /did not answer join within 200ms/);
+  // A join still inside its own time limit: Meet Bot already lists its room (mt_3).
+  const inTime = pool.workers[0].callWithin(5000, 'join', 'https://gifos.app/run.html#v=roomC', '').catch(() => {});
+  await new Promise((r) => setTimeout(r, 800));
+  const left = (await pool.workers[0].call('calls')).filter((r) => r[0] === 'leave').map((r) => r[1]);
+  assert.ok(!left.includes('mt_1'), 'the check left a room the pool holds');
+  assert.ok(!left.includes('mt_3'), 'the check left the room of a join that had not timed out');
+  await pool.say(a, 'still here');
+  void inTime;
+});

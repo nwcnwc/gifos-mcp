@@ -10,6 +10,7 @@ class FakeDriver {
     this.boot = boot;
     this.log = [];
     this.seq = 0;
+    this.live = new Set();    // rooms Meet Bot holds, as its list() shows them
   }
   // A started browser keeps the worker's event loop alive, as Chromium does.
   async ensureStarted() {
@@ -22,12 +23,17 @@ class FakeDriver {
     this.log.push(['join', link, password]);
     if (this.held) await this.held.promise;
     if (this.joinFails) throw new Error(this.joinFails);
-    return 'mt_' + (++this.seq);
+    const id = 'mt_' + (++this.seq);
+    this.live.add(id);
+    // Meet Bot took the room, but the answer never gets back.
+    if (this.stalled) return new Promise(() => {});
+    return id;
   }
   async leave(id) {
     this.log.push(['leave', id]);
     if (this.leaveHeld) await this.leaveHeld.promise;
     if (this.leaveFails) throw new Error(this.leaveFails);
+    this.live.delete(id);
   }
   async transcribe(id, on) { this.log.push(['transcribe', id, on]); }
   async say(id, text) { this.log.push(['say', id, text]); }
@@ -48,7 +54,7 @@ class FakeDriver {
     if (this.voiceFails) throw new Error('setVoice refused');
     return { applied: true };
   }
-  async list() { return Array.from({ length: this.seq }, (_, i) => ({ id: 'mt_' + (i + 1) })); }
+  async list() { return [...this.live].map((id) => ({ id })); }
   async info() {
     if (this.infoStuck) return new Promise(() => {});
     return { state: 'ready', connected: true, bot_name: this.boot.creds.name, bot_sessions: [] };
@@ -66,6 +72,8 @@ class FakeDriver {
   // Joins wait until releaseJoins(), so a test can time one out and then let it land.
   async holdJoins() { let release; const promise = new Promise((r) => { release = r; }); this.held = { promise, release }; }
   async releaseJoins() { const h = this.held; this.held = null; if (h) h.release(); }
+  // Joins seat the bot in the room but never answer.
+  async stallJoins() { this.stalled = true; }
   // join fails with this text from now on.
   async breakJoin(text) { this.joinFails = String(text); }
   // leave fails with this text until fixLeave().
@@ -87,6 +95,6 @@ class FakeDriver {
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'fixStart']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stallJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'fixStart']);
 });
 process.send({ event: 'boot' });

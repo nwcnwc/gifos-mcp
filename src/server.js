@@ -174,20 +174,30 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
   function rememberJoin(meeting, password, topic) {
     const existing = schedule.all().find((o) => o.room === meeting.room && o.phase !== 'cancelled' && o.phase !== 'ended' && o.phase !== 'missed' && o.phase !== 'left_early' && o.phase !== 'series');
     if (existing) {
-      schedule.setPhase(existing.occurrence_id || existing.schedule_id, { room_password: password, meeting_id: meeting.meeting_id, phase: 'live', topic: topic || existing.topic || meeting.topic });
+      holdPhase(existing, { room_password: password, meeting_id: meeting.meeting_id, phase: 'live', topic: topic || existing.topic || meeting.topic });
       return;
     }
+    // The bot already sits in the room: a failed schedule.json save must not
+    // turn the join into an error. add() took the order in memory first.
     const start = new Date();
-    const added = schedule.add({
-      link: meeting.link,
-      room: meeting.room,
-      room_password: password,
-      topic: topic || meeting.topic,
-      meeting_id: meeting.meeting_id,
-      start: start.toISOString(),
-      end: new Date(start.getTime() + DEFAULT_SPAN_MS).toISOString(),
-    });
-    schedule.setPhase(added.order.occurrence_id || added.order.schedule_id, { phase: 'live', meeting_id: meeting.meeting_id });
+    let added;
+    try {
+      added = schedule.add({
+        link: meeting.link,
+        room: meeting.room,
+        room_password: password,
+        topic: topic || meeting.topic,
+        meeting_id: meeting.meeting_id,
+        start: start.toISOString(),
+        end: new Date(start.getTime() + DEFAULT_SPAN_MS).toISOString(),
+      });
+    } catch (e) {
+      const kept = schedule.all().find((o) => o.meeting_id === meeting.meeting_id && o.room === meeting.room && o.phase !== 'cancelled');
+      if (!kept) throw e;
+      log('schedule.json not saved (' + e.message + '); the order is kept in memory until the next save.');
+      added = { order: kept };
+    }
+    holdPhase(added.order, { phase: 'live', meeting_id: meeting.meeting_id });
   }
 
   function counts(meetingId) {

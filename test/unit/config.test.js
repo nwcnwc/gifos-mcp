@@ -135,3 +135,70 @@ test('a restart puts live meetings back to scheduled', () => {
   assert.equal(new MeetingStore(home).get(m.meeting_id).state, 'scheduled');
   assert.equal(new MeetingStore(home).get(m.meeting_id).session_id, null);
 });
+
+// A torn meetings.json (disk full, killed mid-write by another tool) must not
+// be read as no meetings and then saved over: it holds every transcript.
+test('an unreadable meetings.json is kept aside, not overwritten by the next save', () => {
+  const home = tmp();
+  try {
+    const torn = '{"meetings":[{"meeting_id":"m_1","transcript":"the only copy of';
+    fs.writeFileSync(path.join(home, 'meetings.json'), torn, { mode: 0o600 });
+    const s = new MeetingStore(home);
+    assert.equal(s.all().length, 0);
+    s.add({ topic: 'After' });
+    const kept = fs.readdirSync(home).filter((f) => f.startsWith('meetings.json.bad'));
+    assert.equal(kept.length, 1, 'kept ' + JSON.stringify(fs.readdirSync(home)));
+    assert.equal(fs.readFileSync(path.join(home, kept[0]), 'utf8'), torn);
+    assert.equal(fs.statSync(path.join(home, kept[0])).mode & 0o777, 0o600);
+    assert.equal(new MeetingStore(home).all().length, 1);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// A torn bot.json must not be replaced by a fresh pair: the old pair is the
+// bot's identity and derives its admin meeting, and nothing else holds it.
+test('an unreadable bot.json is kept aside, not overwritten by a fresh pair', () => {
+  const home = tmp();
+  try {
+    const torn = '{"name":"notes-abc123","password":"only-copy-of-th';
+    fs.writeFileSync(path.join(home, 'bot.json'), torn, { mode: 0o600 });
+    const fresh = botCredentials(loadConfig({ GIFOS_MCP_HOME: home }));
+    assert.equal(fresh.source, 'generated');
+    const kept = fs.readdirSync(home).filter((f) => f.startsWith('bot.json.bad'));
+    assert.equal(kept.length, 1, 'kept ' + JSON.stringify(fs.readdirSync(home)));
+    assert.equal(fs.readFileSync(path.join(home, kept[0]), 'utf8'), torn);
+    assert.equal(fs.statSync(path.join(home, kept[0])).mode & 0o777, 0o600);
+    assert.equal(botCredentials(loadConfig({ GIFOS_MCP_HOME: home })).password, fresh.password);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// A meetings.json save cut short must leave the last good file and no temp.
+test('a meetings save cut short keeps the last good meetings.json', () => {
+  const home = tmp();
+  try {
+    const s = new MeetingStore(home);
+    const m = s.add({ topic: 'First' });
+    const write = fs.writeFileSync;
+    fs.writeFileSync = (file, text, opts) => {
+      if (String(file).includes('meetings.json')) {
+        write(file, String(text).slice(0, 20), opts);
+        const e = new Error('ENOSPC: no space left on device');
+        e.code = 'ENOSPC';
+        throw e;
+      }
+      return write(file, text, opts);
+    };
+    try {
+      assert.throws(() => s.add({ topic: 'Second' }), /ENOSPC/);
+    } finally {
+      fs.writeFileSync = write;
+    }
+    assert.deepEqual(new MeetingStore(home).all().map((x) => x.meeting_id), [m.meeting_id]);
+    assert.deepEqual(fs.readdirSync(home).filter((f) => f.endsWith('.tmp')), []);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

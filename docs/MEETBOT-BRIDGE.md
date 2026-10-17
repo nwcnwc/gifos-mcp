@@ -243,7 +243,21 @@ It writes `{ url, key, model }` for that role, omitting empty fields, the way `s
 
 This server does not call `place` or `configure`. A hosted role never becomes a GIF, and the key never becomes a Settings field the page can read. `place` would still not let a GIF fetch Kokoro. Speech-to-text stays `install` plus `assign` for the signed store app, unless `GIFOS_STT_URL` is set with `GIFOS_STT_APP=none`, in which case this process serves `stt`. `MeetingBot.setVoice` keeps naming the roles.
 
-`MeetingBot.setVoice` receives roles, not addresses:
+### Meet Bot contract version 2 (gifos-apps-source a83ff5c)
+
+The current Meet Bot makes its own words and audio: `gifos.ai.chat({ model: "smartest" })`, then `gifos.ai.tts`, then `gifos.meet.speak`. This process answers those two roles through the binding. The app starts with `speak: false` and `respond_to_command: false`, so it hears the room and stays quiet until it is told otherwise. A line addressed to the bot ("Hey bot, …") is a command and needs both switches. Any other question needs `speak`.
+
+Each `start_meeting` and `join_meeting` therefore calls:
+
+```js
+MeetingBot.setVoice({ respond_to_command: true, speak: true }) // from GIFOS_RESPOND_TO_COMMAND and conversation voice
+```
+
+`speak` is true unless conversation voice is `none`. `listen` is not sent: transcription stays on `mute` and `unmute`. Version 2 refuses `conversation_voice`, `llm`, `tts`, and `stt` with "Voice uses the GifOS AI settings (Smartest and Text to speech)." `status.voice.handed` is true once the app has taken the switches. A refusal is reported in `status.voice.gap`.
+
+### Contract version 1 voice object (no longer sent)
+
+The older `MeetingBot.setVoice` received roles, not addresses:
 
 ```js
 MeetingBot.setVoice({

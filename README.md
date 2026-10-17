@@ -43,8 +43,9 @@ Meet Bot has two switches: respond to commands (on or off) and conversation voic
 key, or a provider app. The suggested default is xAI Grok (`grok-4.20-0309-non-reasoning`). On startup this
 server sets up Kokoro and installs the speech-to-text provider. When it hosts `smartest`, `tts`, or `stt`, it
 answers those provider calls itself. The page does not fetch them, and the key stays in this process.
-`set_voice` names the providers. It does not send the URL or the key. Until the app accepts the setting,
-the tool reports the gap and this server does not imitate speech.
+Meet Bot starts quiet. Joining a meeting hands it `MeetingBot.setVoice({ respond_to_command, speak })`, and
+`set_voice` changes the same two switches. They never carry the URL or the key. If the app refuses them,
+`status` reports the gap and this server does not imitate speech.
 
 Your own assistant tails the live transcript (`gifos://meeting/{id}/transcript`, or `tail_transcript`) and can
 cut in with `say`, which Meet Bot speaks. After the meeting, that assistant does the notes, mail, and calendar

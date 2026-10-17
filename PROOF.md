@@ -119,3 +119,30 @@ same 9 processes. Memory is new: with 8 rooms talking at once PSS reached 1.4 GB
 where the synthetic provider stayed under 1 GB. Two runs do not show whether that levels off or keeps growing (a
 caption backlog behind one shared engine would keep growing), so the `GIFOS_MAX_MEETINGS` default stays at 4 until
 a longer run with 8 rooms talking answers it.
+
+### Whisper soak, 8 rooms talking for 12 minutes (2026-10-17)
+
+`E2E_STT=whisper E2E_SPEECH_WAV=<clip> E2E_EXPECT='budget|garden|morning|lunch' E2E_ROOMS=8 E2E_SOAK_MS=720000 E2E_SAMPLE_MS=30000 npm run test:e2e:load`
+at `df8aca3`, the same machine, `gifos-app` tree and clip as above, people split the same way. After every room is
+heard, the 8 people keep talking for 12 minutes. Each minute the run takes a 30 s cost sample and counts the speech
+lines each room stored in that minute. 6/6 checks passed (ALL PASS): every room was still heard in the last minute,
+and every room ended.
+
+| s | PSS / RSS MB | CPU | `gifos-mcp` RSS MB | Speech lines per room that minute |
+|---|---|---|---|---|
+| 0 (before the soak) | 1222 / 1804 | 53% | 187 | |
+| 60 | 1256 / 1833 | 50% | 187 | 7 8 8 7 7 8 8 7 |
+| 180 | 1233 / 1808 | 48% | 189 | 7 7 7 7 7 7 7 7 |
+| 360 | 1234 / 1809 | 55% | 195 | 7 7 7 7 7 7 7 8 |
+| 481 | 1266 / 1840 | 47% | 201 | 8 7 7 7 8 8 8 7 |
+| 601 | 1224 / 1804 | 53% | 201 | 6 6 7 7 7 6 6 7 |
+| 721 | 1278 / 1856 | 64% | 201 | 8 8 7 7 7 8 8 7 |
+
+Memory levels off: PSS stays between 1.22 and 1.28 GB for all 12 minutes, and the 2.4 GB in run 2 above did not
+come back. Captions keep up: each room stores 6 to 8 lines a minute from start to end, with no slow drop that a
+backlog would cause. `gifos-mcp` alone grew from 187 to 201 MB in the first 8 minutes, then held at 201 MB for
+the last 4. CPU was about half a core in this run, against about 2 cores in the runs above. This run also has
+`8b62392`, which stops caption polls from stacking up (one transcript call per room at a time). That fix may
+explain the lower CPU, but the runs were not done side by side, so it is not proven. The `GIFOS_MAX_MEETINGS`
+default is still 4: this data supports 8 rooms per Chromium on this 32-core machine, and changing the default
+is the owner's call.

@@ -23,6 +23,21 @@ export function createClock(deps) {
   const orderKey = (order) => order.occurrence_id || order.schedule_id;
   const isNoSeat = (e) => !!(e && e.code === 'no_seat');
 
+  // A failed leave keeps the room live for the next tick. It is one
+  // meeting.error per order until a leave works, and never stops the tick.
+  const leaveFailed = new Set();
+  async function leave(order, reason) {
+    const key = orderKey(order);
+    try {
+      await deps.leave(order, reason);
+      leaveFailed.delete(key);
+    } catch (e) {
+      if (leaveFailed.has(key)) return;
+      leaveFailed.add(key);
+      emit('meeting.error', order.meeting_id, { text: 'The room could not be left; trying again.' });
+    }
+  }
+
   // 'capacity' when the cap is reached, 'worker' when every worker is full
   // or waiting out a restart (stage B), otherwise ''.
   function fullReason() {
@@ -169,12 +184,12 @@ export function createClock(deps) {
         }
         const humanCount = Array.isArray(humans) ? humans.filter((p) => !p.bot).length : null;
         if (humanCount === 0) {
-          await deps.leave(current, 'empty');
+          await leave(current, 'empty');
           continue;
         }
         const last = typeof deps.lastHumanAt === 'function' ? deps.lastHumanAt(freshMeeting.meeting_id) : null;
         const since = last != null ? last : Date.parse(current.overrun_at || new Date(now).toISOString());
-        if (now - since >= quietMs) await deps.leave(current, 'quiet');
+        if (now - since >= quietMs) await leave(current, 'quiet');
       }
     }
     // Meetings a lost worker dropped that no order will bring back.

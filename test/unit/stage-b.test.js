@@ -281,3 +281,52 @@ test('the bot on worker 1 sits as <name>-w1; its own speech is a spoken line, no
   }
   await client.close();
 });
+
+test('a meeting joined by hand with no password, and one started with start_meeting, come back after their worker dies; end_meeting stops that', async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  let now = Date.now();
+  makePool({ now: () => now, rooms: 1 });
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const json = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  // Neither join has a room password, so neither is an order on the schedule.
+  const open = await json('join_meeting', { link: 'http://127.0.0.1:19510/run.html#v=openroom', topic: 'Open' });
+  assert.equal(open.state, 'live');
+  await json('create_meeting', { name: 'Own', admin_password: 'owner-77' });
+  const own = meetings.all().find((m) => m.topic === 'Own');
+  await json('start_meeting', { meeting_id: own.meeting_id });
+  assert.deepEqual(meetings.all().filter((m) => m.state === 'live').map((m) => m.session_id).sort(), ['w0:mt_1', 'w1:mt_1']);
+
+  for (const index of [0, 1]) {
+    const child = pool.workers[index].child;
+    const exited = new Promise((r) => child.once('exit', r));
+    child.kill('SIGKILL');
+    await exited;
+  }
+  assert.equal(meetings.get(open.meeting_id).state, 'scheduled');
+  assert.equal(meetings.get(own.meeting_id).state, 'scheduled');
+
+  // The human ends one while its worker waits out the backoff.
+  await json('end_meeting', { meeting_id: own.meeting_id });
+  assert.equal(meetings.get(own.meeting_id).state, 'ended');
+
+  now += 1000;
+  await server.clock.tick(Date.now());
+  const back = meetings.get(open.meeting_id);
+  assert.equal(back.state, 'live');
+  assert.match(back.session_id, /^w[01]:mt_1$/);
+  assert.equal(meetings.get(own.meeting_id).state, 'ended');
+  assert.equal(meetings.all().filter((m) => m.state === 'live').length, 1);
+  const tail = await json('tail_events');
+  assert.ok(tail.events.some((e) => e.type === 'meeting.joined' && e.meeting_id === open.meeting_id && e.data.reason === 'worker'));
+
+  // Once it is back, a second tick does not join it again.
+  await server.clock.tick(Date.now());
+  assert.equal(meetings.get(open.meeting_id).session_id, back.session_id);
+  await client.close();
+});

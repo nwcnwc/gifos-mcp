@@ -264,3 +264,51 @@ test('speech and captions are queued per meeting, and thinking shows while a rep
   assert.equal(out.meetingId, 'm_c');
   assert.equal(out.role, 'tts');
 });
+
+// A save cut short (disk full, process killed mid-write) must not cost the
+// calendar: the next start would read a torn file as no orders and the
+// first tick would save that empty list over every room password.
+test('a schedule save cut short keeps the last good schedule.json', () => {
+  const home = homeDir();
+  try {
+    const store = new ScheduleStore(home);
+    store.add(order());
+    const write = fs.writeFileSync;
+    fs.writeFileSync = (file, text, opts) => {
+      if (String(file).includes('schedule.json')) {
+        write(file, String(text).slice(0, 20), opts);
+        const e = new Error('ENOSPC: no space left on device');
+        e.code = 'ENOSPC';
+        throw e;
+      }
+      return write(file, text, opts);
+    };
+    try {
+      assert.throws(() => store.add(order({ topic: 'Second' })), /ENOSPC/);
+    } finally {
+      fs.writeFileSync = write;
+    }
+    const again = new ScheduleStore(home);
+    assert.equal(again.all().length, 1);
+    assert.equal(again.all()[0].room_password, ROOM);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable schedule.json is kept aside, not overwritten by the next save', () => {
+  const home = homeDir();
+  try {
+    const torn = '{"orders":[{"schedule_id":"s_1","room_password":"' + ROOM;
+    fs.writeFileSync(path.join(home, 'schedule.json'), torn, { mode: 0o600 });
+    const store = new ScheduleStore(home);
+    assert.equal(store.all().length, 0);
+    store.save();
+    const kept = fs.readdirSync(home).filter((f) => f.startsWith('schedule.json.bad'));
+    assert.equal(kept.length, 1);
+    assert.equal(fs.readFileSync(path.join(home, kept[0]), 'utf8'), torn);
+    assert.equal(fs.statSync(path.join(home, kept[0])).mode & 0o777, 0o600);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

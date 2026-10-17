@@ -971,6 +971,8 @@ test('a start_meeting or join_meeting by hand on a room that just took down ever
   let now = Date.now();
   makePool({ now: () => now });
   pool.onLost(dropLostMeetings({ meetings, events }));
+  let deaths = 0;
+  pool.onLost(() => { deaths++; });
   const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
   const [ta, tb] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'unit', version: '1' });
@@ -994,6 +996,8 @@ test('a start_meeting or join_meeting by hand on a room that just took down ever
   for (let i = 0; i < 4; i++) { now += 2000; await server.clock.tick(now); }
   assert.equal(meetings.get(g.meeting_id).state, 'live');
 
+  assert.equal(deaths, 2);
+
   // Asking again by hand right away does not walk into the room again.
   const again = await call('start_meeting', { meeting_id: p.meeting_id });
   assert.ok(again.isError);
@@ -1001,7 +1005,7 @@ test('a start_meeting or join_meeting by hand on a room that just took down ever
   const byLink = await call('join_meeting', { link: bad, password: ROOM });
   assert.ok(byLink.isError);
   assert.match(byLink.content[0].text, /crashed the bot/);
-  assert.deepEqual(pool.workers.map((w) => w.state), ['ready', 'ready'], 'no worker was taken down again');
+  assert.equal(deaths, 2, 'no worker was taken down again');
   assert.equal(meetings.get(g.meeting_id).state, 'live', 'Good keeps its seat');
   const tail = (await json('tail_events', { limit: 200 })).events;
   assert.equal(tail.filter((e) => e.type === 'meeting.disconnected' && e.meeting_id === g.meeting_id).length, 1, 'Good was knocked off once');

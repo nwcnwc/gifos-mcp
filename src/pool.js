@@ -10,6 +10,9 @@
 // - A worker that exits loses its rooms. onLost hears their session ids so
 //   the meeting index can drop them, and the clock rejoins live orders on a
 //   worker that is still up.
+// - A worker that stops answering the heartbeat is killed and counts as lost.
+// - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
+//   up to a minute), and joins go to another worker meanwhile.
 import path from 'node:path';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -50,12 +53,26 @@ class Worker {
     this.reserved = 0;        // joins in flight
     this.booting = null;
     this.voice = null;
+    this.failures = 0;        // deaths in a row, for the restart backoff
+    this.nextStartAt = 0;     // pool.now() before which spawn() refuses
+    this.upAt = 0;
+    this.lastPong = 0;
+    this.beat = null;
   }
 
   get used() { return this.rooms.size + this.reserved; }
 
+  restartInMs() {
+    return this.state === 'lost' ? Math.max(0, this.nextStartAt - this.pool.now()) : 0;
+  }
+
+  waitText() {
+    return 'Worker ' + this.index + ' restarts in ' + Math.ceil(this.restartInMs() / 1000) + 's (it stopped: ' + this.error + ').';
+  }
+
   spawn() {
     if (this.booting) return this.booting;
+    if (this.restartInMs() > 0) return Promise.reject(new Error(this.waitText()));
     const id = workerIdentity(this.pool.cfg, this.pool.creds, this.index);
     const shots = this.pool.cfg.shotsDir || path.join(this.pool.cfg.home, 'shots');
     const cfg = { ...this.pool.cfg, profile: id.profile, shotsDir: this.index === 0 ? this.pool.cfg.shotsDir : path.join(shots, 'w' + this.index) };
@@ -69,7 +86,8 @@ class Worker {
       child.on('message', (msg) => {
         if (!msg || typeof msg !== 'object') return;
         if (msg.event === 'boot') { child.send({ type: 'boot', cfg, creds: id.creds, index: this.index }); return; }
-        if (msg.event === 'up') { up = true; this.state = 'up'; resolve(); return; }
+        if (msg.event === 'up') { up = true; this.state = 'up'; this.upAt = this.pool.now(); this.heartbeat(child); resolve(); return; }
+        if (msg.event === 'pong') { this.lastPong = Date.now(); return; }
         if (msg.event === 'thinking') { this.pool.thinkingFrom(this.index, msg.id, msg.on); return; }
         if (msg.id != null && this.pending.has(msg.id)) {
           const p = this.pending.get(msg.id);
@@ -88,8 +106,36 @@ class Worker {
     return this.booting;
   }
 
+  // A wedged event loop answers no call, so a ping that goes unanswered for
+  // stuckMs kills the child. exit then runs lost() as for any crash.
+  heartbeat(child) {
+    this.lastPong = Date.now();
+    this.beat = setInterval(() => {
+      if (this.child !== child) return;
+      const quiet = Date.now() - this.lastPong;
+      if (quiet > this.pool.stuckMs) {
+        this.error = 'worker ' + this.index + ' stopped answering (no heartbeat for ' + quiet + 'ms)';
+        clearInterval(this.beat);
+        try { child.kill('SIGKILL'); } catch (e) { /* already gone */ }
+        return;
+      }
+      try { child.send({ type: 'ping' }); } catch (e) { /* exit follows */ }
+    }, this.pool.heartbeatMs);
+    this.beat.unref();
+  }
+
   lost(why) {
     const was = this.state;
+    clearInterval(this.beat);
+    this.beat = null;
+    if (was !== 'closing') {
+      // A worker that stayed up for stableMs starts the backoff over.
+      const now = this.pool.now();
+      if (this.upAt && now - this.upAt >= this.pool.stableMs) this.failures = 0;
+      this.failures++;
+      this.nextStartAt = now + Math.min(this.pool.backoffMaxMs, this.pool.backoffMs * 2 ** (this.failures - 1));
+    }
+    this.upAt = 0;
     this.state = was === 'closing' ? 'stopped' : 'lost';
     if (was !== 'closing') this.error = why;
     this.child = null;
@@ -128,6 +174,7 @@ class Worker {
     if (!this.child) { this.state = 'stopped'; return; }
     const child = this.child;
     this.state = 'closing';
+    clearInterval(this.beat);
     const exited = new Promise((r) => child.once('exit', r));
     try { child.send({ type: 'close' }); } catch (e) { /* already gone */ }
     const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* gone */ } }, this.pool.closeMs);
@@ -137,7 +184,8 @@ class Worker {
 }
 
 export class WorkerPool {
-  // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs }
+  // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
+  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs }
   constructor(cfg, creds, opts = {}) {
     this.cfg = cfg;
     this.creds = creds;
@@ -147,6 +195,12 @@ export class WorkerPool {
     this.lostHooks = [];
     if (typeof opts.onLost === 'function') this.lostHooks.push(opts.onLost);
     this.closeMs = opts.closeMs > 0 ? opts.closeMs : 10000;
+    this.now = typeof opts.now === 'function' ? opts.now : Date.now;
+    this.heartbeatMs = opts.heartbeatMs > 0 ? opts.heartbeatMs : 5000;
+    this.stuckMs = opts.stuckMs > 0 ? opts.stuckMs : 30000;
+    this.backoffMs = opts.backoffMs > 0 ? opts.backoffMs : 1000;
+    this.backoffMaxMs = opts.backoffMaxMs > 0 ? opts.backoffMaxMs : 60000;
+    this.stableMs = opts.stableMs > 0 ? opts.stableMs : 60000;
     const script = opts.workerScript || WORKER_SCRIPT;
     this.forkWorker = typeof opts.forkWorker === 'function'
       ? opts.forkWorker
@@ -196,7 +250,7 @@ export class WorkerPool {
   // Most free rooms first. A worker that is already up beats one that would
   // have to start, so the second room does not wait for a second browser.
   pick() {
-    const open = this.workers.filter((w) => w.used < this.rooms);
+    const open = this.workers.filter((w) => w.used < this.rooms && w.restartInMs() === 0);
     if (!open.length) return null;
     const warm = (w) => (w.state === 'ready' || w.state === 'up' ? 0 : 1);
     open.sort((a, b) => warm(a) - warm(b) || a.used - b.used || a.index - b.index);
@@ -205,6 +259,8 @@ export class WorkerPool {
 
   async join(link, password) {
     const w = this.pick();
+    const waiting = !w && this.workers.find((x) => x.used < this.rooms && x.restartInMs() > 0);
+    if (waiting) throw new Error(waiting.waitText());
     if (!w) throw new Error('Every worker is full (' + this.size + ' workers, ' + this.rooms + ' rooms each).');
     w.reserved++;
     try {
@@ -273,6 +329,7 @@ export class WorkerPool {
       const row = { worker: w.index, state: w.state, rooms: w.rooms.size, budget: this.rooms };
       if (w.botName) row.bot_name = w.botName;
       if (w.error) row.error = w.error;
+      if (w.restartInMs() > 0) row.restart_in_ms = w.restartInMs();
       if (w.state === 'ready') {
         try {
           const inf = await w.call('info');

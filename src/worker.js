@@ -33,6 +33,7 @@ export function serveWorker(channel, makeDriver, extra = []) {
       channel.send({ event: 'closed' });
       process.exit(0);
     }
+    if (msg.type === 'ping') { channel.send({ event: 'pong' }); return; }
     if (msg.type !== 'call') return;
     const { id, method, args } = msg;
     if (method === 'leave' && args && args[0] != null) queue.leave(args[0]);

@@ -121,7 +121,8 @@ test('a worker refuses a method that is not on its list, and the bot password is
 test('a worker crash drops its rooms, fails its calls in flight, and the clock rejoins on the worker that is up', async () => {
   const meetings = new MeetingStore(home);
   const events = new EventLog(home);
-  makePool();
+  let now = Date.now();
+  makePool({ now: () => now });
   pool.onLost(dropLostMeetings({ meetings, events }));
   const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
   const [ta, tb] = InMemoryTransport.createLinkedPair();
@@ -153,8 +154,13 @@ test('a worker crash drops its rooms, fails its calls in flight, and the clock r
   assert.ok(tail.events.some((e) => e.type === 'meeting.disconnected' && e.meeting_id === lost.meeting_id && e.data.worker === 1));
   assert.equal((await pool.info()).workers[1].state, 'lost');
 
-  // The order is still live in its window, so the next tick seats it again.
-  // Worker 0 is full, so worker 1 is started again for it.
+  // Worker 0 is full and worker 1 waits out its first backoff, so the next
+  // tick leaves the order scheduled. One second later worker 1 starts again
+  // and the order, still in its window, is seated there.
+  await server.clock.tick(Date.now());
+  assert.equal(meetings.get(lost.meeting_id).state, 'scheduled');
+  assert.equal((await pool.info()).workers[1].restart_in_ms, 1000);
+  now += 1000;
   await server.clock.tick(Date.now());
   const back = meetings.get(lost.meeting_id);
   assert.equal(back.state, 'live');

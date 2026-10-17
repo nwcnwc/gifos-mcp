@@ -495,3 +495,58 @@ test('status answers at once when workers never answer info; each such row says 
   await pool.say('w0:mt_1', 'still here');
   await pool.say('w1:mt_1', 'still here');
 });
+
+const voiceCalls = async (w) => (await w.call('calls')).filter((r) => r[0] === 'setVoice').map((r) => r[1]);
+
+test('a worker that restarts gets the voice settings set before it died', async () => {
+  let now = Date.now();
+  makePool({ now: () => now });
+  await pool.join('https://gifos.app/run.html#v=roomA', '');
+  await pool.join('https://gifos.app/run.html#v=roomB', '');
+  await pool.join('https://gifos.app/run.html#v=roomC', '');
+  const silent = { respond_to_command: false, conversation_voice: 'silent' };
+  await pool.setVoice(silent);
+  assert.deepEqual(await voiceCalls(pool.workers[1]), [silent]);
+
+  const child = pool.workers[1].child;
+  const exited = new Promise((r) => child.once('exit', r));
+  child.kill('SIGKILL');
+  await exited;
+  now += 1000;
+  // The new process starts with Meet Bot's defaults; the room it rejoins
+  // must hear the same voice as every other room.
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomC', ''), 'w1:mt_1');
+  assert.deepEqual(await voiceCalls(pool.workers[1]), [silent]);
+});
+
+test('set_voice reaches every ready worker even when one refuses it, and the one that refused gets it on its next join', async () => {
+  makePool();
+  await pool.join('https://gifos.app/run.html#v=roomA', '');
+  await pool.join('https://gifos.app/run.html#v=roomB', '');
+  await pool.join('https://gifos.app/run.html#v=roomC', '');
+  await pool.workers[0].call('breakVoice');
+  const local = { respond_to_command: true, conversation_voice: 'local' };
+  const got = await pool.setVoice(local);
+  assert.equal(got.applied, true);
+  assert.deepEqual(await voiceCalls(pool.workers[1]), [local]);
+  // Worker 0 was asked once and refused; it is not marked as carrying it.
+  assert.deepEqual(await voiceCalls(pool.workers[0]), [local]);
+  await pool.workers[0].call('fixVoice');
+  await pool.leave('w0:mt_1');
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomD', ''), 'w0:mt_3');
+  assert.deepEqual(await voiceCalls(pool.workers[0]), [local, local]);
+});
+
+test('set_voice is not held by a worker that never answers it', { timeout: 10000 }, async () => {
+  makePool({ callMs: 300 });
+  await pool.join('https://gifos.app/run.html#v=roomA', '');
+  await pool.join('https://gifos.app/run.html#v=roomB', '');
+  await pool.join('https://gifos.app/run.html#v=roomC', '');
+  await pool.workers[0].call('holdVoice');
+  const local = { respond_to_command: true, conversation_voice: 'local' };
+  const t0 = Date.now();
+  const got = await pool.setVoice(local);
+  assert.ok(Date.now() - t0 < 1000, 'took ' + (Date.now() - t0) + 'ms');
+  assert.equal(got.applied, true);
+  assert.deepEqual(await voiceCalls(pool.workers[1]), [local]);
+});

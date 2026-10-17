@@ -35,7 +35,12 @@ class FakeDriver {
     return ['Ada: hello from ' + this.boot.creds.name + ' ' + id].concat((this.spoken && this.spoken[id]) || []).join('\n');
   }
   async people() { return [{ name: 'Ada', bot: false }]; }
-  async setVoice(s) { this.log.push(['setVoice', s]); return { applied: true }; }
+  async setVoice(s) {
+    this.log.push(['setVoice', s]);
+    if (this.voiceHeld) return new Promise(() => {});
+    if (this.voiceFails) throw new Error('setVoice refused');
+    return { applied: true };
+  }
   async list() { return Array.from({ length: this.seq }, (_, i) => ({ id: 'mt_' + (i + 1) })); }
   async info() {
     if (this.infoStuck) return new Promise(() => {});
@@ -56,11 +61,16 @@ class FakeDriver {
   async releaseJoins() { const h = this.held; this.held = null; if (h) h.release(); }
   // info never answers, while pings and other calls still do.
   async stickInfo() { this.infoStuck = true; }
+  // setVoice fails until fixVoice().
+  async breakVoice() { this.voiceFails = true; }
+  async fixVoice() { this.voiceFails = false; }
+  // setVoice never answers.
+  async holdVoice() { this.voiceHeld = true; }
   // Blocks the event loop for good, the way a wedged worker would: no reply, no pong.
   async hang() { for (;;) { /* stuck */ } }
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stickInfo']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice']);
 });
 process.send({ event: 'boot' });

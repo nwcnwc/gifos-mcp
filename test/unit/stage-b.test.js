@@ -406,6 +406,32 @@ test('end_meeting while a reseat is in flight ends it; the late join is left, no
   await client.close();
 });
 
+test('end_meeting while a join is in flight, then the late leave fails: the meeting keeps that seat so a second end_meeting can leave it', { timeout: 10000 }, async () => {
+  const { meetings, server, client, json, own, joinsOn1, until } = await lostRoomWithHeldJoin();
+  const ticking = server.clock.tick(Date.now());
+  await until(async () => (await joinsOn1()) === 1);
+  await pool.workers[1].call('breakLeave', 'leave refused');
+  assert.equal((await json('end_meeting', { meeting_id: own.meeting_id })).state, 'ended');
+  await pool.workers[1].call('releaseJoins');
+  await ticking;
+  // The bot still sits in the room: the meeting must hold that seat.
+  assert.equal((await pool.info()).workers[1].rooms, 1);
+  const row = meetings.get(own.meeting_id);
+  assert.equal(row.state, 'live', 'a seat nobody holds cannot be left again');
+  assert.equal(row.session_id, 'w1:mt_1');
+  assert.equal(row.transcribing, false);
+  const tail = (await json('tail_events', { limit: 200 })).events;
+  assert.equal(tail.filter((e) => e.type === 'meeting.error' && e.meeting_id === own.meeting_id && /could not leave/.test(e.data.text)).length, 1);
+  // No tick seats it again or ends it on its own.
+  await server.clock.tick(Date.now());
+  assert.equal(await joinsOn1(), 1);
+  await pool.workers[1].call('fixLeave');
+  assert.equal((await json('end_meeting', { meeting_id: own.meeting_id })).state, 'ended');
+  assert.equal((await pool.info()).workers[1].rooms, 0);
+  assert.equal(meetings.get(own.meeting_id).session_id, null);
+  await client.close();
+});
+
 test('while a lost worker waits out its restart, orders it cannot seat wait once instead of erroring every tick, and one that never gets a seat is missed for capacity', async () => {
   const meetings = new MeetingStore(home);
   const events = new EventLog(home);

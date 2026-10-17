@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { weightsCache } from '../../src/voice/kokoro.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CHILD = path.join(HERE, 'fixtures', 'kokoro-child.js');
@@ -17,26 +18,36 @@ const REPO = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 const MODEL = 'onnx/model_quantized.onnx';
 const CONFIG = JSON.stringify({ model_type: 'style_text_to_speech_2' });
 
-// files: name -> Buffer (served whole) | { partial, total } (sends partial
-// bytes of total, then stalls) | missing (stalls with no answer).
+// files: name -> Buffer (served whole, or from a Range start) | { partial,
+// total, bytes? } (sends the first partial bytes of total, then stalls) |
+// missing (stalls with no answer). ranges lists each request's Range header.
 async function weightsServer(t, files) {
   const asked = [];
+  const ranges = [];
   const server = http.createServer((req, res) => {
     const prefix = '/' + REPO + '/resolve/main/';
     const name = req.url.startsWith(prefix) ? decodeURIComponent(req.url.slice(prefix.length)) : req.url;
     asked.push(name);
+    ranges.push({ name, range: req.headers.range || null });
     const f = files[name];
+    const from = /^bytes=(\d+)-$/.exec(req.headers.range || '');
+    if (Buffer.isBuffer(f) && from && Number(from[1]) < f.length) {
+      const start = Number(from[1]);
+      res.writeHead(206, { 'content-length': f.length - start, 'content-range': 'bytes ' + start + '-' + (f.length - 1) + '/' + f.length });
+      res.end(f.subarray(start));
+      return;
+    }
     if (Buffer.isBuffer(f)) { res.writeHead(200, { 'content-length': f.length }); res.end(f); return; }
     if (f && f.partial) {
       res.writeHead(200, { 'content-length': f.total });
-      res.write(Buffer.alloc(f.partial, 7));
+      res.write(f.bytes ? f.bytes.subarray(0, f.partial) : Buffer.alloc(f.partial, 7));
       return;
     }
     // Stall: the model's own fetch stays in flight until the test ends.
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => { server.closeAllConnections(); server.close(); });
-  return { host: 'http://127.0.0.1:' + server.address().port, asked };
+  return { host: 'http://127.0.0.1:' + server.address().port, asked, ranges };
 }
 
 function freshHome(t) {
@@ -128,4 +139,71 @@ test('the binary exits 1 with one Kokoro line when the weights will not load', a
   assert.equal(out.code, 1, 'exit 1, not a crash code; stderr: ' + out.stderr.slice(-2000));
   assert.match(out.stderr, /Kokoro could not load/);
   assert.equal(/var A=void 0/.test(out.stderr), false, 'no minified phonemizer source in the log');
+});
+
+// Bytes that differ along the file, so a resume that lands at the wrong
+// offset gives a different file.
+const pattern = (n) => Buffer.from(Array.from({ length: n }, (_, i) => (i * 7 + (i >> 9)) % 251));
+
+async function deadPid() {
+  const p = spawn(process.execPath, ['-e', '']);
+  await new Promise((r) => p.on('exit', r));
+  return p.pid;
+}
+
+test('a start after a download was killed asks only for the bytes it does not have', async (t) => {
+  const home = freshHome(t);
+  const whole = pattern(1000000);
+  const first = await weightsServer(t, {
+    'config.json': Buffer.from(CONFIG),
+    [MODEL]: { partial: 300000, total: whole.length, bytes: whole },
+  });
+  const child = run(CHILD, [home, first.host]);
+  t.after(() => child.proc.kill('SIGKILL'));
+  await until(() => filesUnder(modelDir(home)).some((p) => p.endsWith('.part') && fs.statSync(p).size >= 300000), 20000, 'the partial model on disk');
+  child.proc.kill('SIGKILL');
+  await child.done;
+  const kept = filesUnder(modelDir(home)).filter((p) => p.endsWith('.part')).map((p) => fs.statSync(p).size);
+  // The next start (a worker restarted after its boot ran out of time).
+  const second = await weightsServer(t, { 'config.json': Buffer.from(CONFIG), [MODEL]: whole });
+  const again = run(CHILD, [home, second.host]);
+  t.after(() => again.proc.kill('SIGKILL'));
+  await Promise.race([again.done, new Promise((r) => setTimeout(r, 60000).unref())]);
+  const asks = second.ranges.filter((r) => r.name === MODEL);
+  assert.ok(asks.length >= 1, 'the model is asked for; asked ' + JSON.stringify(second.ranges));
+  assert.equal(asks[0].range, 'bytes=' + kept[0] + '-',
+    'the first ask for the model resumes from the ' + JSON.stringify(kept) + ' bytes kept; asks ' + JSON.stringify(asks));
+});
+
+test('a resumed download puts the kept bytes and the rest together in order', async (t) => {
+  const home = freshHome(t);
+  const whole = pattern(1000000);
+  const w = await weightsServer(t, { [MODEL]: whole });
+  const dir = path.join(home, 'kokoro');
+  const file = path.join(dir, REPO, MODEL);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + '.' + (await deadPid()) + '.part', whole.subarray(0, 300000));
+  const cache = weightsCache(dir, w.host);
+  const res = await cache.match(w.host + '/' + REPO + '/resolve/main/' + MODEL);
+  assert.ok(res, 'the kept part is finished and answered from the cache');
+  assert.ok(Buffer.from(await res.arrayBuffer()).equals(whole), 'the answer is the whole file');
+  assert.ok(fs.readFileSync(file).equals(whole), 'the file on disk is the whole file');
+  assert.deepEqual(w.ranges, [{ name: MODEL, range: 'bytes=300000-' }]);
+  assert.deepEqual(filesUnder(path.dirname(file)).filter((p) => p.endsWith('.part')), [], 'no part file is left');
+});
+
+test('a server that ignores Range gives the whole file, not the kept bytes twice', async (t) => {
+  const home = freshHome(t);
+  const whole = pattern(500000);
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-length': whole.length }); res.end(whole); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const host = 'http://127.0.0.1:' + server.address().port;
+  const dir = path.join(home, 'kokoro');
+  const file = path.join(dir, REPO, MODEL);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + '.' + (await deadPid()) + '.part', whole.subarray(0, 200000));
+  const res = await weightsCache(dir, host).match(host + '/' + REPO + '/resolve/main/' + MODEL);
+  assert.ok(res);
+  assert.ok(fs.readFileSync(file).equals(whole), 'the file on disk is the whole file');
 });

@@ -38,7 +38,7 @@ export function installKokoro({ home, voice, host } = {}) {
 // writes its own part file and the last rename wins with a whole file.
 // Keys are the remote URLs; files keep the old <model>/<file> layout, so
 // weights downloaded before this change are still found.
-function weightsCache(dir, host) {
+export function weightsCache(dir, host) {
   const base = String(host).replace(/\/+$/, '') + '/';
   const fileFor = (key) => {
     const k = String(key);

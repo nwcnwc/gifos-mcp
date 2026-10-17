@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { readPrivate, writePrivate } from './private-file.js';
 
 const ROOM_RE = /^[A-Za-z0-9-]{1,64}$/;
 
@@ -44,15 +45,14 @@ export class MeetingStore {
   constructor(home) {
     this.file = path.join(home, 'meetings.json');
     this.home = home;
-    this.items = [];
-    try { this.items = JSON.parse(fs.readFileSync(this.file, 'utf8')).meetings || []; } catch (e) { this.items = []; }
+    // It may still hold the only copy of every transcript.
+    const saved = readPrivate(this.file, 'starting with no meetings', (x) => x && Array.isArray(x.meetings || []));
+    this.items = (saved && saved.meetings) || [];
   }
 
   save() {
     fs.mkdirSync(this.home, { recursive: true, mode: 0o700 });
-    const tmp = this.file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ meetings: this.items }, null, 2) + '\n', { mode: 0o600 });
-    fs.renameSync(tmp, this.file);
+    writePrivate(this.file, JSON.stringify({ meetings: this.items }, null, 2) + '\n');
   }
 
   get(id) { return this.items.find((m) => m.meeting_id === id) || null; }

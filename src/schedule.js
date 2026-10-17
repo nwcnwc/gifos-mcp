@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { roomFromLink } from './meetings.js';
 import { plainLink } from './invite.js';
-import { log } from './log.js';
+import { readPrivate, writePrivate } from './private-file.js';
 
 export const QUIET_MS = 10 * 60 * 1000;
 export const DEFAULT_SPAN_MS = 8 * 60 * 60 * 1000;
@@ -275,40 +275,13 @@ export function capacityPicture({ orders, liveMeetings, cap, near, now, horizonM
 
 function iso(ms) { return new Date(ms).toISOString(); }
 
-// Temp file then rename, so a save cut short (disk full, killed mid-write)
-// leaves the last good schedule.json in place.
-function writePrivate(file, text) {
-  const tmp = file + '.tmp';
-  try {
-    fs.writeFileSync(tmp, text, { mode: 0o600 });
-    fs.chmodSync(tmp, 0o600);
-    fs.renameSync(tmp, file);
-  } catch (e) {
-    fs.rmSync(tmp, { force: true });
-    throw e;
-  }
-}
-
 export class ScheduleStore {
   constructor(home) {
     this.home = home;
     this.file = path.join(home, 'schedule.json');
-    this.items = [];
-    let raw = null;
-    try { raw = fs.readFileSync(this.file, 'utf8'); } catch (e) { raw = null; }
-    if (raw == null) return;
-    try {
-      const saved = JSON.parse(raw);
-      this.items = (saved.orders || []).map(stripAdmin);
-    } catch (e) {
-      // An unreadable file is moved aside, not overwritten by the next save:
-      // it may still hold the only copy of the room passwords.
-      const bad = this.file + '.bad-' + Date.now();
-      fs.renameSync(this.file, bad);
-      fs.chmodSync(bad, 0o600);
-      log('schedule.json could not be read; kept as ' + path.basename(bad) + ', starting with no orders.');
-      this.items = [];
-    }
+    // It may still hold the only copy of the room passwords.
+    const saved = readPrivate(this.file, 'starting with no orders', (x) => x && Array.isArray(x.orders || []));
+    this.items = ((saved && saved.orders) || []).map(stripAdmin);
   }
 
   save() {

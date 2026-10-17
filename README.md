@@ -120,7 +120,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 |---|---|---|
 | `GIFOS_URL` | `https://gifos.app` | The GifOS site to use. It must be 0.9.23 or newer with Meeting Bot in its store. |
 | `GIFOS_RELAY` | GifOS default | A custom relay (`wss://…`) for self-hosted GifOS. It is added to meeting links. |
-| `GIFOS_BOT_NAME`, `GIFOS_BOT_PASSWORD` | generated | The Meeting Bot name and password. They derive the bot's secret admin meeting. The name is what participants see. If unset, a strong pair is generated once and kept in `GIFOS_MCP_HOME/bot.json` (mode 0600). |
+| `GIFOS_BOT_NAME`, `GIFOS_BOT_PASSWORD` | generated | The Meeting Bot name and password. They derive the bot's secret admin meeting. The name is what participants see. If unset, a strong pair is generated once and kept in `GIFOS_MCP_HOME/bot.json` (mode 0600). A `bot.json` that cannot be read at start is kept as `bot.json.bad-<ms>` (mode 0600, logged) and a new pair is generated; it is not overwritten, so the old pair can be put back by hand. |
 | `GIFOS_STT_APP` | `offline-stt-whisper` | The store app that turns speech into text. `none` turns transcription off. |
 | `GIFOS_MCP_HOME` | `~/.gifos-mcp` | The browser profile, the bot credential, and `meetings.json`. |
 | `GIFOS_HEADLESS` | `1` | `0` shows the browser windows, which helps when debugging. |
@@ -222,7 +222,9 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 - **Meeting links are capabilities.** Anyone with a link can join that meeting, so share links only with the
   people you invite.
 - **Transcripts are stored** in `GIFOS_MCP_HOME/meetings.json` (mode 0600) so they survive restarts. Delete the
-  file to forget them.
+  file to forget them. It is written to a temp file then renamed, so a save cut short keeps the last good file;
+  a file that cannot be read at start is kept as `meetings.json.bad-<ms>` (mode 0600, logged) and not
+  overwritten. Delete any `*.bad-*` file too (a `bot.json.bad-*` holds an old bot password).
 - **The key stays in this process.** When this server hosts `smartest`, it calls the model. The page does
   not, and `GIFOS_LLM_KEY` is not written into Settings. `MeetingBot.setVoice` receives the provider role
   `smartest` and never the URL or the key. Leave the key unset and conversation voice stays `none` unless

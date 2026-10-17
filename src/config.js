@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { KOKORO_VOICE, MCP_TTS_APP } from './voice/settings.js';
+import { readPrivate, writePrivate } from './private-file.js';
 
 export const DEFAULT_GIFOS_URL = 'https://gifos.app';
 export const DEFAULT_STT_APP = 'offline-stt-whisper';
@@ -183,13 +184,11 @@ export function botCredentials(cfg) {
     return { name: cfg.botName, password: cfg.botPassword, source: 'env' };
   }
   const file = path.join(cfg.home, 'bot.json');
-  try {
-    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!credentialProblem(saved.name, saved.password)) return { name: saved.name, password: saved.password, source: 'file' };
-  } catch (e) { /* first run */ }
+  // A file that cannot be read is kept aside: it is the bot's old identity.
+  const saved = readPrivate(file, 'generating a new bot name and password', (x) => x && !credentialProblem(x.name, x.password));
+  if (saved) return { name: saved.name, password: saved.password, source: 'file' };
   const fresh = generateCredentials();
   fs.mkdirSync(cfg.home, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file, JSON.stringify(fresh, null, 2) + '\n', { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  writePrivate(file, JSON.stringify(fresh, null, 2) + '\n');
   return { ...fresh, source: 'generated' };
 }

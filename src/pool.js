@@ -11,6 +11,9 @@
 //   the meeting index can drop them, and the clock rejoins live orders on a
 //   worker that is still up.
 // - A worker that stops answering the heartbeat is killed and counts as lost.
+// - A call that gets no answer within callMs (joinMs for a browser start or
+//   a join) fails, but a worker that still answers the heartbeat stays up.
+//   A join that lands after its caller gave up is left at once.
 // - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
 //   up to a minute), and joins go to another worker meanwhile.
 import path from 'node:path';
@@ -20,6 +23,8 @@ import { log } from './log.js';
 
 const WORKER_SCRIPT = fileURLToPath(new URL('./worker.js', import.meta.url));
 const SESSION_RE = /^w(\d+):(.+)$/;
+// Calls that may start a browser or wait on a meeting page get joinMs.
+const SLOW_METHODS = new Set(['ensureStarted', 'join']);
 
 // Worker 0 keeps the bot's own name and profile, so a one-worker machine
 // that moves to several keeps its installed apps. Worker n is its own bot
@@ -49,6 +54,7 @@ class Worker {
     this.error = '';
     this.seq = 0;
     this.pending = new Map();
+    this.late = new Map();    // call id -> method, for calls that timed out
     this.rooms = new Set();   // local session ids seated on this worker
     this.reserved = 0;        // joins in flight
     this.booting = null;
@@ -89,9 +95,11 @@ class Worker {
         if (msg.event === 'up') { up = true; this.state = 'up'; this.upAt = this.pool.now(); this.heartbeat(child); resolve(); return; }
         if (msg.event === 'pong') { this.lastPong = Date.now(); return; }
         if (msg.event === 'thinking') { this.pool.thinkingFrom(this.index, msg.id, msg.on); return; }
+        if (msg.id != null && this.late.has(msg.id)) { this.landedLate(msg); return; }
         if (msg.id != null && this.pending.has(msg.id)) {
           const p = this.pending.get(msg.id);
           this.pending.delete(msg.id);
+          clearTimeout(p.timer);
           if (msg.ok) p.resolve(msg.value);
           else p.reject(new Error(msg.error || 'The worker call failed.'));
         }
@@ -140,7 +148,8 @@ class Worker {
     if (was !== 'closing') this.error = why;
     this.child = null;
     this.booting = null;
-    for (const p of this.pending.values()) p.reject(new Error('Worker ' + this.index + ' stopped: ' + why));
+    this.late.clear();
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Worker ' + this.index + ' stopped: ' + why)); }
     this.pending.clear();
     const gone = [...this.rooms].map((s) => 'w' + this.index + ':' + s);
     this.rooms.clear();
@@ -154,11 +163,29 @@ class Worker {
     await this.spawn();
     if (!this.child) throw new Error('Worker ' + this.index + ' is not running.');
     const id = ++this.seq;
+    const ms = SLOW_METHODS.has(method) ? this.pool.joinMs : this.pool.callMs;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        this.late.set(id, method);
+        reject(new Error('Worker ' + this.index + ' did not answer ' + method + ' within ' + ms + 'ms.'));
+      }, ms);
+      timer.unref();
+      this.pending.set(id, { resolve, reject, timer });
       try { this.child.send({ type: 'call', id, method, args }); }
-      catch (e) { this.pending.delete(id); reject(e); }
+      catch (e) { clearTimeout(timer); this.pending.delete(id); reject(e); }
     });
+  }
+
+  // A reply to a call that already timed out. Nobody holds the session id of
+  // a late join, so leave it rather than keep a seat no one can reach.
+  landedLate(msg) {
+    const method = this.late.get(msg.id);
+    this.late.delete(msg.id);
+    if (method !== 'join' || !msg.ok || msg.value == null) return;
+    const local = String(msg.value);
+    log('worker ' + this.index + ': a join landed after it timed out; leaving ' + local);
+    this.call('leave', local).catch((e) => log('worker ' + this.index + ': late leave failed: ' + ((e && e.message) || e)));
   }
 
   async ready() {
@@ -185,7 +212,7 @@ class Worker {
 
 export class WorkerPool {
   // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
-  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs }
+  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs }
   constructor(cfg, creds, opts = {}) {
     this.cfg = cfg;
     this.creds = creds;
@@ -201,6 +228,9 @@ export class WorkerPool {
     this.backoffMs = opts.backoffMs > 0 ? opts.backoffMs : 1000;
     this.backoffMaxMs = opts.backoffMaxMs > 0 ? opts.backoffMaxMs : 60000;
     this.stableMs = opts.stableMs > 0 ? opts.stableMs : 60000;
+    // A browser start chains several page waits of cfg.timeoutMs each.
+    this.callMs = opts.callMs > 0 ? opts.callMs : 60000;
+    this.joinMs = opts.joinMs > 0 ? opts.joinMs : 5 * (cfg.timeoutMs || 120000);
     const script = opts.workerScript || WORKER_SCRIPT;
     this.forkWorker = typeof opts.forkWorker === 'function'
       ? opts.forkWorker

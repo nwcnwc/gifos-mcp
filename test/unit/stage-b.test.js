@@ -910,3 +910,57 @@ test('a join that takes down every worker it reaches is tried on one more worker
   await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /Worker 1 stopped/);
   assert.deepEqual(pool.workers.map((w) => w.state), ['lost', 'lost', 'stopped']);
 });
+
+test('a scheduled room that takes down every worker it reaches is not joined again on every tick, so the meetings it knocked off stay seated', { timeout: 15000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  let now = Date.now();
+  makePool({ now: () => now });
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const json = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  const start = new Date(now - 60 * 1000).toISOString();
+  const end = new Date(now + 60 * 60 * 1000).toISOString();
+  const good = (await json('create_meeting', { name: 'Good', admin_password: 'owner-77' })).link;
+  const bad = (await json('create_meeting', { name: 'Poison', admin_password: 'owner-77' })).link;
+  cfg.crashRoom = meetings.all().find((m) => m.link === bad).room;
+  await json('schedule_meeting', { link: good, room_password: ROOM, start, end, topic: 'Good' });
+  const poison = (await json('schedule_meeting', { link: bad, room_password: ROOM, start, end, topic: 'Poison' })).schedule_id;
+
+  // Good is seated on worker 0; Poison kills worker 0 (dropping Good), then
+  // worker 1, and fails.
+  await server.clock.tick(now);
+  const g = meetings.all().find((m) => m.topic === 'Good');
+  assert.equal(meetings.get(g.meeting_id).state, 'scheduled');
+  assert.deepEqual(pool.workers.map((w) => w.state), ['lost', 'lost']);
+
+  // Both workers restart after their backoff. Good comes back, and Poison is
+  // not tried again on the next ticks, so Good keeps its seat.
+  for (let i = 0; i < 4; i++) {
+    now += 2000;
+    await server.clock.tick(now);
+  }
+  assert.equal(meetings.get(g.meeting_id).state, 'live', 'Good keeps its seat');
+  const tail = (await json('tail_events', { limit: 200 })).events;
+  assert.equal(tail.filter((e) => e.type === 'meeting.disconnected' && e.meeting_id === g.meeting_id).length, 1, 'Good was knocked off once');
+  const errors = tail.filter((e) => e.type === 'meeting.error' && /crash/i.test(e.data.text));
+  assert.equal(errors.length, 1, 'the crash is told once');
+  const row = (await json('list_schedule')).orders.find((o) => o.schedule_id === poison);
+  assert.equal(row.phase, 'upcoming', 'Poison is still in its window and will be tried again later');
+
+  // After the first wait (one minute) Poison is tried again, and waits longer.
+  now += 60 * 1000;
+  await server.clock.tick(now);
+  let again = (await json('tail_events', { limit: 200 })).events.filter((e) => e.type === 'meeting.error' && /crash/i.test(e.data.text));
+  assert.equal(again.length, 2, 'Poison was tried once more');
+  now += 60 * 1000;
+  for (let i = 0; i < 3; i++) { now += 2000; await server.clock.tick(now); }
+  again = (await json('tail_events', { limit: 200 })).events.filter((e) => e.type === 'meeting.error' && /crash/i.test(e.data.text));
+  assert.equal(again.length, 2, 'the second wait is two minutes');
+  assert.equal(meetings.get(g.meeting_id).state, 'live');
+  await client.close();
+});

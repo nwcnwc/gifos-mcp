@@ -25,6 +25,8 @@ class FakeDriver {
     // cfg.crashJoin lists workers whose process dies on a join, the way a
     // Chromium crash in the room page would take the worker down with it.
     if ((this.boot.cfg.crashJoin || []).includes(this.boot.index)) process.exit(9);
+    // cfg.crashRoom: a room whose page takes down any worker that joins it.
+    if (this.boot.cfg.crashRoom && String(link).includes(this.boot.cfg.crashRoom)) process.exit(9);
     if (this.joinFails) throw new Error(this.joinFails);
     const id = 'mt_' + (++this.seq);
     this.live.add(id);

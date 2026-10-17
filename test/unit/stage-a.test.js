@@ -204,3 +204,33 @@ test('the clock ends an overrun room Meet Bot already dropped and still serves t
   assert.equal(meetings.get(a.meeting_id).state, 'ended');
   assert.equal(rows.find((o) => o.schedule_id === second.schedule_id).phase, 'live');
 });
+
+// Any other leave failure (a busy page, a timed-out call) keeps the room
+// live for the next tick, but must not stop the tick serving later orders.
+test('a clock leave that fails for another reason still serves the next order and retries the leave next tick', async () => {
+  const a = await mint('Notes');
+  const b = await mint('Review');
+  const startA = new Date(Date.now() - 60 * 1000).toISOString();
+  const endA = Date.now() + 60 * 1000;
+  const first = await json('schedule_meeting', { link: a.link, room_password: ROOM, start: startA, end: new Date(endA).toISOString() });
+  await server.clock.tick(Date.now());
+  const startB = new Date(endA + 30 * 1000).toISOString();
+  const second = await json('schedule_meeting', { link: b.link, room_password: ROOM, start: startB, end: new Date(endA + 60 * 60 * 1000).toISOString() });
+  bot.peopleList = [{ name: 'Bot', bot: true }];
+  const leave = bot.leave.bind(bot);
+  bot.leave = async () => { throw new Error('Meeting Bot: page is busy'); };
+  await assert.doesNotReject(server.clock.tick(endA + 1000));
+  let rows = (await json('list_schedule')).orders;
+  assert.equal(meetings.get(a.meeting_id).state, 'live');
+  assert.equal(rows.find((o) => o.schedule_id === first.schedule_id).phase, 'overrun');
+  assert.equal(rows.find((o) => o.schedule_id === second.schedule_id).phase, 'live');
+  // One error event for the failed leave, not one per tick.
+  await server.clock.tick(endA + 2000);
+  const errors = (await json('tail_events', { since: 0 })).events.filter((row) => row.type === 'meeting.error' && row.meeting_id === a.meeting_id);
+  assert.equal(errors.length, 1);
+  bot.leave = leave;
+  await server.clock.tick(endA + 3000);
+  rows = (await json('list_schedule')).orders;
+  assert.equal(meetings.get(a.meeting_id).state, 'ended');
+  assert.equal(rows.find((o) => o.schedule_id === first.schedule_id).phase, 'ended');
+});

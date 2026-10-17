@@ -1187,3 +1187,46 @@ test('a join whose transcription will not start and whose leave fails stays live
   assert.deepEqual(await pool.workers[0].call('list'), []);
   await client.close();
 });
+
+test('a join whose meetings.json save fails (disk nearly full: the transcripts file is the big one) still starts its captions and raises no error: the seat is held in memory and saved once the disk has room', { timeout: 15000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  makePool();
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const watched = [];
+  const captions = { start: async (row) => { watched.push(row.meeting_id); }, stop: () => {} };
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events, captions });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const json = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  const link = (await json('create_meeting', { name: 'Full disk', admin_password: 'owner-77' })).link;
+  const now = Date.now();
+  await json('schedule_meeting', { link, room_password: ROOM, start: new Date(now - 60 * 1000).toISOString(), end: new Date(now + 60 * 60 * 1000).toISOString(), topic: 'Full disk' });
+  const m = meetings.all().find((row) => row.topic === 'Full disk');
+
+  // schedule.json (small) still saves; meetings.json (every transcript) does not.
+  const save = meetings.save;
+  meetings.save = () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); };
+  for (let i = 0; i < 3; i++) await server.clock.tick(now + i * 1000);
+  const sitting = async () => {
+    let n = 0;
+    for (const w of pool.workers) if (w.state === 'ready') n += (await w.call('list')).length;
+    return n;
+  };
+  assert.equal(await sitting(), 1, 'the bot sits in the room once');
+  assert.equal(pool.workers.reduce((n, w) => n + w.used, 0), 1, 'one seat is held');
+  assert.equal(meetings.get(m.meeting_id).state, 'live');
+  assert.deepEqual(watched, [m.meeting_id], 'its captions are read from the first tick');
+  const tail = (await json('tail_events', { limit: 200 })).events;
+  assert.equal(tail.filter((e) => e.type === 'meeting.error').length, 0, 'the room was entered, not failed');
+
+  // Once the disk has room, the next save writes the live meeting.
+  meetings.save = save;
+  await json('mute', { meeting_id: m.meeting_id });
+  assert.equal(new MeetingStore(home).get(m.meeting_id).state, 'live');
+  await json('end_meeting', { meeting_id: m.meeting_id });
+  assert.equal(await sitting(), 0);
+  await client.close();
+});

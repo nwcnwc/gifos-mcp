@@ -270,11 +270,12 @@ export class WorkerPool {
     }
   }
 
-  // Warm the first worker so the first join does not wait for a browser.
+  // Warm the worker the next join would pick, so it does not wait for a
+  // browser. Worker 0 first, unless it is waiting out a restart.
   async ensureStarted() {
     const up = this.workers.find((w) => w.state === 'ready');
     if (up) return;
-    await this.workers[0].ready();
+    await (this.pick() || this.workers[0]).ready();
   }
 
   // Most free rooms first. A worker that is already up beats one that would

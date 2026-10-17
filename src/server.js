@@ -72,10 +72,27 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return m;
   };
 
-  async function enter(m, password) {
+  // One join per meeting at a time. A clock tick, a second tick and a
+  // start_meeting for the same room share it instead of seating it twice.
+  const entering = new Map();
+  function enter(m, password) {
+    const busy = entering.get(m.meeting_id);
+    if (busy) return busy.promise;
+    const job = { cancelled: false };
+    job.promise = enterOnce(m, password, job).finally(() => entering.delete(m.meeting_id));
+    entering.set(m.meeting_id, job);
+    return job.promise;
+  }
+
+  async function enterOnce(m, password, job) {
     await bot.ensureStarted();
     const roomPassword = password || schedule.passwordFor(m.room) || '';
     const sessionId = await bot.join(plainLink(m.link, roomPassword), roomPassword);
+    if (job.cancelled) {
+      // Ended while the join was on its way. Leave the seat it just took.
+      await bot.leave(sessionId).catch(() => {});
+      return meetings.get(m.meeting_id);
+    }
     await bot.transcribe(sessionId, true);
     const updated = meetings.update(m.meeting_id, {
       state: 'live', session_id: sessionId, transcribing: true, muted: false, reseat: false,
@@ -259,18 +276,27 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     return { done, lines: text ? text.split('\n').length : 0 };
   }
 
+  // end_meeting or leave_meeting on a room the bot is on its way into: a
+  // join in flight, or a dropped room the clock would bring back. Do not.
+  function stopJoin(m) {
+    const pending = entering.get(m.meeting_id);
+    if (m.state === 'live' || !(pending || (m.reseat && m.state === 'scheduled'))) return null;
+    if (pending) pending.cancelled = true;
+    const done = meetings.update(m.meeting_id, { state: 'ended', reseat: false, ended_at: new Date().toISOString() });
+    const order = schedule.forMeeting(m.meeting_id);
+    if (order) schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: Date.now() < Date.parse(order.end) ? 'left_early' : 'ended' });
+    emit({ type: 'meeting.left', meeting_id: m.meeting_id, data: { state: 'ended', reason: 'manual' } });
+    return ok({ ...publicView(done), note: pending ? 'The bot was joining; it left again.' : 'The bot was waiting to rejoin; it will not.' });
+  }
+
   server.registerTool('end_meeting', {
     title: 'End the meeting for the bot',
     description: 'Saves the transcript, then the bot leaves. Other participants can stay; GifOS meetings have no owner who can close them for everyone.',
     inputSchema: { meeting_id: meetingId },
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
-    if (m.reseat && m.state === 'scheduled') {
-      // Its worker died and the clock would bring the bot back. Do not.
-      const done = meetings.update(m.meeting_id, { state: 'ended', reseat: false, ended_at: new Date().toISOString() });
-      emit({ type: 'meeting.left', meeting_id: m.meeting_id, data: { state: 'ended', reason: 'manual' } });
-      return ok({ ...publicView(done), note: 'The bot was waiting to rejoin; it will not.' });
-    }
+    const stopped = stopJoin(m);
+    if (stopped) return stopped;
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
     const left = await depart(m);
     return ok({ ...publicView(left.done), transcript_lines: left.lines });
@@ -470,12 +496,8 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     inputSchema: { meeting_id: meetingId },
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
-    if (m.reseat && m.state === 'scheduled') {
-      // Its worker died and the clock would bring the bot back. Do not.
-      const done = meetings.update(m.meeting_id, { state: 'ended', reseat: false, ended_at: new Date().toISOString() });
-      emit({ type: 'meeting.left', meeting_id: m.meeting_id, data: { state: 'ended', reason: 'manual' } });
-      return ok({ ...publicView(done), note: 'The bot was waiting to rejoin; it will not.' });
-    }
+    const stopped = stopJoin(m);
+    if (stopped) return stopped;
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
     const left = await depart(m, 'manual');
     return ok({ ...publicView(left.done), transcript_lines: left.lines });

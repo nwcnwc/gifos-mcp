@@ -104,6 +104,7 @@ export function createClock(deps) {
         emit('schedule.due', order.meeting_id, briefOrder(order));
         try {
           const joined = await deps.join(order);
+          if (!joined || joined.state !== 'live') continue; // ended while joining
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
@@ -117,6 +118,7 @@ export function createClock(deps) {
         if (liveCount >= deps.cap) continue;
         try {
           const joined = await deps.join(order);
+          if (!joined || joined.state !== 'live') continue; // ended while joining
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: now >= end ? 'overrun' : 'live', meeting_id: joined.meeting_id, overrun_at: now >= end ? new Date(now).toISOString() : '' });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
@@ -152,6 +154,7 @@ export function createClock(deps) {
         if (deps.meetings.all().filter((row) => row.state === 'live').length >= deps.cap) break;
         try {
           const joined = await deps.reseat(m);
+          if (!joined || joined.state !== 'live') continue; // ended while joining
           emit('meeting.joined', joined.meeting_id, { topic: joined.topic, link: joined.link, state: 'live', reason: 'worker' });
         } catch (e) {
           emit('meeting.error', m.meeting_id, { text: 'The room could not be entered.' });
@@ -176,7 +179,13 @@ export function createClock(deps) {
     },
     start(ms = 15000) {
       if (timer) return timer;
-      timer = setInterval(() => { tick().catch(() => {}); }, ms);
+      // A join can outlast the interval; skip a tick while the last one runs.
+      let running = false;
+      timer = setInterval(() => {
+        if (running) return;
+        running = true;
+        tick().catch(() => {}).finally(() => { running = false; });
+      }, ms);
       if (timer.unref) timer.unref();
       return timer;
     },

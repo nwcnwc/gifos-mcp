@@ -43,7 +43,12 @@ let kokoro = null;
 // With several workers, each worker loads its own Kokoro from the same weights.
 if (cfg.voice.tts.source === 'mcp' && cfg.workers === 1) {
   log('setting up Kokoro (weights, voice ' + cfg.voice.tts.voice + ')');
-  kokoro = await installKokoro({ home: cfg.home, voice: cfg.voice.tts.voice, host: cfg.voice.tts.weights });
+  try {
+    kokoro = await installKokoro({ home: cfg.home, voice: cfg.voice.tts.voice, host: cfg.voice.tts.weights });
+  } catch (e) {
+    log(String((e && e.message) || e));
+    process.exit(1);
+  }
 }
 const meetings = new MeetingStore(cfg.home);
 const schedule = new ScheduleStore(cfg.home);

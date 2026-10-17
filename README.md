@@ -141,7 +141,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `GIFOS_TTS_ENGINE` | `kokoro` | `auto` and `kokoro` run Kokoro in this process (voice `af_heart`) and the host binding answers the GifOS `tts` role. The first start downloads the weights into `GIFOS_MCP_HOME/kokoro`. `none` does not. |
 | `GIFOS_TTS_APP` | empty | A store provider app to install and assign for speech instead of Kokoro in this process. |
 | `GIFOS_TTS_VOICE` | `af_heart` | Kokoro voice name, passed through with local voice. |
-| `GIFOS_KOKORO_URL` | `https://huggingface.co` | Where the Kokoro weights are downloaded from: a mirror with the Hugging Face layout (`<model>/resolve/main/<file>`). |
+| `GIFOS_KOKORO_URL` | `https://huggingface.co` | Where the Kokoro weights are downloaded from: a mirror with the Hugging Face layout (`<model>/resolve/main/<file>`). Each file is written as `<file>.<pid>.part` and renamed into place when complete, so a start killed mid-download (or several workers downloading at once) never leaves a short file at the model path. If the weights on disk still do not load, they are deleted and downloaded once more; if that fails too, the process logs one `Kokoro could not load …` line and exits 1 (a worker exits and is restarted with backoff). |
 | `GIFOS_TTS_URL` | empty | HTTP speech stand-in. This process fetches it and answers `tts`. Replaces the Kokoro install. The page does not request it. `GIFOS_TTS_ENGINE=none` wins. |
 | `GIFOS_STT_URL` | empty | HTTP caption stand-in. This process posts the audio when `GIFOS_STT_APP=none`. Not passed to Meet Bot as a URL. |
 | `GIFOS_MAX_MEETINGS` | `4` | Provisional cap on seated meetings until a machine is measured. A manual join over the cap is refused. A scheduled join waits. |

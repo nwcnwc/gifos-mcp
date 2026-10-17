@@ -4,11 +4,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isCaptionHallucination } from './hallucination.js';
+import { log } from '../log.js';
 
 const ID_RE = /^m_[0-9a-f]+$/;
 
 function splitLines(text) {
   return String(text || '').split('\n').map((s) => s.trim()).filter(Boolean);
+}
+
+function endsLine(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const size = fs.fstatSync(fd).size;
+    if (!size) return true;
+    const b = Buffer.alloc(1);
+    fs.readSync(fd, b, 0, 1, size - 1);
+    return b[0] === 10;
+  } catch (e) { return e.code === 'ENOENT'; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
 export function publicLine(row) {
@@ -21,6 +35,9 @@ export class LiveTranscript {
     this.seq = 0;
     this.snapshots = new Map();
     this.listeners = new Set();
+    this.unsaved = [];        // rows in memory whose append to disk failed
+    this.torn = new Set();    // files whose last write may have stopped mid-line
+    this.failing = false;
     this.dir = home ? path.join(home, 'transcripts') : '';
     this.load();
   }
@@ -42,6 +59,9 @@ export class LiveTranscript {
           if (row.seq > this.seq) this.seq = row.seq;
         } catch (e) { /* skip a torn line */ }
       }
+      // A process killed (or a disk filled) mid-append leaves a last line
+      // with no newline; end it, or the next append is glued onto it.
+      if (raw && !raw.endsWith('\n')) this.torn.add(path.join(this.dir, name));
     }
   }
 
@@ -61,11 +81,30 @@ export class LiveTranscript {
     };
     if (entry.source) row.source = entry.source;
     this.lines.push(row);
-    this.persist(row);
+    this.unsaved.push(row);
+    this.flush();
     for (const fn of this.listeners) {
       try { fn(row); } catch (e) { /* a subscriber must not break the meeting */ }
     }
     return row;
+  }
+
+  // The row is already in memory and Meet Bot already showed or sent it.
+  // A failed append (disk full) must not throw at the caller: the rest of a
+  // caption snapshot would be lost, and a sent chat would read as failed.
+  // Kept rows are written first, in seq order, once a write works again.
+  flush() {
+    while (this.unsaved.length) {
+      try { this.persist(this.unsaved[0]); }
+      catch (e) {
+        if (!this.failing) log('transcript not saved (' + e.message + '); lines are kept in memory until a write works.');
+        this.failing = true;
+        return;
+      }
+      this.unsaved.shift();
+      if (this.failing) log('transcript saved again.');
+      this.failing = false;
+    }
   }
 
   persist(row) {
@@ -73,7 +112,11 @@ export class LiveTranscript {
     fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const file = path.join(this.dir, row.meeting_id + '.jsonl');
     const fresh = !fs.existsSync(file);
-    fs.appendFileSync(file, JSON.stringify(row) + '\n', { mode: 0o600 });
+    let text = JSON.stringify(row) + '\n';
+    if (this.torn.has(file) && !endsLine(file)) text = '\n' + text;
+    try { fs.appendFileSync(file, text, { mode: 0o600 }); }
+    catch (e) { this.torn.add(file); throw e; }
+    this.torn.delete(file);
     if (fresh) fs.chmodSync(file, 0o600);
   }
 

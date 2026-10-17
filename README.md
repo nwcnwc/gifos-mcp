@@ -234,6 +234,9 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
   the join and raises `meeting.joined`; its order (with the room password) is kept `live` in memory and the
   next save writes it. A `mute`, `unmute` or `get_transcript` whose `meetings.json` save fails still
   answers with what the bot did (muted, listening, the transcript); memory keeps it and the next save writes it.
+  A transcript line whose append to `transcripts/<id>.jsonl` fails keeps every caption line of that snapshot
+  (and its `line.*` event), `send_chat` and `say` still report what Meet Bot sent, and the kept lines are
+  written in order at the next append that works. A file whose last line was torn is ended before the next line.
 - **The key stays in this process.** When this server hosts `smartest`, it calls the model. The page does
   not, and `GIFOS_LLM_KEY` is not written into Settings. `MeetingBot.setVoice` receives the provider role
   `smartest` and never the URL or the key. Leave the key unset and conversation voice stays `none` unless

@@ -78,7 +78,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     const sessionId = await bot.join(plainLink(m.link, roomPassword), roomPassword);
     await bot.transcribe(sessionId, true);
     const updated = meetings.update(m.meeting_id, {
-      state: 'live', session_id: sessionId, transcribing: true, muted: false,
+      state: 'live', session_id: sessionId, transcribing: true, muted: false, reseat: false,
       started_at: new Date().toISOString(), ended_at: null, transcript: null,
     });
     // Voice is the host-injected Smartest and Text to speech providers.
@@ -265,6 +265,12 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     inputSchema: { meeting_id: meetingId },
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
+    if (m.reseat && m.state === 'scheduled') {
+      // Its worker died and the clock would bring the bot back. Do not.
+      const done = meetings.update(m.meeting_id, { state: 'ended', reseat: false, ended_at: new Date().toISOString() });
+      emit({ type: 'meeting.left', meeting_id: m.meeting_id, data: { state: 'ended', reason: 'manual' } });
+      return ok({ ...publicView(done), note: 'The bot was waiting to rejoin; it will not.' });
+    }
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
     const left = await depart(m);
     return ok({ ...publicView(left.done), transcript_lines: left.lines });
@@ -464,6 +470,12 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
     inputSchema: { meeting_id: meetingId },
   }, guarded(async ({ meeting_id }) => {
     const m = need(meeting_id);
+    if (m.reseat && m.state === 'scheduled') {
+      // Its worker died and the clock would bring the bot back. Do not.
+      const done = meetings.update(m.meeting_id, { state: 'ended', reseat: false, ended_at: new Date().toISOString() });
+      emit({ type: 'meeting.left', meeting_id: m.meeting_id, data: { state: 'ended', reason: 'manual' } });
+      return ok({ ...publicView(done), note: 'The bot was waiting to rejoin; it will not.' });
+    }
     if (m.state !== 'live' || !m.session_id) return ok({ ...publicView(m), note: 'The bot was not in this meeting.' });
     const left = await depart(m, 'manual');
     return ok({ ...publicView(left.done), transcript_lines: left.lines });
@@ -483,6 +495,7 @@ export function createServer({ cfg, meetings, bot, live, captions, botName, botP
       if (m.state === 'live') return m;
       return enter(m, order.room_password);
     },
+    reseat: (m) => enter(m),
     leave: (order, reason) => {
       const m = order.meeting_id && meetings.get(order.meeting_id);
       if (!m || m.state !== 'live') {

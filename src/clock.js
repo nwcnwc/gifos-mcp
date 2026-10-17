@@ -145,6 +145,19 @@ export function createClock(deps) {
         if (now - since >= quietMs) await deps.leave(current, 'quiet');
       }
     }
+    // Meetings a lost worker dropped that no order will bring back.
+    if (typeof deps.reseat === 'function') {
+      for (const m of deps.meetings.all()) {
+        if (!m.reseat || m.state !== 'scheduled' || deps.schedule.forMeeting(m.meeting_id)) continue;
+        if (deps.meetings.all().filter((row) => row.state === 'live').length >= deps.cap) break;
+        try {
+          const joined = await deps.reseat(m);
+          emit('meeting.joined', joined.meeting_id, { topic: joined.topic, link: joined.link, state: 'live', reason: 'worker' });
+        } catch (e) {
+          emit('meeting.error', m.meeting_id, { text: 'The room could not be entered.' });
+        }
+      }
+    }
     return emitCapacity(now, !booted);
   }
 

@@ -19,7 +19,8 @@
 // - A worker that keeps dying waits longer before each restart (1s, 2s, 4s,
 //   up to a minute), and joins go to another worker meanwhile.
 // - Voice settings go to every ready worker at once and again to any worker
-//   that restarts or missed them, before its next join.
+//   that restarts or missed them, before its next join. A ready worker that
+//   refused them is asked again every voiceRetryMs until it takes them.
 import path from 'node:path';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -71,6 +72,8 @@ class Worker {
     this.reserved = 0;        // joins in flight
     this.booting = null;
     this.voice = null;
+    this.voicing = null;      // { settings, promise } for the push in flight
+    this.voiceTimer = null;
     this.failures = 0;        // deaths in a row, for the restart backoff
     this.nextStartAt = 0;     // pool.now() before which spawn() refuses
     this.upAt = 0;
@@ -165,6 +168,9 @@ class Worker {
     this.child = null;
     this.booting = null;
     this.voice = null;        // a new process starts with Meet Bot's defaults
+    this.voicing = null;
+    clearTimeout(this.voiceTimer);
+    this.voiceTimer = null;
     this.late.clear();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Worker ' + this.index + ' stopped: ' + why)); }
     this.pending.clear();
@@ -214,12 +220,36 @@ class Worker {
     if (this.pool.voice && this.voice !== this.pool.voice) await this.pushVoice(this.pool.voice).catch(() => {});
   }
 
-  // Marked as carrying settings only once the worker took them, so one that
-  // refused or timed out is asked again on its next join.
-  async pushVoice(settings) {
-    const r = await this.call('setVoice', settings);
-    this.voice = settings;
-    return r;
+  voicePending() {
+    return !!this.pool.voice && this.voice !== this.pool.voice;
+  }
+
+  // Marked as carrying settings only once the worker took them. One that
+  // refused or timed out is asked again on its next join and on a timer, so
+  // the rooms it already holds do not keep the old voice. A retry, a join
+  // and set_voice share one call per settings object.
+  pushVoice(settings) {
+    if (this.voicing && this.voicing.settings === settings) return this.voicing.promise;
+    const child = this.child;
+    const promise = this.call('setVoice', settings).then((r) => {
+      if (this.child === child) this.voice = settings;
+      return r;
+    }).finally(() => {
+      if (this.voicing && this.voicing.promise === promise) this.voicing = null;
+      if (this.child === child) this.retryVoice();
+    });
+    this.voicing = { settings, promise };
+    return promise;
+  }
+
+  retryVoice() {
+    if (this.voiceTimer || !this.voicePending() || this.state !== 'ready') return;
+    this.voiceTimer = setTimeout(() => {
+      this.voiceTimer = null;
+      if (!this.voicePending() || this.state !== 'ready') return;
+      this.pushVoice(this.pool.voice).catch((e) => log('worker ' + this.index + ': setVoice retry failed: ' + ((e && e.message) || e)));
+    }, this.pool.voiceRetryMs);
+    this.voiceTimer.unref();
   }
 
   async close() {
@@ -227,6 +257,8 @@ class Worker {
     const child = this.child;
     this.state = 'closing';
     clearInterval(this.beat);
+    clearTimeout(this.voiceTimer);
+    this.voiceTimer = null;
     const exited = new Promise((r) => child.once('exit', r));
     try { child.send({ type: 'close' }); } catch (e) { /* already gone */ }
     const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* gone */ } }, this.pool.closeMs);
@@ -237,7 +269,7 @@ class Worker {
 
 export class WorkerPool {
   // opts: { workers, rooms, onThinking(sessionId, on), onLost(sessionIds, why), forkWorker(index), closeMs,
-  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs }
+  //         now(), heartbeatMs, stuckMs, backoffMs, backoffMaxMs, stableMs, callMs, joinMs, infoMs, voiceRetryMs }
   constructor(cfg, creds, opts = {}) {
     this.cfg = cfg;
     this.creds = creds;
@@ -257,6 +289,7 @@ export class WorkerPool {
     this.callMs = opts.callMs > 0 ? opts.callMs : 60000;
     this.joinMs = opts.joinMs > 0 ? opts.joinMs : 5 * (cfg.timeoutMs || 120000);
     this.infoMs = opts.infoMs > 0 ? opts.infoMs : 3000;
+    this.voiceRetryMs = opts.voiceRetryMs > 0 ? opts.voiceRetryMs : 10000;
     const script = opts.workerScript || WORKER_SCRIPT;
     this.forkWorker = typeof opts.forkWorker === 'function'
       ? opts.forkWorker
@@ -407,6 +440,7 @@ export class WorkerPool {
       if (w.child && w.child.pid) row.pid = w.child.pid;
       if (w.error) row.error = w.error;
       if (w.restartInMs() > 0) row.restart_in_ms = w.restartInMs();
+      if (w.state === 'ready' && w.voicePending()) row.voice = 'pending';
       const got = asked[i] && await asked[i];
       if (got && got.e) row.error = String((got.e && got.e.message) || got.e);
       else if (got) {

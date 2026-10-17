@@ -391,3 +391,54 @@ test('an order whose room cannot be entered raises one schedule.due, not one eve
   assert.equal(store.get(row.schedule_id).phase, 'live');
   assert.equal(due(), 1, 'the join that works is not due again');
 });
+
+test('an order moved to a new window after its room failed or it waited for capacity announces again in that window, and the clock forgets orders that are done', async () => {
+  const store = new ScheduleStore(homeDir());
+  const meetings = memoryMeetings();
+  const events = [];
+  const { order: failing } = store.add(order());
+  meetings.add({ meeting_id: 'm_fail', room: 'room123', link: LINK, topic: 'Notes' });
+  store.setPhase(failing.schedule_id, { meeting_id: 'm_fail' });
+  const { order: full } = store.add(order({ link: 'https://gifos.app/run.html#v=room789' }));
+  meetings.add({ meeting_id: 'm_full', room: 'room789', link: LINK, topic: 'Full' });
+  store.setPhase(full.schedule_id, { meeting_id: 'm_full' });
+  let seats = 0; // live meetings that are not ours fill the cap
+  const clock = createClock({
+    schedule: store,
+    meetings,
+    cap: 4,
+    near: 3,
+    horizonMs: 24 * 60 * 60 * 1000,
+    emit: (e) => events.push(e),
+    canSeat: () => seats < 1,
+    join: async (item) => {
+      if (item.meeting_id === 'm_fail') throw new Error('Meet Bot: the room did not open');
+      seats++;
+      throw Object.assign(new Error('no seat'), { code: 'no_seat' });
+    },
+    leave: async () => {},
+    people: async () => [{ name: 'Ada', bot: false }],
+  });
+  const count = (type, id) => events.filter((e) => e.type === type && e.meeting_id === id).length;
+  const start = Date.parse(failing.start);
+  for (let i = 0; i < 2; i++) await clock.tick(start - 30 * 1000 + i * 15000);
+  assert.equal(count('schedule.due', 'm_fail'), 1);
+  assert.equal(count('meeting.error', 'm_fail'), 1);
+  assert.equal(count('schedule.waiting', 'm_full'), 1);
+
+  // Both are moved to the same hour tomorrow; that window is news again.
+  const day = 24 * 60 * 60 * 1000;
+  const later = (row) => ({ start: new Date(Date.parse(row.start) + day).toISOString(), end: new Date(Date.parse(row.end) + day).toISOString() });
+  store.update(failing.schedule_id, null, later(failing), start);
+  store.update(full.schedule_id, null, later(full), start);
+  for (let i = 0; i < 2; i++) await clock.tick(start + day - 30 * 1000 + i * 15000);
+  assert.equal(count('schedule.due', 'm_fail'), 2, 'schedule.due again in the new window');
+  assert.equal(count('meeting.error', 'm_fail'), 2, 'meeting.error again in the new window');
+  assert.equal(count('schedule.waiting', 'm_full'), 2, 'schedule.waiting again in the new window');
+
+  // Cancelled orders leave nothing behind in the clock.
+  store.cancel(failing.schedule_id);
+  store.cancel(full.schedule_id);
+  await clock.tick(start + day + 60 * 1000);
+  assert.equal(clock.held(), 0, 'no per-order keys kept for cancelled orders');
+});

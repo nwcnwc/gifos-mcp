@@ -153,3 +153,54 @@ test('lines, report, thinking, overrun, and a full room', async () => {
   assert.equal(row.phase, 'ended');
   assert.ok(bot.calls.some((entry) => entry[0] === 'leave'));
 });
+
+// Meet Bot drops a room on its own when someone ends it from the admin
+// meeting or the Meet Bot page; its end then rejects "No such meeting".
+test('leave_meeting on a room Meet Bot already dropped ends the meeting and keeps its transcript', async () => {
+  const room = await mint('Notes');
+  await call('start_meeting', { meeting_id: room.meeting_id });
+  const live = meetings.get(room.meeting_id);
+  bot.lines[live.session_id] = ['Ada: last words'];
+  bot.leave = async (id) => { throw new Error('Meeting Bot: No such meeting: ' + id); };
+  const left = await call('leave_meeting', { meeting_id: room.meeting_id });
+  assert.notEqual(left.isError, true, left.content[0].text);
+  const after = meetings.get(room.meeting_id);
+  assert.equal(after.state, 'ended');
+  assert.equal(after.session_id, null);
+  assert.match(after.transcript, /last words/);
+});
+
+test('end_meeting that fails for another reason keeps the meeting live so a retry can reach it', async () => {
+  const room = await mint('Notes');
+  await call('start_meeting', { meeting_id: room.meeting_id });
+  const sessionId = meetings.get(room.meeting_id).session_id;
+  const leave = bot.leave.bind(bot);
+  bot.leave = async () => { throw new Error('Meeting Bot: page is busy'); };
+  const failed = await call('end_meeting', { meeting_id: room.meeting_id });
+  assert.equal(failed.isError, true);
+  assert.equal(meetings.get(room.meeting_id).state, 'live');
+  bot.leave = leave;
+  const retried = await call('end_meeting', { meeting_id: room.meeting_id });
+  assert.notEqual(retried.isError, true, retried.content[0].text);
+  assert.equal(meetings.get(room.meeting_id).state, 'ended');
+  assert.deepEqual(bot.calls.filter((row) => row[0] === 'leave').pop(), ['leave', sessionId]);
+});
+
+test('the clock ends an overrun room Meet Bot already dropped and still serves the next order', async () => {
+  const a = await mint('Notes');
+  const b = await mint('Review');
+  const startA = new Date(Date.now() - 60 * 1000).toISOString();
+  const endA = Date.now() + 60 * 1000;
+  const first = await json('schedule_meeting', { link: a.link, room_password: ROOM, start: startA, end: new Date(endA).toISOString() });
+  await server.clock.tick(Date.now());
+  // The second order becomes due only at the tick after the first overruns.
+  const startB = new Date(endA + 30 * 1000).toISOString();
+  const second = await json('schedule_meeting', { link: b.link, room_password: ROOM, start: startB, end: new Date(endA + 60 * 60 * 1000).toISOString() });
+  bot.peopleList = [{ name: 'Bot', bot: true }];
+  bot.leave = async (id) => { throw new Error('Meeting Bot: No such meeting: ' + id); };
+  await server.clock.tick(endA + 1000);
+  const rows = (await json('list_schedule')).orders;
+  assert.equal(rows.find((o) => o.schedule_id === first.schedule_id).phase, 'ended');
+  assert.equal(meetings.get(a.meeting_id).state, 'ended');
+  assert.equal(rows.find((o) => o.schedule_id === second.schedule_id).phase, 'live');
+});

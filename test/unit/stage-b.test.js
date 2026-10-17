@@ -630,6 +630,32 @@ test('a leave that times out keeps the seat until the late answer lands, then fr
   assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w0:mt_2');
 });
 
+test('a leave_meeting that timed out and then landed late: a second leave_meeting ends the meeting instead of failing for good', { timeout: 10000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  makePool({ workers: 1, rooms: 1, callMs: 200 });
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const call = (name, args = {}) => client.callTool({ name, arguments: args });
+
+  const open = JSON.parse((await call('join_meeting', { link: 'http://127.0.0.1:19510/run.html#v=openroom', topic: 'Open' })).content[0].text);
+  await pool.workers[0].call('holdLeaves');
+  const first = await call('leave_meeting', { meeting_id: open.meeting_id });
+  assert.equal(first.isError, true);
+  assert.equal(meetings.get(open.meeting_id).state, 'live');
+  // The bot does leave, just after the time limit: the seat frees.
+  await pool.workers[0].call('releaseLeaves');
+  assert.ok(await until(() => pool.workers[0].used === 0), 'the seat stayed taken after the late leave landed');
+  // The meeting still shows live; a second leave_meeting must end it.
+  const second = await call('leave_meeting', { meeting_id: open.meeting_id });
+  assert.notEqual(second.isError, true, second.content[0].text);
+  assert.equal(meetings.get(open.meeting_id).state, 'ended');
+  await client.close();
+});
+
 test('a worker whose browser will not start does not take every join: the join goes to the next worker, and the broken one is tried again after a backoff', async () => {
   let now = Date.now();
   cfg.failStart = [0];

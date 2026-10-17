@@ -383,3 +383,28 @@ test('caption poll waits for the last transcript call before the next one', asyn
   assert.equal(most, 1, 'transcript calls in flight at once');
   assert.ok(calls >= 3, 'the poll kept going: ' + calls + ' calls');
 });
+
+test('a caption snapshot that lands after its poll stopped or the room was reseated is dropped', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-poll-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const room = { meeting_id: 'm-late', state: 'live', session_id: 's-old' };
+  const meetings = { get: (id) => (id === room.meeting_id ? room : null) };
+  const answers = [];
+  const bot = { transcript: (s) => new Promise((resolve) => answers.push({ s, resolve })) };
+  const live = new LiveTranscript(home);
+  const captions = watchCaptions({ meetings, bot, live, intervalMs: 5000, botName: 'poll-test' });
+  t.after(() => captions.stopAll());
+  const first = captions.start(room);
+  room.session_id = 's-new';
+  const second = captions.start(room);
+  assert.deepEqual(answers.map((a) => a.s), ['s-old', 's-new'], 'a restarted poll does not wait on the old call');
+  answers[0].resolve('Ada: from the old seat');
+  answers[1].resolve('Ada: from the new seat');
+  await Promise.all([first, second]);
+  assert.deepEqual(live.tail('m-late', 0).lines.map((l) => l.text), ['from the new seat']);
+  captions.start(room);
+  captions.stop('m-late');
+  answers[2].resolve('Ada: after stop');
+  await delay(10);
+  assert.deepEqual(live.tail('m-late', 0).lines.map((l) => l.text), ['from the new seat']);
+});

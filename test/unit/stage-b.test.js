@@ -330,3 +330,75 @@ test('a meeting joined by hand with no password, and one started with start_meet
   assert.equal(meetings.get(open.meeting_id).session_id, back.session_id);
   await client.close();
 });
+
+test('while worker 0 waits out its restart, a join warms worker 1 instead of failing', async () => {
+  let now = Date.now();
+  makePool({ now: () => now });
+  await pool.ensureStarted();
+  const child = pool.workers[0].child;
+  const exited = new Promise((r) => child.once('exit', r));
+  child.kill('SIGKILL');
+  await exited;
+  assert.ok((await pool.info()).workers[0].restart_in_ms > 0);
+  await pool.ensureStarted();
+  assert.equal(await pool.join('http://127.0.0.1:19510/run.html#v=spare', ''), 'w1:mt_1');
+});
+
+// Kills worker 0 with one room seated there by start_meeting, and holds joins
+// on worker 1, so a reseat stays in flight until the test lets it land.
+async function lostRoomWithHeldJoin() {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  let now = Date.now();
+  makePool({ now: () => now, rooms: 2 });
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const json = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+  await json('create_meeting', { name: 'Own', admin_password: 'owner-77' });
+  const own = meetings.all().find((m) => m.topic === 'Own');
+  await json('start_meeting', { meeting_id: own.meeting_id });
+  assert.equal(meetings.get(own.meeting_id).session_id, 'w0:mt_1');
+  const child = pool.workers[0].child;
+  const exited = new Promise((r) => child.once('exit', r));
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(meetings.get(own.meeting_id).state, 'scheduled');
+  await pool.workers[1].call('holdJoins');
+  const joinsOn1 = async () => (await pool.workers[1].call('calls')).filter((r) => r[0] === 'join').length;
+  const until = async (fn) => { for (let i = 0; i < 200 && !(await fn()); i++) await new Promise((r) => setTimeout(r, 10)); };
+  return { meetings, server, client, json, own, joinsOn1, until };
+}
+
+test('a reseat in flight and a start_meeting or a second tick for the same room join it once', { timeout: 10000 }, async () => {
+  const { meetings, server, client, json, own, joinsOn1, until } = await lostRoomWithHeldJoin();
+  const first = server.clock.tick(Date.now());
+  await until(async () => (await joinsOn1()) === 1);
+  const second = server.clock.tick(Date.now());
+  const manual = client.callTool({ name: 'start_meeting', arguments: { meeting_id: own.meeting_id } });
+  await new Promise((r) => setTimeout(r, 100));
+  await pool.workers[1].call('releaseJoins');
+  const [, , started] = await Promise.all([first, second, manual]);
+  assert.equal(await joinsOn1(), 1);
+  assert.equal(started.isError, undefined, started.content[0].text);
+  assert.equal(meetings.get(own.meeting_id).state, 'live');
+  assert.equal((await pool.info()).workers[1].rooms, 1);
+  await client.close();
+});
+
+test('end_meeting while a reseat is in flight ends it; the late join is left, not seated', { timeout: 10000 }, async () => {
+  const { meetings, server, client, json, own, joinsOn1, until } = await lostRoomWithHeldJoin();
+  const ticking = server.clock.tick(Date.now());
+  await until(async () => (await joinsOn1()) === 1);
+  const ended = await json('end_meeting', { meeting_id: own.meeting_id });
+  assert.equal(ended.state, 'ended');
+  await pool.workers[1].call('releaseJoins');
+  await ticking;
+  assert.equal(meetings.get(own.meeting_id).state, 'ended');
+  const log1 = await pool.workers[1].call('calls');
+  assert.ok(log1.some((r) => r[0] === 'leave' && r[1] === 'mt_1'), JSON.stringify(log1));
+  assert.equal((await pool.info()).workers[1].rooms, 0);
+  await client.close();
+});

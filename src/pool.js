@@ -369,6 +369,7 @@ export class WorkerPool {
     for (const w of this.workers) {
       const row = { worker: w.index, state: w.state, rooms: w.rooms.size, budget: this.rooms };
       if (w.botName) row.bot_name = w.botName;
+      if (w.child && w.child.pid) row.pid = w.child.pid;
       if (w.error) row.error = w.error;
       if (w.restartInMs() > 0) row.restart_in_ms = w.restartInMs();
       if (w.state === 'ready') {

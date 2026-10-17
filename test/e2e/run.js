@@ -19,6 +19,7 @@ import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { packApp, startSite } from './site.js';
+import { SYNTH_STT, SYNTH_TTS, SYNTH_LLM } from './synth.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -47,33 +48,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const text = (r) => (r && r.content && r.content[0] && r.content[0].text) || '';
 
 function need(cond, msg) { if (!cond) { console.error('e2e setup: ' + msg); process.exit(2); } }
-
-// Synthetic speech-to-text provider: a question, so conversation voice will answer it.
-const SYNTH_LINE = 'Can you hear this synthetic speech?';
-const SYNTH_STT = {
-  'manifest.json': JSON.stringify({ gifos: '1.0', appId: 'stt-synthetic', name: 'Synthetic Speech', version: '1.0', entry: 'index.html', capabilities: {}, provides: { ai: ['stt'] } }),
-  'index.html': '<!doctype html><meta charset="utf-8"><title>Synthetic Speech</title><script>gifos.provider.serve({ stt: function (req) {' +
-    'var raw = req && req.bytes; var u = !raw ? new Float32Array(0) : (raw instanceof Float32Array ? raw : new Float32Array(raw.buffer || raw));' +
-    'var acc = 0, n = 0; for (var i = 0; i < u.length; i += 16) { acc += u[i] * u[i]; n++; }' +
-    'return { text: (n ? Math.sqrt(acc / n) : 0) > 0.02 ? ' + JSON.stringify(SYNTH_LINE) + ' : "" }; } });<\/script>',
-};
-
-// A short PCM wav the meeting page can decode, and a one-line language model.
-const SYNTH_TTS = {
-  'manifest.json': JSON.stringify({ gifos: '1.0', appId: 'tts-synthetic', name: 'Synthetic Voice', version: '1.0', entry: 'index.html', capabilities: {}, provides: { ai: ['tts'] } }),
-  'index.html': '<!doctype html><meta charset="utf-8"><title>Synthetic Voice</title><script>gifos.provider.serve({ tts: function () {' +
-    'var rate=8000,n=160,data=n*2,buf=new ArrayBuffer(44+data),v=new DataView(buf);' +
-    'function w(o,s){for(var i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));}' +
-    'w(0,"RIFF");v.setUint32(4,36+data,true);w(8,"WAVE");w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);' +
-    'v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,data,true);' +
-    'for(var i=0;i<n;i++)v.setInt16(44+i*2,(Math.sin(i/8)*4000)|0,true);' +
-    'return { bytes: buf, mime: "audio/wav" }; } });<\/script>',
-};
-const SYNTH_LLM = {
-  'manifest.json': JSON.stringify({ gifos: '1.0', appId: 'llm-synthetic', name: 'Synthetic LLM', version: '1.0', entry: 'index.html', capabilities: {}, provides: { ai: ['smartest'] } }),
-  'index.html': '<!doctype html><meta charset="utf-8"><title>Synthetic LLM</title><script>gifos.provider.serve({ smartest: function () {' +
-    'return { text: "Round trip reply." }; } });<\/script>',
-};
 
 function noiseWav(dest) {
   const rate = 44100, loud = rate * 2, quiet = Math.floor(rate * 1.2);
@@ -274,8 +248,8 @@ async function main() {
     const unmuted = JSON.parse(text(await client.callTool({ name: 'unmute', arguments: { meeting_id: meeting.meeting_id } }, undefined, CALL)));
     check('unmute turns transcribing back on', unmuted.transcribing === true);
 
-    const listed = JSON.parse(text(await client.callTool({ name: 'list_meetings', arguments: {} }, undefined, CALL)));
-    check('list_meetings shows the live meeting', listed.meetings.length === 1 && listed.meetings[0].state === 'live');
+    const now = JSON.parse(text(await client.callTool({ name: 'list_meetings', arguments: {} }, undefined, CALL)));
+    check('list_meetings shows the live meeting', now.meetings.length === 1 && now.meetings[0].state === 'live');
 
     const ended = JSON.parse(text(await client.callTool({ name: 'end_meeting', arguments: { meeting_id: meeting.meeting_id } }, undefined, CALL)));
     check('end_meeting: the bot leaves and keeps the transcript', ended.state === 'ended' && ended.transcript_lines >= 1, JSON.stringify(ended));

@@ -34,6 +34,8 @@ class FakeDriver {
     if (this.leaveHeld) await this.leaveHeld.promise;
     if (this.leaveFails) throw new Error(this.leaveFails);
     this.live.delete(id);
+    // Meet Bot left the room, but the answer never gets back.
+    if (this.leaveStalled) return new Promise(() => {});
   }
   async transcribe(id, on) { this.log.push(['transcribe', id, on]); }
   async say(id, text) { this.log.push(['say', id, text]); }
@@ -82,6 +84,8 @@ class FakeDriver {
   // Leaves wait until releaseLeaves().
   async holdLeaves() { let release; const promise = new Promise((r) => { release = r; }); this.leaveHeld = { promise, release }; }
   async releaseLeaves() { const h = this.leaveHeld; this.leaveHeld = null; if (h) h.release(); }
+  // Leaves take the bot out of the room but never answer.
+  async stallLeaves() { this.leaveStalled = true; }
   // info never answers, while pings and other calls still do.
   async stickInfo() { this.infoStuck = true; }
   // setVoice fails until fixVoice().
@@ -95,6 +99,6 @@ class FakeDriver {
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stallJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'fixStart']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stallJoins', 'breakJoin', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'stallLeaves', 'fixStart']);
 });
 process.send({ event: 'boot' });

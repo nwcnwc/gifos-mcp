@@ -775,3 +775,39 @@ test('the late-join check does not leave a room the pool holds or one a join sti
   await pool.say(a, 'still here');
   void inTime;
 });
+
+test('a leave_meeting that never answers is checked against the worker\'s own room list: Meet Bot left the room, so the seat frees and a second leave_meeting ends the meeting', { timeout: 10000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  makePool({ workers: 1, rooms: 1, callMs: 200, lateLeaveMs: 300 });
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const call = (name, args = {}) => client.callTool({ name, arguments: args });
+
+  const open = JSON.parse((await call('join_meeting', { link: 'http://127.0.0.1:19510/run.html#v=openroom', topic: 'Open' })).content[0].text);
+  await pool.workers[0].call('stallLeaves');
+  const first = await call('leave_meeting', { meeting_id: open.meeting_id });
+  assert.equal(first.isError, true);
+  assert.equal(pool.workers[0].used, 1);
+  // The leave never answers, but Meet Bot no longer lists the room: the bot is out.
+  assert.ok(await until(() => pool.workers[0].used === 0), 'a leave that never answered held its seat for good');
+  assert.equal(pool.hasSeat(), true);
+  const second = await call('leave_meeting', { meeting_id: open.meeting_id });
+  assert.notEqual(second.isError, true, second.content[0].text);
+  assert.equal(meetings.get(open.meeting_id).state, 'ended');
+  await client.close();
+});
+
+test('a leave that never answers while Meet Bot still lists the room keeps the seat, and a second leave can reach it', { timeout: 10000 }, async () => {
+  makePool({ workers: 1, rooms: 1, callMs: 200, lateLeaveMs: 100 });
+  const a = await pool.join('https://gifos.app/run.html#v=roomA', '');
+  await pool.workers[0].call('holdLeaves');
+  await assert.rejects(pool.leave(a), /did not answer leave within 200ms/);
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(pool.workers[0].used, 1, 'the check freed the seat of a room the bot is still in');
+  await pool.workers[0].call('releaseLeaves');
+  assert.ok(await until(() => pool.workers[0].used === 0), 'the seat stayed taken after the late leave landed');
+});

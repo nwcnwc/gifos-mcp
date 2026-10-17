@@ -39,6 +39,20 @@ async function connect() {
 const call = (name, args = {}) => client.callTool({ name, arguments: args });
 const text = (r) => r.content[0].text;
 const json = (r) => JSON.parse(text(r));
+const ADMIN = 'owner-key-77';
+
+async function mint(name = 'Demo meeting') {
+  const r = json(await call('create_meeting', { name, admin_password: ADMIN }));
+  assert.deepEqual(Object.keys(r), ['link']);
+  assert.equal(JSON.stringify(r).includes(ADMIN), false);
+  const listed = json(await call('list_meetings'));
+  const row = listed.meetings.find((m) => m.link === r.link);
+  assert.ok(row, 'the minted room is on the meeting list');
+  assert.equal(row.topic, name);
+  assert.equal('room_password' in row, false);
+  assert.equal('admin_password' in row, false);
+  return { link: r.link, meeting_id: row.meeting_id, topic: name };
+}
 
 beforeEach(async () => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-unit-'));
@@ -51,39 +65,39 @@ beforeEach(async () => {
 test('lists every tool with an input schema', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['create_meeting', 'end_meeting', 'get_meeting_state', 'get_transcript', 'join_meeting',
-    'leave_meeting', 'list_meetings', 'mute', 'raise_hand', 'say', 'send_chat', 'set_camera', 'set_mic', 'set_voice',
-    'share_content', 'snapshot', 'start_meeting', 'status', 'tail_transcript', 'unmute']);
+  assert.deepEqual(names, ['cancel_schedule', 'capacity_status', 'create_meeting', 'end_meeting', 'get_meeting_state', 'get_transcript',
+    'import_schedule', 'join_meeting', 'leave_meeting', 'list_meetings', 'list_schedule', 'meeting_status', 'meetings_report',
+    'mute', 'raise_hand', 'say', 'schedule_meeting', 'send_chat', 'set_camera', 'set_mic', 'set_voice', 'share_content',
+    'snapshot', 'start_meeting', 'status', 'tail_events', 'tail_lines', 'tail_transcript', 'unmute', 'update_schedule']);
   for (const t of tools) {
     assert.equal(t.inputSchema.type, 'object', t.name);
     assert.ok(t.description && t.description.length > 20, t.name + ' has a description');
   }
   const create = tools.find((t) => t.name === 'create_meeting');
-  assert.deepEqual(create.inputSchema.required, ['topic']);
-  assert.ok(create.inputSchema.properties.start_time);
+  assert.deepEqual(create.inputSchema.required.slice().sort(), ['admin_password', 'name']);
 });
 
 test('create_meeting mints a link on GIFOS_URL and does not touch the browser', async () => {
-  const r = json(await call('create_meeting', { topic: 'Demo meeting', start_time: '2026-10-15T17:00:00-07:00' }));
+  const r = await mint('Demo meeting');
   assert.match(r.meeting_id, /^m_[0-9a-f]{10}$/);
   assert.match(r.link, /^http:\/\/127\.0\.0\.1:19510\/run\.html#v=[0-9a-z]{24}$/);
-  assert.equal(r.topic, 'Demo meeting');
-  assert.equal(r.start_time, '2026-10-15T17:00:00-07:00');
   assert.equal(bot.started, 0);
   assert.equal(bot.calls.length, 0);
-  const again = json(await call('create_meeting', { topic: 'Other' }));
+  const again = await mint('Other');
   assert.notEqual(again.link, r.link, 'every meeting gets its own room');
+  const raw = fs.readFileSync(path.join(home, 'meetings.json'), 'utf8');
+  assert.equal(raw.includes(ADMIN), false, 'the admin password is not stored');
 });
 
 test('create_meeting adds the relay to the link when GIFOS_RELAY is set', async () => {
   cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510', GIFOS_RELAY: 'ws://127.0.0.1:19511' });
   await connect();
-  const r = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const r = await mint();
   assert.match(r.link, /#v=[0-9a-z]{24}&relay=ws%3A%2F%2F127\.0\.0\.1%3A19511$/);
 });
 
 test('schemas refuse bad input', async () => {
-  const empty = await call('create_meeting', { topic: '' });
+  const empty = await call('create_meeting', { name: '', admin_password: ADMIN });
   assert.equal(empty.isError, true);
   const missing = await call('create_meeting', {});
   assert.equal(missing.isError, true);
@@ -95,7 +109,7 @@ test('schemas refuse bad input', async () => {
 });
 
 test('start_meeting joins the link and turns transcription on', async () => {
-  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const c = await mint();
   const s = json(await call('start_meeting', { meeting_id: c.meeting_id }));
   assert.equal(s.state, 'live');
   assert.equal(s.transcribing, true);
@@ -109,7 +123,7 @@ test('unknown meeting ids and meetings that are not live are explained', async (
   const r = await call('start_meeting', { meeting_id: 'm_ffffffffff' });
   assert.equal(r.isError, true);
   assert.match(text(r), /Unknown meeting_id/);
-  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const c = await mint();
   const m = await call('mute', { meeting_id: c.meeting_id });
   assert.equal(m.isError, true);
   assert.match(text(m), /scheduled\. Call start_meeting first/);
@@ -118,7 +132,7 @@ test('unknown meeting ids and meetings that are not live are explained', async (
 });
 
 test('a bot error comes back as a tool error, and the meeting stays scheduled', async () => {
-  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const c = await mint();
   bot.failJoin = 'Meeting Bot: could not join';
   const r = await call('start_meeting', { meeting_id: c.meeting_id });
   assert.equal(r.isError, true);
@@ -142,7 +156,7 @@ test('join_meeting accepts run.html and /meet links, refuses others', async () =
 });
 
 test('mute and unmute switch transcription', async () => {
-  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const c = await mint();
   await call('start_meeting', { meeting_id: c.meeting_id });
   const m = json(await call('mute', { meeting_id: c.meeting_id }));
   assert.equal(m.muted, true);
@@ -154,7 +168,7 @@ test('mute and unmute switch transcription', async () => {
 });
 
 test('share_content posts into the meeting', async () => {
-  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const c = await mint();
   await call('start_meeting', { meeting_id: c.meeting_id });
   const r = json(await call('share_content', { meeting_id: c.meeting_id, text: 'Agenda: demo, questions' }));
   assert.equal(r.shared, true);
@@ -162,7 +176,7 @@ test('share_content posts into the meeting', async () => {
 });
 
 test('get_transcript while live, end_meeting keeps a copy, and it survives a restart', async () => {
-  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const c = await mint();
   await call('start_meeting', { meeting_id: c.meeting_id });
   assert.equal(text(await call('get_transcript', { meeting_id: c.meeting_id })), '(no transcript lines yet)');
   bot.lines.mt_1.push('Alice: hello everyone', 'Bob: hi Alice');
@@ -180,8 +194,8 @@ test('get_transcript while live, end_meeting keeps a copy, and it survives a res
 });
 
 test('list_meetings and status', async () => {
-  const a = json(await call('create_meeting', { topic: 'First' }));
-  const b = json(await call('create_meeting', { topic: 'Second' }));
+  const a = await mint('First');
+  const b = await mint('Second');
   await call('start_meeting', { meeting_id: b.meeting_id });
   const l = json(await call('list_meetings'));
   assert.deepEqual(l.meetings.map((m) => m.meeting_id), [b.meeting_id, a.meeting_id]);
@@ -200,7 +214,7 @@ test('list_meetings and status', async () => {
 });
 
 test('say reports the Meet Bot gap and does not post chat', async () => {
-  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const c = await mint();
   const early = await call('say', { meeting_id: c.meeting_id, text: 'Hello' });
   assert.equal(early.isError, true);
   assert.match(text(early), /start_meeting first/);
@@ -222,7 +236,7 @@ test('say reports the Meet Bot gap and does not post chat', async () => {
 });
 
 test('non-voice tools go through Meet Bot and gaps do not touch chat', async () => {
-  const c = json(await call('create_meeting', { topic: 'Demo meeting' }));
+  const c = await mint();
   await call('start_meeting', { meeting_id: c.meeting_id });
   const chat = json(await call('send_chat', { meeting_id: c.meeting_id, text: 'Hello in chat' }));
   assert.equal(chat.sent, true);

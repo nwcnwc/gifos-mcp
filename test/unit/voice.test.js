@@ -209,7 +209,9 @@ test('say and the transcript go through Meet Bot, and the key stays out of tool 
   const call = async (name, args) => client.callTool({ name, arguments: args });
   const json = async (name, args) => JSON.parse((await call(name, args)).content[0].text);
 
-  const created = await json('create_meeting', { topic: 'Demo meeting' });
+  const created = await json('create_meeting', { name: 'Demo meeting', admin_password: 'owner-key-77' });
+  const listed = await json('list_meetings');
+  created.meeting_id = listed.meetings.find((m) => m.link === created.link).meeting_id;
   await json('start_meeting', { meeting_id: created.meeting_id });
   assert.equal(bot.voice, null);
   assert.equal(bot.calls.some((c) => c[0] === 'setVoice'), false);
@@ -229,8 +231,8 @@ test('say and the transcript go through Meet Bot, and the key stays out of tool 
   assert.equal(status.voice.stt, 'configured');
 
   const uri = 'gifos://meeting/' + created.meeting_id + '/transcript';
-  const listed = await client.listResources();
-  assert.ok(listed.resources.some((r) => r.uri === uri));
+  const resources = await client.listResources();
+  assert.ok(resources.resources.some((r) => r.uri === uri));
   await client.subscribeResource({ uri });
   bot.lines.mt_1.push('Ada: What should we do next?');
   for (let i = 0; i < 50 && updates.length < 1; i++) await delay(20);

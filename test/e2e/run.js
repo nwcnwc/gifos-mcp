@@ -173,11 +173,13 @@ async function main() {
     await client.connect(transport);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    check('MCP server lists its tools over stdio', tools.length === 20 && names.includes('set_voice') && names.includes('say') && names.includes('send_chat') && names.includes('leave_meeting'), names.join(', '));
+    check('MCP server lists its tools over stdio', tools.length === 30 && names.includes('set_voice') && names.includes('say') && names.includes('schedule_meeting') && names.includes('leave_meeting'), names.join(', '));
 
-    const created = await client.callTool({ name: 'create_meeting', arguments: { topic: 'Demo meeting', start_time: '17:00' } }, undefined, CALL);
+    const created = await client.callTool({ name: 'create_meeting', arguments: { name: 'Demo meeting', admin_password: 'owner-key-77' } }, undefined, CALL);
     const meeting = JSON.parse(text(created));
-    check('create_meeting returns a meeting_id and a link on the local GifOS', /^m_/.test(meeting.meeting_id) && meeting.link.startsWith(BASE + '/run.html#v='), meeting.link);
+    check('create_meeting returns a link on the local GifOS', meeting.link && meeting.link.startsWith(BASE + '/run.html#v=') && !meeting.meeting_id, meeting.link);
+    const listed = JSON.parse(text(await client.callTool({ name: 'list_meetings', arguments: {} }, undefined, CALL)));
+    meeting.meeting_id = listed.meetings.find((m) => m.link === meeting.link).meeting_id;
 
     const started = await client.callTool({ name: 'start_meeting', arguments: { meeting_id: meeting.meeting_id } }, undefined, CALL);
     const live = started.isError ? null : JSON.parse(text(started));

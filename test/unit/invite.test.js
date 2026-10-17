@@ -65,18 +65,29 @@ test('tool output carries the room password only as its own field, and never the
   await Promise.all([server.connect(a), client.connect(b)]);
   const created = JSON.parse((await client.callTool({
     name: 'create_meeting',
-    arguments: { topic: 'Demo', room_password: ROOM },
+    arguments: { name: 'Demo', admin_password: ADMIN },
   })).content[0].text);
-  assert.equal(urlsContain(created.invite_email, ROOM), false);
-  assert.equal(urlsContain(JSON.stringify(created.invite_calendar), ROOM), false);
-  assert.match(created.invite_email, new RegExp(ROOM));
-  assert.equal(created.link.includes(ROOM), false);
+  assert.deepEqual(Object.keys(created), ['link']);
+  assert.equal(created.link.includes(ADMIN), false);
   assert.equal(JSON.stringify(created).includes(ADMIN), false);
-  assert.match(created.password_links, /not available/);
+  assert.equal(fs.readFileSync(path.join(home, 'meetings.json'), 'utf8').includes(ADMIN), false);
+  const listed = JSON.parse((await client.callTool({ name: 'list_meetings', arguments: {} })).content[0].text);
+  const meetingId = listed.meetings.find((m) => m.link === created.link).meeting_id;
+
+  const scheduled = JSON.parse((await client.callTool({
+    name: 'schedule_meeting',
+    arguments: { link: created.link, room_password: ROOM, start: '2026-10-17T16:00:00.000Z', end: '2026-10-17T17:00:00.000Z' },
+  })).content[0].text);
+  assert.equal(JSON.stringify(scheduled).includes(ROOM), false, 'the room password is not a tool result');
+  assert.equal(JSON.stringify(scheduled).includes(ADMIN), false);
+  const disk = fs.readFileSync(path.join(home, 'schedule.json'), 'utf8');
+  assert.match(disk, new RegExp(ROOM));
+  assert.equal(disk.includes(ADMIN), false, 'the admin password is not on the schedule');
+  assert.equal(fs.statSync(path.join(home, 'schedule.json')).mode & 0o777, 0o600);
 
   const started = JSON.parse((await client.callTool({
     name: 'start_meeting',
-    arguments: { meeting_id: created.meeting_id },
+    arguments: { meeting_id: meetingId },
   })).content[0].text);
   assert.equal(started.link.includes(ROOM), false);
   assert.equal(JSON.stringify(started).includes(ADMIN), false);
@@ -94,7 +105,7 @@ test('tool output carries the room password only as its own field, and never the
 
   const transcript = (await client.callTool({
     name: 'get_transcript',
-    arguments: { meeting_id: created.meeting_id },
+    arguments: { meeting_id: meetingId },
   })).content[0].text;
   assert.equal(transcript.includes(ADMIN), false);
   assert.match(transcript, /\[redacted\]/);

@@ -16,6 +16,7 @@ import { VOICE_GAP, INTERJECT_GAP, HAND_GAP, MIC_GAP, CAMERA_GAP, CONTROLS_GAP, 
 import { bridgeScript, hostRoles, HOST_BINDING, installPlan } from './voice/providers.js';
 import { packHostResult, serveHost } from './voice/host.js';
 import { installKokoro } from './voice/kokoro.js';
+import { SpeechQueue } from './voice/queue.js';
 
 const require = createRequire(import.meta.url);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -33,10 +34,11 @@ function silenceWav(file) {
 }
 
 export class MeetingBotDriver {
-  constructor(cfg, creds, kokoro) {
+  constructor(cfg, creds, kokoro, hooks) {
     this.cfg = cfg;
     this.creds = creds;
     this.kokoro = kokoro || null;
+    this.queue = (hooks && hooks.queue) || new SpeechQueue(hooks || {});
     this.state = 'stopped';
     this.error = '';
     this.starting = null;
@@ -123,6 +125,7 @@ export class MeetingBotDriver {
       tts: tts.engine === 'http' ? { url: tts.url, voice: tts.voice || '' } : null,
       llm: roles.has('smartest') ? { url: voice.url, key: voice.key, model: voice.model } : null,
       stt: roles.has('stt') ? { url: voice.sttUrl } : null,
+      queue: this.queue,
     };
   }
 

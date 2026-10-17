@@ -148,7 +148,7 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `create_meeting` | `topic`, `start_time?`, `room_password?` | `{meeting_id, link, invite_email, invite_calendar}`. Only mints the link. The link never contains the room password. `invite_email` and `invite_calendar` are text for the caller to send. This server does not send them. |
+| `create_meeting` | `name`, `admin_password` | `{ link }`. Mints the room. `admin_password` is the human's password for this call only. It is not stored, not logged, and not returned. Grok Bot invents the room password and sends the invite. |
 | `start_meeting` | `meeting_id` | The bot joins and starts transcribing. |
 | `join_meeting` | `link`, `password?`, `topic?` | The bot joins someone else's GifOS meeting (`…/run.html#v=…` or `…/meet/…`). Returns a `meeting_id`. |
 | `mute` | `meeting_id` | The bot stops transcribing, and the transcribing chip goes away. The bot never sends audio, so this is the only mute it has. |
@@ -168,6 +168,16 @@ If your client can only reach MCP over HTTP, run `gifos-mcp --http [port]`. It l
 | `end_meeting` | `meeting_id` | Saves the transcript, then the bot leaves. Everyone else can stay, because GifOS meetings have no owner who can close them. |
 | `list_meetings` | none | Every meeting this server created or joined, with its state (`scheduled`, `live` or `ended`). |
 | `status` | none | Browser state, bot name, the bot's live sessions, and whether the voice setting was handed over. The endpoint and the key are not included. |
+| `schedule_meeting` | `link`, `room_password`, `start`, `end?` | Stores the join order, including the room password, in `schedule.json` (mode 0600). The bot joins one minute before `start`. `end` defaults to `start` plus 8 hours. The password is not returned. |
+| `list_schedule` | `from?`, `to?`, `timezone?`, `phase?`, `flag_overlaps?` | Orders in the window. No passwords. |
+| `update_schedule` | `schedule_id`, `occurrence?`, patch | No occurrence changes the whole future series. An occurrence id changes only that one. |
+| `cancel_schedule` | `schedule_id`, `occurrence?`, `leave_if_live?` | Cancels one occurrence or the series. Leaves a live one unless asked not to. |
+| `import_schedule` | `orders` | Bulk calendar import. A recurrence rule this process cannot expand is reported and not stored. |
+| `meeting_status` | `meeting_id` | One meeting: phase, people, thinking, line counts. No passwords. |
+| `tail_lines` | `meeting_id?`, `since?`, `kinds?` | Speech, chat, and spoken lines. |
+| `meetings_report` | `since?`, `meeting_ids?` | Raw rows across meetings. Not a written summary. |
+| `tail_events` | `since?` | Connector events, including `capacity.near`, `capacity.reached`, and `capacity.cleared`. |
+| `capacity_status` | none | Who is seated, who is waiting, and future clashes inside the horizon. |
 
 The resource `gifos://meeting/{id}/transcript` is the same live transcript as `tail_transcript`, as newline-delimited JSON tailed from Meet Bot. A client can subscribe and receive `notifications/resources/updated`.
 
@@ -178,13 +188,14 @@ Errors come back as MCP tool errors with a readable message, for example `Unknow
 
 The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, take notes, and send me a summary."*
 
-1. **Invite (now).** Grok Bot calls `create_meeting({topic: "Demo meeting", start_time: "17:00"})` and gets a
-   plain `link`, plus `invite_email` and `invite_calendar`. A room password, when one was set, is a separate
-   field the guest types. It is not inside the link. Grok Bot drafts a calendar invite to Alice and Bob in the
-   user's own calendar. The user approves the send.
-2. **Timing (a routine at 17:00).** Grok Bot calls `start_meeting({meeting_id})`. The bot joins and transcribes.
-   `gifos-mcp` has to be running at this point.
-3. **Meeting (17:00 onward).** Alice and Bob open the link and see the 🤖 bot tile with the transcribing chip.
+1. **Mint the room.** Grok Bot calls `create_meeting({name: "Demo meeting", admin_password})`. The admin
+   password comes from Grok Bot's secrets store for this call only. The response is a plain `link`.
+2. **Invite.** Grok Bot makes up a room password and invites Alice and Bob, from its own email or the human's,
+   with the link and that room password. It never sends the admin password.
+3. **Schedule.** Grok Bot calls `schedule_meeting({link, room_password, start, end})`. The bot joins one minute
+   before `start`. The room password is stored on the schedule so a restart can rejoin. The admin password is not.
+4. **Meeting (17:00 onward).** Alice and Bob open the link and see the 🤖 bot tile with the transcribing chip.
+   While the bot is working out a reply, that tile shows a thinking animation.
    If the voice setting was handed over, Meet Bot talks (Grok Voice, or the local LLM). Grok Bot tails
    `gifos://meeting/{id}/transcript` (or calls `tail_transcript`) and can `say` a line of its own. Grok Bot can
    `share_content` the agenda. When the meeting is over (a second routine, or the user saying so),
@@ -193,7 +204,7 @@ The user tells Grok Bot: *"Set up a demo meeting with Alice and Bob at 5 PM, tak
 
 ## Privacy and security
 
-- **Everything runs locally.** The browser, the bot, speech-to-text (Whisper runs inside the browser) and the
+- **Everything runs locally.** The browser, the bot, one shared speech-to-text engine, and the
   transcripts are all on your machine. Media goes peer to peer between participants. GifOS's relay only helps
   peers find each other.
 - **Consent is visible.** The bot is labelled 🤖 bot and shows 📝 transcribing whenever it listens. `mute`

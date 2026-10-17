@@ -52,8 +52,27 @@ export function loadConfig(env = process.env) {
     autoInstallBrowser: env.GIFOS_MCP_NO_INSTALL !== '1',
     prewarm: env.GIFOS_MCP_LAZY !== '1',
     debug: env.GIFOS_MCP_DEBUG === '1',
+    maxMeetings: positiveInt(env.GIFOS_MAX_MEETINGS, 4, 'GIFOS_MAX_MEETINGS'),
+    capacityNear: nearCount(env),
+    horizonMs: positiveInt(env.GIFOS_SCHEDULE_HORIZON_MS, 24 * 60 * 60 * 1000, 'GIFOS_SCHEDULE_HORIZON_MS'),
     voice: voiceConfig(env),
   };
+}
+
+// Provisional until a machine is measured. Stage A needs an explicit cap.
+function positiveInt(raw, fallback, name) {
+  if (raw == null || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new Error(name + ' must be a positive integer.');
+  return n;
+}
+
+function nearCount(env) {
+  const cap = positiveInt(env.GIFOS_MAX_MEETINGS, 4, 'GIFOS_MAX_MEETINGS');
+  if (env.GIFOS_CAPACITY_NEAR == null || String(env.GIFOS_CAPACITY_NEAR).trim() === '') return Math.max(1, cap - 1);
+  const near = positiveInt(env.GIFOS_CAPACITY_NEAR, 1, 'GIFOS_CAPACITY_NEAR');
+  if (near > cap) throw new Error('GIFOS_CAPACITY_NEAR cannot be above GIFOS_MAX_MEETINGS.');
+  return near;
 }
 
 const VOICES = new Set(['none', 'grok', 'local']);

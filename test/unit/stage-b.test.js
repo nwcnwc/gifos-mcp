@@ -628,3 +628,36 @@ test('a leave that times out keeps the seat until the late answer lands, then fr
   assert.ok(await until(() => pool.workers[0].used === 0), 'the seat stayed taken after the late leave landed');
   assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w0:mt_2');
 });
+
+test('a worker whose browser will not start does not take every join: the join goes to the next worker, and the broken one is tried again after a backoff', async () => {
+  let now = Date.now();
+  cfg.failStart = [0];
+  makePool({ now: () => now, backoffMs: 1000, backoffMaxMs: 4000 });
+  const starts0 = async () => (await pool.workers[0].call('calls')).filter((r) => r[0] === 'ensureStarted').length;
+  // Warming skips past worker 0 instead of failing.
+  await pool.ensureStarted();
+  assert.equal(pool.workers[1].state, 'ready');
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomA', ''), 'w1:mt_1');
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w1:mt_2');
+  // Worker 0 is not asked to start its browser on every join.
+  assert.equal(await starts0(), 1);
+  const row = (await pool.info()).workers[0];
+  assert.match(row.error, /Chromium would not start/);
+  assert.equal(row.start_retry_in_ms, 1000);
+  // Worker 1 is full and worker 0 waits out its backoff: no seat, so the clock waits.
+  assert.equal(pool.hasSeat(), false);
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomC', ''), (e) => e.code === 'no_seat' && /worker 0/i.test(e.message));
+  assert.equal(await starts0(), 1);
+  // After the backoff, a fixed browser takes the next room.
+  await pool.workers[0].call('fixStart');
+  now += 1000;
+  assert.equal(pool.hasSeat(), true);
+  assert.equal(await pool.join('https://gifos.app/run.html#v=roomC', ''), 'w0:mt_1');
+  assert.equal((await pool.info()).workers[0].start_retry_in_ms, undefined);
+});
+
+test('a one-worker pool whose browser will not start reports why on the join', async () => {
+  cfg.failStart = [0];
+  makePool({ workers: 1 });
+  await assert.rejects(pool.join('https://gifos.app/run.html#v=roomA', ''), /Chromium would not start/);
+});

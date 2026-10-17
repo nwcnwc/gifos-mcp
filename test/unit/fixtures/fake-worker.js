@@ -14,6 +14,8 @@ class FakeDriver {
   // A started browser keeps the worker's event loop alive, as Chromium does.
   async ensureStarted() {
     this.log.push(['ensureStarted']);
+    // cfg.failStart lists workers whose browser will not start, until fixStart().
+    if ((this.boot.cfg.failStart || []).includes(this.boot.index) && !this.startFixed) throw new Error('Chromium would not start on worker ' + this.boot.index);
     if (!this.browser) this.browser = setInterval(() => {}, 1000);
   }
   async join(link, password) {
@@ -76,11 +78,12 @@ class FakeDriver {
   async fixVoice() { this.voiceFails = false; }
   // setVoice never answers.
   async holdVoice() { this.voiceHeld = true; }
+  async fixStart() { this.startFixed = true; }
   // Blocks the event loop for good, the way a wedged worker would: no reply, no pong.
   async hang() { for (;;) { /* stuck */ } }
 }
 
 process.once('message', (boot) => {
-  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves']);
+  serveWorker(process, (queue) => new FakeDriver(queue, boot), ['calls', 'whoami', 'think', 'slow', 'hang', 'holdJoins', 'releaseJoins', 'stickInfo', 'breakVoice', 'fixVoice', 'holdVoice', 'breakLeave', 'fixLeave', 'holdLeaves', 'releaseLeaves', 'fixStart']);
 });
 process.send({ event: 'boot' });

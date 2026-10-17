@@ -3,7 +3,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -11,6 +10,7 @@ import { createServer } from '../../src/server.js';
 import { loadConfig } from '../../src/config.js';
 import { MeetingStore } from '../../src/meetings.js';
 import { formatInvite, plainLink, urlsOf, PASSWORD_LINK_NOTE } from '../../src/invite.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
 const ADMIN = 'HarborNorth77';
 const ROOM = 'guest-ticket-9';
@@ -40,7 +40,7 @@ test('a link that is the password itself is refused', () => {
 });
 
 test('tool output carries the room password only as its own field, and never the bot password', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-inv-'));
+  const home = tmpHome('gifos-mcp-inv-');
   const cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510/', GIFOS_VOICE: '0' });
   const meetings = new MeetingStore(home);
   const bot = {

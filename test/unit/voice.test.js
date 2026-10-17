@@ -3,7 +3,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -16,6 +15,7 @@ import { MeetingBotDriver } from '../../src/driver.js';
 import { LiveTranscript, watchCaptions } from '../../src/voice/live.js';
 import { voiceSettings, scrub } from '../../src/voice/settings.js';
 import { bridgeScript, hostRoles } from '../../src/voice/providers.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
 const KEY = 'sk-test-key-which-must-stay-here';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -83,7 +83,7 @@ test('local voice settings name providers, and public text does not carry the ke
 });
 
 test('the key stays out of the page until MeetingBot.setVoice exists', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-drv-'));
+  const home = tmpHome('gifos-mcp-drv-');
   const cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510', GIFOS_LLM_KEY: KEY });
   const driver = new MeetingBotDriver(cfg, { name: 'harbor-maple', password: 'quiet-cedar-42' });
   const seen = [];
@@ -185,7 +185,7 @@ class FakeBot {
 }
 
 test('say and the transcript go through Meet Bot, and the key stays out of tool text', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-voice-'));
+  const home = tmpHome('gifos-mcp-voice-');
   const cfg = loadConfig({
     GIFOS_MCP_HOME: home,
     GIFOS_URL: 'http://127.0.0.1:19510',
@@ -292,7 +292,7 @@ function oldVoiceCall(settings) {
 }
 
 test('join_meeting does not send the old voice call the new Meet Bot refuses', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-newvoice-'));
+  const home = tmpHome('gifos-mcp-newvoice-');
   const cfg = loadConfig({
     GIFOS_MCP_HOME: home,
     GIFOS_URL: 'http://127.0.0.1:19510',
@@ -337,7 +337,7 @@ test('join_meeting does not send the old voice call the new Meet Bot refuses', a
 });
 
 test('captions are not stored twice, and the bot line is spoken', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-live-'));
+  const home = tmpHome('gifos-mcp-live-');
   const live = new LiveTranscript(home);
   const id = 'm_abcde12345';
   live.ingestCaption(id, 'Ada: hello\nnotes-test: echo\nBob: hi', 'notes-test');
@@ -356,7 +356,7 @@ test('captions are not stored twice, and the bot line is spoken', async () => {
 // rooms at 500ms each, calls pile up behind the page (or behind a stuck
 // worker's 60s call limit) and old snapshots land after new ones.
 test('caption poll waits for the last transcript call before the next one', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-poll-'));
+  const home = tmpHome('gifos-mcp-poll-');
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const room = { meeting_id: 'm-poll', state: 'live', session_id: 's-poll' };
   const meetings = { get: (id) => (id === room.meeting_id ? room : null) };
@@ -385,7 +385,7 @@ test('caption poll waits for the last transcript call before the next one', asyn
 });
 
 test('a caption snapshot that lands after its poll stopped or the room was reseated is dropped', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-poll-'));
+  const home = tmpHome('gifos-mcp-poll-');
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const room = { meeting_id: 'm-late', state: 'live', session_id: 's-old' };
   const meetings = { get: (id) => (id === room.meeting_id ? room : null) };

@@ -2,13 +2,13 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../../src/server.js';
 import { loadConfig } from '../../src/config.js';
 import { MeetingStore } from '../../src/meetings.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
 const ADMIN = 'owner-key-77';
 const ROOM = 'guest-ticket-9';
@@ -43,7 +43,7 @@ const call = (name, args = {}) => client.callTool({ name, arguments: args });
 const json = async (name, args) => JSON.parse((await call(name, args)).content[0].text);
 
 beforeEach(async () => {
-  home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-stage-a-'));
+  home = tmpHome('gifos-stage-a-');
   cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510/', GIFOS_VOICE: '0', GIFOS_MAX_MEETINGS: '2', GIFOS_CAPACITY_NEAR: '1' });
   meetings = new MeetingStore(home);
   bot = new FakeBot();

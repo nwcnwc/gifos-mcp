@@ -261,6 +261,8 @@ npm test
 These run the tools over a real MCP client/server pair with a fake bot, plus the `--http` transport through
 the real binary. Voice tests check that the local-LLM setting is handed to Meet Bot without the key, and
 that a hosted model call stays in this process.
+`npm test` runs them with `TMPDIR` set to a fresh folder and fails if a test leaves anything in it. The
+Kokoro test keeps its ~90 MB of weights in `~/.cache/gifos-mcp-test-kokoro` between runs.
 
 **2. Try it live (needs GifOS 0.9.23 or newer on gifos.app).**
 

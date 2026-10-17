@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, botCredentials, credentialProblem, generateCredentials, DEFAULT_GIFOS_URL, voiceConfig, SUGGESTED_LLM_URL, SUGGESTED_LLM_MODEL } from '../../src/config.js';
 import { voicePublic, voiceSettings } from '../../src/voice/settings.js';
 import { MeetingStore, newRoom, linkFor, roomFromLink } from '../../src/meetings.js';
 import { EventLog } from '../../src/events.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-cfg-'));
+const tmp = () => tmpHome('gifos-mcp-cfg-');
 
 test('defaults', () => {
   const c = loadConfig({ GIFOS_MCP_HOME: '/x' });

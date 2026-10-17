@@ -5,12 +5,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { weightsCache } from '../../src/voice/kokoro.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CHILD = path.join(HERE, 'fixtures', 'kokoro-child.js');
@@ -59,7 +59,7 @@ async function weightsServer(t, files, { etag } = {}) {
 }
 
 function freshHome(t) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-kokoro-cache-'));
+  const home = tmpHome('gifos-mcp-kokoro-cache-');
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   return home;
 }

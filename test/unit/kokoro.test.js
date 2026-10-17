@@ -11,7 +11,9 @@ import { MCP_TTS_APP } from '../../src/voice/settings.js';
 import { bridgeScript, HOST_BINDING, speakAsTts } from '../../src/voice/providers.js';
 import { packHostResult, serveHost } from '../../src/voice/host.js';
 
-const HOME = path.join(os.tmpdir(), 'gifos-mcp-kokoro-weights');
+// The weights (~90 MB) are kept between runs in the user's cache, not under
+// TMPDIR: a fresh TMPDIR per run would download them again into the /tmp quota.
+const HOME = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'gifos-mcp-test-kokoro');
 const LINE = 'Hello.';
 const KEY = 'sk-test-key-which-must-stay-here';
 

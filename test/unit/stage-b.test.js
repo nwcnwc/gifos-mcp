@@ -4,7 +4,6 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fork } from 'node:child_process';
@@ -16,6 +15,7 @@ import { MeetingStore } from '../../src/meetings.js';
 import { EventLog } from '../../src/events.js';
 import { WorkerPool, splitSession, workerIdentity } from '../../src/pool.js';
 import { dropLostMeetings } from '../../src/supervisor.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-worker.js', import.meta.url));
 const CREDS = { name: 'notes-stageb', password: 'bot-pass-stage-b-41' };
@@ -37,7 +37,7 @@ function makePool(extra = {}) {
 }
 
 beforeEach(() => {
-  home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-stage-b-'));
+  home = tmpHome('gifos-stage-b-');
   cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510/', GIFOS_VOICE: '0', GIFOS_MAX_MEETINGS: '4', GIFOS_CAPACITY_NEAR: '3', GIFOS_WORKERS: '2' });
 });
 
@@ -503,7 +503,7 @@ const alivePid = (pid) => { try { process.kill(pid, 0); return true; } catch (e)
 
 test('a worker still booting (Kokoro download) exits when its supervisor is killed', { timeout: 30000 }, async (t) => {
   const mirror = await stalledMirror(t);
-  const bootHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-stage-b-boot-'));
+  const bootHome = tmpHome('gifos-stage-b-boot-');
   t.after(() => fs.rmSync(bootHome, { recursive: true, force: true }));
   const PARENT = fileURLToPath(new URL('./fixtures/boot-parent.js', import.meta.url));
   const parent = fork(PARENT, [bootHome, mirror.host], { stdio: ['ignore', 'pipe', 'inherit', 'ipc'] });
@@ -523,7 +523,7 @@ test('a worker still booting (Kokoro download) exits when its supervisor is kill
 
 test('close() stops a worker still booting (Kokoro download) at once, not after closeMs', { timeout: 30000 }, async (t) => {
   const mirror = await stalledMirror(t);
-  const bootHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-stage-b-boot-'));
+  const bootHome = tmpHome('gifos-stage-b-boot-');
   t.after(() => fs.rmSync(bootHome, { recursive: true, force: true }));
   const bootCfg = loadConfig({ GIFOS_MCP_HOME: bootHome, GIFOS_VOICE: '0', GIFOS_KOKORO_URL: mirror.host });
   pool = new WorkerPool(bootCfg, CREDS, { workers: 1, rooms: 1, closeMs: 10000 });

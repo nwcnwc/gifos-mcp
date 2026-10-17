@@ -3,18 +3,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'gifos-mcp.js');
 const PORT = 19521;
 
 test('streamable HTTP on 127.0.0.1 with a bearer token', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-http-'));
+  const home = tmpHome('gifos-mcp-http-');
   const proc = spawn(process.execPath, [BIN, '--http', String(PORT)], {
     env: { ...process.env, GIFOS_MCP_HOME: home, GIFOS_MCP_LAZY: '1', GIFOS_MCP_HTTP_TOKEN: 'test-token-123', GIFOS_URL: 'https://gifos.app', GIFOS_VOICE: '0', GIFOS_LLM_URL: '', GIFOS_LLM_KEY: '', GIFOS_TTS_ENGINE: 'none' },
     stdio: ['ignore', 'ignore', 'pipe'],

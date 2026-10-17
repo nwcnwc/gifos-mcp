@@ -3,13 +3,13 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../../src/server.js';
 import { loadConfig } from '../../src/config.js';
 import { MeetingStore } from '../../src/meetings.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
 class FakeBot {
   constructor() { this.calls = []; this.lines = {}; this.seq = 0; this.started = 0; this.failJoin = ''; }
@@ -55,7 +55,7 @@ async function mint(name = 'Demo meeting') {
 }
 
 beforeEach(async () => {
-  home = fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-mcp-unit-'));
+  home = tmpHome('gifos-mcp-unit-');
   cfg = loadConfig({ GIFOS_MCP_HOME: home, GIFOS_URL: 'http://127.0.0.1:19510/' });
   meetings = new MeetingStore(home);
   bot = new FakeBot();

@@ -2,19 +2,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { ScheduleStore, parseRRule, capacityAt, DEFAULT_SPAN_MS } from '../../src/schedule.js';
 import { createClock } from '../../src/clock.js';
 import { SpeechQueue } from '../../src/voice/queue.js';
 import { serveHost } from '../../src/voice/host.js';
+import { tmpHome } from './fixtures/tmp-home.js';
 
 const ROOM = 'guest-ticket-9';
 const LINK = 'https://gifos.app/run.html#v=room123';
 const ADMIN = 'admin-must-not-land';
 
 function homeDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'gifos-sched-'));
+  return tmpHome('gifos-sched-');
 }
 
 function order(extra = {}) {

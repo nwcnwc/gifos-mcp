@@ -18,8 +18,16 @@ class FakeDriver {
   async leave(id) { this.log.push(['leave', id]); }
   async transcribe(id, on) { this.log.push(['transcribe', id, on]); }
   async say(id, text) { this.log.push(['say', id, text]); }
-  async interject(id, text) { this.log.push(['interject', id, text]); return { applied: true }; }
-  async transcript(id) { return 'Ada: hello from ' + this.boot.creds.name + ' ' + id; }
+  async interject(id, text) {
+    this.log.push(['interject', id, text]);
+    // Meet Bot captions its own speech under the name this worker sits as.
+    this.spoken = this.spoken || {};
+    (this.spoken[id] = this.spoken[id] || []).push(this.boot.creds.name + ': ' + text);
+    return { applied: true };
+  }
+  async transcript(id) {
+    return ['Ada: hello from ' + this.boot.creds.name + ' ' + id].concat((this.spoken && this.spoken[id]) || []).join('\n');
+  }
   async people() { return [{ name: 'Ada', bot: false }]; }
   async setVoice(s) { this.log.push(['setVoice', s]); return { applied: true }; }
   async list() { return Array.from({ length: this.seq }, (_, i) => ({ id: 'mt_' + (i + 1) })); }

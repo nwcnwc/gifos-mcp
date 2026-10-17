@@ -257,3 +257,27 @@ test('a join that times out and then lands late is left at once, so no seat is o
   // The seat is free for the next join.
   assert.equal(await pool.join('https://gifos.app/run.html#v=roomB', ''), 'w0:mt_2');
 });
+
+test('the bot on worker 1 sits as <name>-w1; its own speech is a spoken line, not a human one', async () => {
+  const meetings = new MeetingStore(home);
+  makePool({ rooms: 1 });
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const json = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  const one = await json('join_meeting', { link: 'https://gifos.app/run.html#v=roomOne' });
+  const two = await json('join_meeting', { link: 'https://gifos.app/run.html#v=roomTwo' });
+  assert.deepEqual([one, two].map((m) => splitSession(meetings.get(m.meeting_id).session_id).index), [0, 1]);
+  for (const m of [one, two]) {
+    assert.equal((await json('say', { meeting_id: m.meeting_id, text: 'Hello from the bot' })).spoken, true);
+    await client.callTool({ name: 'get_transcript', arguments: { meeting_id: m.meeting_id } });
+  }
+  for (const [m, name] of [[one, CREDS.name], [two, CREDS.name + '-w1']]) {
+    const rows = (await json('tail_lines', { meeting_id: m.meeting_id })).lines;
+    assert.deepEqual(rows.filter((l) => l.kind === 'speech').map((l) => l.speaker), ['Ada'], 'human lines in ' + name + "'s room");
+    assert.deepEqual(rows.filter((l) => l.kind === 'spoken').map((l) => [l.speaker, l.text]), [[name, 'Hello from the bot']]);
+  }
+  await client.close();
+});

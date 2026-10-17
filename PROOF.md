@@ -47,3 +47,29 @@ Alice: what your country can do for you, ask what you can do for your country.
 | The bot's Meeting Bot tab (RUN) | After `end_meeting` |
 |---|---|
 | ![run](docs/screenshots/bot-joined.png) | ![after](docs/screenshots/alice-after-end.png) |
+
+## Stage B: two workers, live (2026-10-17)
+
+`GIFOS_APP_DIR=../gifos-app npm run test:e2e:stage-b` with `GIFOS_WORKERS=2`, one room per worker, against
+`gifos-app` `release/0.9.23` (`546b855`) and its own Meeting Bot listing, synthetic speech apps, Node v22.23.3,
+Playwright 1.61.1.
+
+| Where the two people ran | Result |
+|---|---|
+| Local headless Chromium | 18/18 checks, 72 s |
+| Two other Linux machines (`E2E_HUMAN_WS`, ports forwarded so pages stay on 127.0.0.1) | 20/20 checks, 78 s (adds the mic-on check per person) |
+
+Both meetings start at once and land on different workers. Each person sees only that worker's bot
+(`<name>` and `<name>-w1`). Each transcript holds only its own room's person. Chat from the worker-1 bot is
+stored under `<name>-w1`, and no bot name shows up as speech. Chat shared in one room does not reach the other.
+`SIGKILL` on worker 1 drops its room to `scheduled` and the person there sees the bot leave, while worker 0's room
+stays live. `start_meeting` seats the room again on the restarted worker 1.
+
+Cost per worker (its Node process, Chromium, and every child), sampled over 5 s on a 12-core machine:
+
+| | RSS | CPU (one core = 100%) |
+|---|---|---|
+| One room, bot alone | 1.26–1.31 GB | 11–16% |
+| One room, one person talking | 1.07–1.17 GB | 9–46% |
+
+`say` is not in this run: the 0.9.23 Meeting Bot listing has no `MeetingBot.interject`, so it reports that gap.

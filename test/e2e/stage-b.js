@@ -14,9 +14,11 @@
 // drops to scheduled, worker 0 is untouched, start_meeting seats B again on
 // the restarted worker 1 -> end both, the bots leave.
 //
-// E2E_HUMAN_WS=ws://127.0.0.1:39301/,ws://127.0.0.1:39302/ runs the two
-// people in `playwright run-server` browsers on other machines (forward the
-// server port here and 19510 back there, so the page stays on 127.0.0.1).
+// E2E_HUMAN_WS=ws://127.0.0.1:39301/pw,ws://127.0.0.1:39302/pw runs the two
+// people in Chromium on other machines, started there with
+// chromium.launchServer({ port, host: '127.0.0.1', wsPath: 'pw', args }) and
+// the fake-media args below (a run-server ignores them). Forward that port
+// here and 19510 back there, so the page stays on 127.0.0.1.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -227,7 +229,8 @@ async function main() {
       const got = await waitTiles(people[i].page, (t) => t.length === 1 && /transcribing/.test(t[0]), 90000);
       seen.push(got.tiles.map((t) => t.replace(/\s+/g, ' ')));
       await people[i].page.locator('#mic').click();
-      await people[i].page.waitForSelector('#mic:not(.off)', { timeout: 15000 }).catch(() => {});
+      const micOn = await people[i].page.waitForSelector('#mic:not(.off)', { timeout: 15000 }).then(() => true, () => false);
+      check(people[i].name + ' (' + people[i].where + ') turns the microphone on', micOn);
       await people[i].page.screenshot({ path: path.join(PROOF, people[i].name.toLowerCase() + '-sees-bot.png') });
     }
     const nameIn = (tiles, n) => tiles.length === 1 && tiles[0].includes(n);

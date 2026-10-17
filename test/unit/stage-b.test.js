@@ -1273,3 +1273,52 @@ test('a clock tick whose schedule.json save fails (disk full) still seats a due 
   assert.equal(await sitting(), 0);
   await client.close();
 });
+
+test('end_meeting on a full disk (meetings.json and schedule.json saves fail) still reports the leave, announces meeting.left once, and no clock tick seats the bot again', { timeout: 15000 }, async () => {
+  const meetings = new MeetingStore(home);
+  const events = new EventLog(home);
+  const schedule = new ScheduleStore(home);
+  makePool();
+  pool.onLost(dropLostMeetings({ meetings, events }));
+  const server = createServer({ cfg, meetings, bot: pool, botName: CREDS.name, events, schedule });
+  const [ta, tb] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'unit', version: '1' });
+  await Promise.all([server.connect(ta), client.connect(tb)]);
+  const call = (name, args = {}) => client.callTool({ name, arguments: args });
+  const json = async (name, args = {}) => JSON.parse((await call(name, args)).content[0].text);
+
+  const link = (await json('create_meeting', { name: 'Full leave', admin_password: 'owner-79' })).link;
+  const now = Date.now();
+  const order = await json('schedule_meeting', { link, room_password: ROOM, start: new Date(now - 60 * 1000).toISOString(), end: new Date(now + 60 * 60 * 1000).toISOString(), topic: 'Full leave' });
+  const id = order.schedule_id || (order.order && order.order.schedule_id);
+  const m = meetings.all().find((row) => row.topic === 'Full leave');
+  await server.clock.tick(now);
+  const sitting = async () => {
+    let n = 0;
+    for (const w of pool.workers) if (w.state === 'ready') n += (await w.call('list')).length;
+    return n;
+  };
+  assert.equal(await sitting(), 1);
+
+  const full = () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); };
+  const saves = [meetings.save, schedule.save];
+  meetings.save = full;
+  schedule.save = full;
+  const res = await call('end_meeting', { meeting_id: m.meeting_id });
+  assert.ok(!res.isError, 'the bot left, so end_meeting says so: ' + res.content[0].text);
+  assert.equal(await sitting(), 0, 'the bot left the room');
+  assert.equal(meetings.get(m.meeting_id).state, 'ended');
+  assert.equal(schedule.get(id).phase, 'left_early', 'the order is left_early in memory');
+  for (let i = 1; i <= 3; i++) await server.clock.tick(now + i * 1000);
+  assert.equal(await sitting(), 0, 'no tick seats the bot again');
+  const tail = (await json('tail_events', { limit: 200 })).events;
+  assert.equal(tail.filter((e) => e.type === 'meeting.left' && e.meeting_id === m.meeting_id).length, 1, 'one meeting.left');
+
+  // Once the disk has room, the next save writes both.
+  [meetings.save, schedule.save] = saves;
+  await server.clock.tick(now + 5000);
+  assert.equal(new ScheduleStore(home).get(id).phase, 'left_early');
+  meetings.save();
+  assert.equal(new MeetingStore(home).get(m.meeting_id).state, 'ended');
+  await client.close();
+});

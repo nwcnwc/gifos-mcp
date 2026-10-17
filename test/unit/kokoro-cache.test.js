@@ -66,11 +66,18 @@ function freshHome(t) {
 
 const modelDir = (home) => path.join(home, 'kokoro', REPO);
 
+// A running child renames part files under the folder while a test polls
+// it, so a name readdir gave may be gone by the stat: skip it.
+function statOf(p) {
+  try { return fs.statSync(p); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+}
+const sizeOf = (p) => { const st = statOf(p); return st ? st.size : -1; };
+
 function filesUnder(dir) {
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir, { recursive: true })
     .map((rel) => path.join(dir, rel))
-    .filter((p) => fs.statSync(p).isFile());
+    .filter((p) => statOf(p)?.isFile());
 }
 
 async function until(fn, ms, what) {
@@ -100,11 +107,11 @@ test('a download killed halfway leaves no model file that the next start would t
   });
   const child = run(CHILD, [home, w.host]);
   t.after(() => child.proc.kill('SIGKILL'));
-  await until(() => filesUnder(modelDir(home)).some((p) => fs.statSync(p).size >= 300000), 20000, 'the partial model on disk');
+  await until(() => filesUnder(modelDir(home)).some((p) => sizeOf(p) >= 300000), 20000, 'the partial model on disk');
   child.proc.kill('SIGKILL');
   await child.done;
   assert.equal(fs.existsSync(path.join(modelDir(home), MODEL)), false,
-    'only a finished download may sit at the model path; found ' + JSON.stringify(filesUnder(modelDir(home)).map((p) => path.relative(home, p) + ' ' + fs.statSync(p).size)));
+    'only a finished download may sit at the model path; found ' + JSON.stringify(filesUnder(modelDir(home)).map((p) => path.relative(home, p) + ' ' + sizeOf(p))));
 });
 
 test('a model file that will not load is fetched again once, then the error is plain', async (t) => {
@@ -168,10 +175,10 @@ test('a start after a download was killed asks only for the bytes it does not ha
   });
   const child = run(CHILD, [home, first.host]);
   t.after(() => child.proc.kill('SIGKILL'));
-  await until(() => filesUnder(modelDir(home)).some((p) => p.endsWith('.part') && fs.statSync(p).size >= 300000), 20000, 'the partial model on disk');
+  await until(() => filesUnder(modelDir(home)).some((p) => p.endsWith('.part') && sizeOf(p) >= 300000), 20000, 'the partial model on disk');
   child.proc.kill('SIGKILL');
   await child.done;
-  const kept = filesUnder(modelDir(home)).filter((p) => p.endsWith('.part')).map((p) => fs.statSync(p).size);
+  const kept = filesUnder(modelDir(home)).filter((p) => p.endsWith('.part')).map((p) => sizeOf(p));
   // The next start (a worker restarted after its boot ran out of time).
   const second = await weightsServer(t, { 'config.json': Buffer.from(CONFIG), [MODEL]: whole });
   const again = run(CHILD, [home, second.host]);
@@ -223,7 +230,7 @@ async function killedPart(t, home, whole, partial, etag) {
   }, { etag });
   const child = run(CHILD, [home, w.host]);
   t.after(() => child.proc.kill('SIGKILL'));
-  await until(() => filesUnder(modelDir(home)).some((p) => p.endsWith('.part') && fs.statSync(p).size >= partial), 20000, 'the partial model on disk');
+  await until(() => filesUnder(modelDir(home)).some((p) => p.endsWith('.part') && sizeOf(p) >= partial), 20000, 'the partial model on disk');
   child.proc.kill('SIGKILL');
   await child.done;
 }

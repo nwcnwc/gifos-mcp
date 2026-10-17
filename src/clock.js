@@ -27,13 +27,16 @@ export function createClock(deps) {
   // not one per tick. A seated order is taken off.
   const waited = new Set();
   const orderKey = (order) => order.occurrence_id || order.schedule_id;
+  // What an order already announced holds for its window only: one moved
+  // to a new window announces again there.
+  const noteKey = (order) => orderKey(order) + '@' + order.start + '/' + order.end;
   const isNoSeat = (e) => !!(e && e.code === 'no_seat');
 
   // A failed leave keeps the room live for the next tick. It is one
   // meeting.error per order until a leave works, and never stops the tick.
   const leaveFailed = new Set();
   async function leave(order, reason) {
-    const key = orderKey(order);
+    const key = noteKey(order);
     try {
       await deps.leave(order, reason);
       leaveFailed.delete(key);
@@ -102,9 +105,9 @@ export function createClock(deps) {
   // waits for capacity and is missed for capacity if no seat frees. A live
   // or overrun order that lost its seat keeps its phase and rejoins later.
   function wait(order, reason) {
-    const key = orderKey(order);
+    const key = noteKey(order);
     const phase = order.phase;
-    if (phase === 'upcoming') deps.schedule.setPhase(key, { phase: 'waiting_for_capacity' });
+    if (phase === 'upcoming') deps.schedule.setPhase(orderKey(order), { phase: 'waiting_for_capacity' });
     if (waited.has(key) || phase === 'waiting_for_capacity') return;
     waited.add(key);
     emit('schedule.waiting', order.meeting_id, { ...briefOrder(deps.schedule.get(key) || order), reason });
@@ -182,8 +185,8 @@ export function createClock(deps) {
       if ((order.phase === 'upcoming' || order.phase === 'waiting_for_capacity') && now >= end) {
         const reason = order.phase === 'waiting_for_capacity' ? 'capacity' : 'late';
         crashCleared(order.room);
-        enterFailed.delete(orderKey(order));
-        dueSent.delete(orderKey(order));
+        enterFailed.delete(noteKey(order));
+        dueSent.delete(noteKey(order));
         deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'missed', missed_reason: reason });
         emit('schedule.missed', order.meeting_id, { ...briefOrder(order), reason });
         continue;
@@ -195,22 +198,22 @@ export function createClock(deps) {
           wait(order, full);
           continue;
         }
-        if (!dueSent.has(orderKey(order))) {
-          dueSent.add(orderKey(order));
+        if (!dueSent.has(noteKey(order))) {
+          dueSent.add(noteKey(order));
           emit('schedule.due', order.meeting_id, briefOrder(order));
         }
         try {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
-          waited.delete(orderKey(order));
-          enterFailed.delete(orderKey(order));
-          dueSent.delete(orderKey(order));
+          waited.delete(noteKey(order));
+          enterFailed.delete(noteKey(order));
+          dueSent.delete(noteKey(order));
           crashCleared(order.room);
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: 'live', meeting_id: joined.meeting_id });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
           if (isNoSeat(e)) wait(order, 'worker');
-          else joinFailed(orderKey(order), order.room, order.meeting_id, e, now);
+          else joinFailed(noteKey(order), order.room, order.meeting_id, e, now);
         }
         continue;
       }
@@ -225,14 +228,14 @@ export function createClock(deps) {
         try {
           const joined = await deps.join(order);
           if (!joined || joined.state !== 'live') continue; // ended while joining
-          waited.delete(orderKey(order));
-          enterFailed.delete(orderKey(order));
+          waited.delete(noteKey(order));
+          enterFailed.delete(noteKey(order));
           crashCleared(order.room);
           deps.schedule.setPhase(order.occurrence_id || order.schedule_id, { phase: now >= end ? 'overrun' : 'live', meeting_id: joined.meeting_id, overrun_at: now >= end ? new Date(now).toISOString() : '' });
           emit('meeting.joined', joined.meeting_id, { topic: order.topic, link: order.link, state: 'live', schedule_id: order.schedule_id });
         } catch (e) {
           if (isNoSeat(e)) wait(order, 'worker');
-          else joinFailed(orderKey(order), order.room, order.meeting_id, e, now);
+          else joinFailed(noteKey(order), order.room, order.meeting_id, e, now);
         }
       }
       const fresh = deps.schedule.get(order.occurrence_id || order.schedule_id) || order;
@@ -275,11 +278,26 @@ export function createClock(deps) {
         }
       }
     }
+    forgetDone();
     return emitCapacity(now, !booted);
+  }
+
+  // Keys of orders that are done (cancelled, ended, missed, moved) and of
+  // reseats that are over, so a long-lived clock does not keep them all.
+  const notes = [waited, leaveFailed, enterFailed, dueSent];
+  function forgetDone() {
+    const open = new Set();
+    for (const o of deps.schedule.all()) {
+      if (o.phase !== 'series' && o.phase !== 'cancelled' && o.phase !== 'ended' && o.phase !== 'missed' && o.phase !== 'left_early') open.add(noteKey(o));
+    }
+    for (const m of deps.meetings.all()) if (m.reseat && m.state === 'scheduled') open.add('m:' + m.meeting_id);
+    for (const set of notes) for (const key of [...set]) if (!open.has(key)) set.delete(key);
   }
 
   return {
     tick,
+    // How many per-order notes the clock holds (tests: nothing leaks).
+    held: () => notes.reduce((n, set) => n + set.size, 0),
     emitCapacity,
     // For joins by hand: ms until a room that crashed the bot may be tried,
     // record a new crash (returns its wait), forget it after a good join.

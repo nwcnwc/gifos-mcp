@@ -370,6 +370,8 @@ export class ScheduleStore {
       order.start = iso(start);
       order.end = iso(end);
       order.end_defaulted = endDefaulted;
+      // Its wait was for the old window; the new one has not been tried.
+      if (order.phase === 'waiting_for_capacity') order.phase = 'upcoming';
     }
     if (next.topic) order.topic = String(next.topic);
     if (next.room_password) order.room_password = String(next.room_password);

@@ -431,6 +431,7 @@ test('an order moved to a new window after its room failed or it waited for capa
   const later = (row) => ({ start: new Date(Date.parse(row.start) + day).toISOString(), end: new Date(Date.parse(row.end) + day).toISOString() });
   store.update(failing.schedule_id, null, later(failing), start);
   store.update(full.schedule_id, null, later(full), start);
+  seats = 0; // the seat is free again when the new window opens
   for (let i = 0; i < 2; i++) await clock.tick(start + day - 30 * 1000 + i * 15000);
   assert.equal(count('schedule.due', 'm_fail'), 2, 'schedule.due again in the new window');
   assert.equal(count('meeting.error', 'm_fail'), 2, 'meeting.error again in the new window');
